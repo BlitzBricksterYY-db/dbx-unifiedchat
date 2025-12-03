@@ -17,3 +17,9 @@ targets:
   # prod:
   #   workspace:
   #     host: https://adb-830292400663869.9.azuredatabricks.net
+
+sync:
+  exclude:
+    - ./.venv/**
+    - ./data/**
+    - **/__pycache__/**

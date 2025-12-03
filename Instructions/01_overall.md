@@ -45,4 +45,4 @@ Please refer to @01_Table_MetaInfo_Update.ipynb as reference code example, and b
 4. save the enriched parsed docs to a delta table in the unity catalog.
 
 
-Please test each pipeline separately before integrating them into the multi-agent system. Make sure each pipeline is working as expected. Make sure the multi-agent system is working as expected.
+Please build item 3 first, then 2, then 1. Please test each pipeline separately before integrating them into the multi-agent system. Make sure each pipeline is working as expected. Make sure the multi-agent system is working as expected.

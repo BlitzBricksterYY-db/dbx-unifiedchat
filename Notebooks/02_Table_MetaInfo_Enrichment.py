@@ -1,0 +1,472 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # Table Metadata Update and Enrichment Pipeline
+# MAGIC 
+# MAGIC This notebook enriches Genie space metadata with detailed table information:
+# MAGIC 1. Samples column values from delta tables
+# MAGIC 2. Builds value dictionaries for columns
+# MAGIC 3. Enriches parsed docs from Genie space.json exports
+# MAGIC 4. Saves enriched docs to Unity Catalog delta table
+
+# COMMAND ----------
+
+# MAGIC %pip install -U databricks-sdk
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
+import os
+import json
+import pandas as pd
+from datetime import datetime
+from pyspark.sql import functions as F
+from pyspark.sql.functions import col, collect_set, count, lit
+from typing import Dict, List, Any
+
+# COMMAND ----------
+
+# DBTITLE 1,Setup Parameters
+dbutils.widgets.removeAll()
+
+dbutils.widgets.text("catalog_name", os.getenv("CATALOG_NAME", "yyang"))
+dbutils.widgets.text("schema_name", os.getenv("SCHEMA_NAME", "multi_agent_genie"))
+dbutils.widgets.text("genie_exports_volume", os.getenv("GENIE_EXPORTS_VOLUME", "yyang.multi_agent_genie.volume"))
+dbutils.widgets.text("enriched_docs_table", os.getenv("ENRICHED_DOCS_TABLE", "yyang.multi_agent_genie.enriched_genie_docs"))
+dbutils.widgets.text("llm_endpoint", os.getenv("LLM_ENDPOINT", "databricks-claude-sonnet-4-5"))
+dbutils.widgets.text("sample_size", os.getenv("SAMPLE_SIZE", "100"))
+dbutils.widgets.text("max_unique_values", os.getenv("MAX_UNIQUE_VALUES", "50"))
+
+catalog_name = dbutils.widgets.get("catalog_name")
+schema_name = dbutils.widgets.get("schema_name")
+genie_exports_volume = dbutils.widgets.get("genie_exports_volume")
+enriched_docs_table = dbutils.widgets.get("enriched_docs_table")
+llm_endpoint = dbutils.widgets.get("llm_endpoint")
+sample_size = int(dbutils.widgets.get("sample_size"))
+max_unique_values = int(dbutils.widgets.get("max_unique_values"))
+
+print(f"Catalog: {catalog_name}")
+print(f"Schema: {schema_name}")
+print(f"Genie Exports Volume: {genie_exports_volume}")
+print(f"Enriched Docs Table: {enriched_docs_table}")
+print(f"LLM Endpoint: {llm_endpoint}")
+
+# COMMAND ----------
+
+# DBTITLE 1,Helper Functions
+
+def get_table_metadata(table_identifier: str) -> pd.DataFrame:
+    """
+    Get table metadata including columns, data types, and comments.
+    
+    Args:
+        table_identifier: Fully qualified table name (catalog.schema.table)
+    
+    Returns:
+        Pandas DataFrame with column metadata
+    """
+    try:
+        df_description = spark.sql(f"DESCRIBE EXTENDED {table_identifier}")
+        
+        # Filter out metadata rows, keep only actual columns
+        # Look for the separator line that marks the end of column definitions
+        df_clean = df_description.filter(
+            (col('data_type').isNotNull()) & 
+            (~col('col_name').startswith('#')) & 
+            (col('col_name') != '') & 
+            (col('data_type') != '') &
+            (~col('col_name').isin(
+                '# Delta Statistics Columns', 'Column Names', 'Column Selection Method', 
+                'Created Time', 'Last Access', 'Created By', 'Statistics', 'Type', 
+                'Location', 'Provider', 'Owner', 'Is_managed_location', 
+                'Predictive Optimization', 'Table Properties', 'Catalog', 'Database', 
+                'Table', '# Detailed Table Information', 'Name', 'Comment', 
+                '# Partitioning', 'Part 0', 'Partition Provider'
+            ))
+        )
+        
+        return df_clean.toPandas()
+    except Exception as e:
+        print(f"Error getting metadata for {table_identifier}: {str(e)}")
+        return pd.DataFrame(columns=['col_name', 'data_type', 'comment'])
+
+
+def sample_column_values(table_identifier: str, column_name: str, sample_size: int = 100) -> List[Any]:
+    """
+    Sample distinct values from a column.
+    
+    Args:
+        table_identifier: Fully qualified table name
+        column_name: Column to sample from
+        sample_size: Number of samples to retrieve
+    
+    Returns:
+        List of sampled values (converted to JSON-serializable types)
+    """
+    try:
+        query = f"""
+        SELECT DISTINCT `{column_name}` 
+        FROM {table_identifier} 
+        WHERE `{column_name}` IS NOT NULL 
+        LIMIT {sample_size}
+        """
+        result = spark.sql(query).collect()
+        # Convert values to JSON-serializable types
+        sampled_values = []
+        for row in result:
+            val = row[0]
+            # Convert date/datetime objects to strings
+            if hasattr(val, 'isoformat'):
+                sampled_values.append(val.isoformat())
+            else:
+                sampled_values.append(val)
+        return sampled_values
+    except Exception as e:
+        print(f"Error sampling {column_name} from {table_identifier}: {str(e)}")
+        return []
+
+
+def build_value_dictionary(table_identifier: str, column_name: str, max_values: int = 50) -> Dict[str, int]:
+    """
+    Build a value dictionary (value frequency) for a column.
+    
+    Args:
+        table_identifier: Fully qualified table name
+        column_name: Column to build dictionary for
+        max_values: Maximum number of unique values to include
+    
+    Returns:
+        Dictionary mapping values to their frequencies
+    """
+    try:
+        query = f"""
+        SELECT `{column_name}`, COUNT(*) as frequency 
+        FROM {table_identifier} 
+        WHERE `{column_name}` IS NOT NULL 
+        GROUP BY `{column_name}` 
+        ORDER BY frequency DESC 
+        LIMIT {max_values}
+        """
+        result = spark.sql(query).collect()
+        return {str(row[0]): int(row[1]) for row in result}
+    except Exception as e:
+        print(f"Error building value dictionary for {column_name} from {table_identifier}: {str(e)}")
+        return {}
+
+
+def enrich_column_metadata(columns_metadata: pd.DataFrame, table_identifier: str, 
+                          sample_size: int, max_unique_values: int,
+                          column_configs: List[Dict] = None) -> List[Dict]:
+    """
+    Enrich column metadata with sampled values and value dictionaries.
+    
+    Args:
+        columns_metadata: DataFrame with column metadata
+        table_identifier: Fully qualified table name
+        sample_size: Number of samples per column
+        max_unique_values: Maximum unique values for value dictionary
+        column_configs: Original column configurations from space.json
+    
+    Returns:
+        List of enriched column metadata dictionaries
+    """
+    enriched_columns = []
+    
+    # Create a lookup for column configs
+    config_lookup = {}
+    if column_configs:
+        for config in column_configs:
+            config_lookup[config.get('column_name')] = config
+    
+    for _, row in columns_metadata.iterrows():
+        col_name = row['col_name']
+        col_type = row['data_type']
+        col_comment = row.get('comment', '')
+        
+        # Get original config if exists
+        original_config = config_lookup.get(col_name, {})
+        
+        enriched_col = {
+            'column_name': col_name,
+            'data_type': col_type,
+            'comment': col_comment,
+            'original_config': original_config
+        }
+        
+        # Only sample and build dictionaries if not excluded
+        if not original_config.get('exclude', False):
+            # Sample values if requested or by default
+            if original_config.get('get_example_values', True):
+                sampled_values = sample_column_values(table_identifier, col_name, sample_size)
+                enriched_col['sample_values'] = sampled_values
+            
+            # Build value dictionary if requested
+            if original_config.get('build_value_dictionary', False):
+                value_dict = build_value_dictionary(table_identifier, col_name, max_unique_values)
+                enriched_col['value_dictionary'] = value_dict
+        
+        enriched_columns.append(enriched_col)
+    
+    return enriched_columns
+
+
+def enhance_comments_with_llm(columns: List[Dict], llm_endpoint: str) -> List[Dict]:
+    """
+    Use LLM to enhance column comments with better descriptions.
+    
+    Args:
+        columns: List of column dictionaries
+        llm_endpoint: LLM endpoint name
+    
+    Returns:
+        List of columns with enhanced comments
+    """
+    # Helper to serialize dates and other objects
+    def safe_json_default(obj):
+        if hasattr(obj, 'isoformat'):
+            return obj.isoformat()
+        return str(obj)
+    
+    # Prepare simplified version for LLM
+    simplified_cols = []
+    for col in columns:
+        simplified_cols.append({
+            'col_name': col['column_name'],
+            'data_type': col['data_type'],
+            'comment': col.get('comment', ''),
+            'sample_values': col.get('sample_values', [])[:10] if 'sample_values' in col else []
+        })
+    
+    prompt = (
+        "You will receive a list of database columns in JSON format. "
+        "Your task is to improve the 'comment' field for each column by:\n"
+        "1. Making it more descriptive and informative\n"
+        "2. Using the data_type and sample_values as context\n"
+        "3. Explaining what the column represents in plain English\n\n"
+        f"{json.dumps(simplified_cols, indent=2, default=safe_json_default)}\n\n"
+        "Return a JSON array with the same structure, but add an 'enhanced_comment' field "
+        "with your improved description. Only return valid JSON, no explanations."
+    )
+    
+    try:
+        llm_result = spark.sql(
+            f"SELECT ai_query('{llm_endpoint}', ?) as result", 
+            [prompt]
+        ).collect()[0]['result']
+        
+        # Clean up response
+        llm_result_str = llm_result.replace('```json', '').replace('```', '').strip()
+        enhanced_cols = json.loads(llm_result_str)
+        
+        # Merge enhanced comments back
+        for i, col in enumerate(columns):
+            if i < len(enhanced_cols) and 'enhanced_comment' in enhanced_cols[i]:
+                col['enhanced_comment'] = enhanced_cols[i]['enhanced_comment']
+        
+        return columns
+    except Exception as e:
+        print(f"Error enhancing comments with LLM: {str(e)}")
+        return columns
+
+
+# COMMAND ----------
+
+# DBTITLE 1,Load and Process Genie Space Exports
+
+def process_genie_space(space_json_path: str, enriched_docs_table: str) -> Dict[str, Any]:
+    """
+    Process a single Genie space export and enrich it with table metadata.
+    
+    Args:
+        space_json_path: Path to the space.json file
+        enriched_docs_table: Target table for enriched docs
+    
+    Returns:
+        Enriched space document as dictionary
+    """
+    print(f"\n{'='*80}")
+    print(f"Processing: {space_json_path}")
+    print(f"{'='*80}")
+    
+    # Load space.json
+    with open(space_json_path, 'r', encoding='utf-8') as f:
+        space_data = json.load(f)
+    
+    space_id = space_data.get('space_id')
+    space_title = space_data.get('title')
+    
+    print(f"Space ID: {space_id}")
+    print(f"Space Title: {space_title}")
+    
+    # Parse serialized_space if available
+    serialized_space = None
+    if 'serialized_space' in space_data:
+        try:
+            serialized_space = json.loads(space_data['serialized_space'])
+        except json.JSONDecodeError:
+            print("Warning: Could not parse serialized_space")
+    
+    # Enrich table metadata
+    enriched_tables = []
+    
+    if serialized_space and 'data_sources' in serialized_space:
+        tables = serialized_space.get('data_sources', {}).get('tables', [])
+        
+        for table_config in tables:
+            table_identifier = table_config.get('identifier')
+            column_configs = table_config.get('column_configs', [])
+            
+            print(f"\nEnriching table: {table_identifier}")
+            
+            # Get base table metadata
+            table_metadata = get_table_metadata(table_identifier)
+            
+            if not table_metadata.empty:
+                # Enrich with samples and value dictionaries
+                enriched_columns = enrich_column_metadata(
+                    table_metadata, 
+                    table_identifier, 
+                    sample_size, 
+                    max_unique_values,
+                    column_configs
+                )
+                
+                # Enhance comments with LLM
+                enriched_columns = enhance_comments_with_llm(enriched_columns, llm_endpoint)
+                
+                enriched_table = {
+                    'table_identifier': table_identifier,
+                    'original_config': table_config,
+                    'enriched_columns': enriched_columns,
+                    'total_columns': len(enriched_columns)
+                }
+                
+                enriched_tables.append(enriched_table)
+                print(f"  ✓ Enriched {len(enriched_columns)} columns")
+            else:
+                print(f"  ✗ Could not get metadata for {table_identifier}")
+    
+    # Build final enriched document
+    enriched_doc = {
+        'space_id': space_id,
+        'space_title': space_title,
+        'space_description': space_data.get('description', ''),
+        'warehouse_id': space_data.get('warehouse_id', ''),
+        'original_space_data': space_data,
+        'serialized_space': serialized_space,
+        'enriched_tables': enriched_tables,
+        'enrichment_timestamp': datetime.now().isoformat(),
+        'source_file': space_json_path
+    }
+    
+    return enriched_doc
+
+
+# COMMAND ----------
+
+# DBTITLE 1,Process All Genie Spaces
+
+# Get all space.json files from the volume
+genie_exports_path = f"/Volumes/{genie_exports_volume.replace('.', '/')}/genie_exports"
+print(f"Looking for Genie exports in: {genie_exports_path}")
+
+import glob
+space_files = glob.glob(f"{genie_exports_path}/*.space.json")
+print(f"Found {len(space_files)} Genie space files")
+
+# Process each space
+all_enriched_docs = []
+
+for space_file in space_files:
+    try:
+        enriched_doc = process_genie_space(space_file, enriched_docs_table)
+        all_enriched_docs.append(enriched_doc)
+    except Exception as e:
+        print(f"Error processing {space_file}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+print(f"\n{'='*80}")
+print(f"Successfully enriched {len(all_enriched_docs)} Genie spaces")
+print(f"{'='*80}")
+
+# COMMAND ----------
+
+# DBTITLE 1,Save Enriched Docs to Unity Catalog
+
+# Helper function to safely serialize objects
+def json_serializer(obj):
+    """Convert non-serializable objects to strings"""
+    # Handle PySpark Column objects
+    if hasattr(obj, '__class__') and 'pyspark' in str(type(obj)):
+        return str(obj)
+    # Handle datetime/date objects
+    if hasattr(obj, 'isoformat') and callable(getattr(obj, 'isoformat', None)):
+        return obj.isoformat()
+    return str(obj)
+
+# Convert to Spark DataFrame
+enriched_docs_json = [json.dumps(doc, default=json_serializer) for doc in all_enriched_docs]
+
+df_enriched = spark.createDataFrame(
+    [(i, doc_json, doc['space_id'], doc['space_title']) 
+     for i, (doc_json, doc) in enumerate(zip(enriched_docs_json, all_enriched_docs))],
+    schema="id INT, enriched_doc STRING, space_id STRING, space_title STRING"
+)
+
+# Save to Delta table
+df_enriched.write.mode("overwrite").saveAsTable(enriched_docs_table)
+
+print(f"\n✓ Saved enriched docs to: {enriched_docs_table}")
+print(f"  Total records: {df_enriched.count()}")
+
+# Display sample
+display(spark.table(enriched_docs_table))
+
+# COMMAND ----------
+
+# DBTITLE 1,Create Flattened View for Vector Search
+
+# Create a flattened view that's easier to use for vector search
+flattened_view_name = f"{enriched_docs_table}_flattened"
+
+# Extract key information into a searchable text format
+df_flat = spark.table(enriched_docs_table).selectExpr(
+    "id",
+    "space_id",
+    "space_title",
+    "enriched_doc"
+)
+
+# Create a rich text representation for vector search
+df_flat = df_flat.selectExpr(
+    "id",
+    "space_id",
+    "space_title",
+    """
+    CONCAT(
+        'Space: ', space_title, '\\n',
+        'Content: ', enriched_doc
+    ) as searchable_content
+    """
+)
+
+df_flat.write.mode("overwrite").saveAsTable(flattened_view_name)
+
+print(f"\n✓ Created flattened view: {flattened_view_name}")
+display(spark.table(flattened_view_name).limit(5))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Summary
+# MAGIC 
+# MAGIC This notebook has:
+# MAGIC 1. ✓ Sampled column values from all Genie space tables
+# MAGIC 2. ✓ Built value dictionaries for configured columns
+# MAGIC 3. ✓ Enhanced column descriptions using LLM
+# MAGIC 4. ✓ Enriched Genie space.json exports with table metadata
+# MAGIC 5. ✓ Saved enriched docs to Unity Catalog delta table
+# MAGIC 6. ✓ Created flattened view for vector search
+# MAGIC 
+# MAGIC Next: Use these enriched docs to build vector search index (02_VS_generation.py)
+
