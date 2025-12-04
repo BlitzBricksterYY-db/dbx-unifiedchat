@@ -424,36 +424,253 @@ display(spark.table(enriched_docs_table))
 
 # COMMAND ----------
 
-# DBTITLE 1,Create Flattened View for Vector Search
+# DBTITLE 1,Create Multi-Level Chunks for Vector Search
 
-# Create a flattened view that's easier to use for vector search
-flattened_view_name = f"{enriched_docs_table}_flattened"
-
-# Extract key information into a searchable text format
-df_flat = spark.table(enriched_docs_table).selectExpr(
-    "id",
-    "space_id",
-    "space_title",
-    "enriched_doc"
-)
-
-# Create a rich text representation for vector search
-df_flat = df_flat.selectExpr(
-    "id",
-    "space_id",
-    "space_title",
+def create_multi_level_chunks(enriched_docs: List[Dict]) -> List[Dict]:
     """
-    CONCAT(
-        'Space: ', space_title, '\\n',
-        'Content: ', enriched_doc
-    ) as searchable_content
+    Create multi-level chunks following the Hybrid Multi-Level Chunking strategy.
+    
+    Returns:
+        List of chunk dictionaries with metadata for vector search
     """
-)
+    all_chunks = []
+    chunk_id = 0
+    
+    for doc in enriched_docs:
+        space_id = doc.get('space_id')
+        space_title = doc.get('space_title')
+        space_description = doc.get('space_description', '')
+        enriched_tables = doc.get('enriched_tables', [])
+        
+        # ===================================================================
+        # Level 1: Space Summary Chunk
+        # ===================================================================
+        # Create overview of all tables in the space
+        table_summaries = []
+        for table in enriched_tables:
+            table_id = table.get('table_identifier', '')
+            columns = table.get('enriched_columns', [])
+            col_count = len(columns)
+            
+            # Get key column types
+            categorical_cols = [c['column_name'] for c in columns if 'value_dictionary' in c]
+            temporal_cols = [c['column_name'] for c in columns if any(t in c.get('data_type', '').lower() for t in ['date', 'time', 'timestamp'])]
+            id_cols = [c['column_name'] for c in columns if any(k in c['column_name'].lower() for k in ['_id', 'id_'])]
+            
+            table_summary = f"• {table_id} ({col_count} columns)"
+            if categorical_cols:
+                table_summary += f"\n  - Categorical fields: {', '.join(categorical_cols[:5])}"
+            if temporal_cols:
+                table_summary += f"\n  - Temporal fields: {', '.join(temporal_cols[:3])}"
+            if id_cols:
+                table_summary += f"\n  - Identifier fields: {', '.join(id_cols[:3])}"
+            
+            table_summaries.append(table_summary)
+        
+        space_summary_text = f"""Space: {space_title}
+Space ID: {space_id}
 
-df_flat.write.mode("overwrite").saveAsTable(flattened_view_name)
+Description: {space_description}
 
-print(f"\n✓ Created flattened view: {flattened_view_name}")
-display(spark.table(flattened_view_name).limit(5))
+Available Tables ({len(enriched_tables)} total):
+{chr(10).join(table_summaries)}
+
+Purpose: This Genie space provides access to structured data across {len(enriched_tables)} tables for analytical queries and reporting."""
+        
+        all_chunks.append({
+            'chunk_id': chunk_id,
+            'chunk_type': 'space_summary',
+            'space_id': space_id,
+            'space_title': space_title,
+            'table_name': None,
+            'column_name': None,
+            'searchable_content': space_summary_text,
+            'is_categorical': False,
+            'is_temporal': False,
+            'is_identifier': False,
+            'has_value_dictionary': False,
+            'metadata_json': json.dumps({
+                'total_tables': len(enriched_tables),
+                'space_description': space_description
+            }, default=json_serializer)
+        })
+        chunk_id += 1
+        
+        # ===================================================================
+        # Level 2: Table Overview Chunks (one per table)
+        # ===================================================================
+        for table in enriched_tables:
+            table_id = table.get('table_identifier', '')
+            table_name = table_id.split('.')[-1] if '.' in table_id else table_id
+            columns = table.get('enriched_columns', [])
+            
+            # Build column list with brief descriptions
+            column_lines = []
+            categorical_fields = []
+            
+            for col in columns:
+                col_name = col.get('column_name')
+                col_type = col.get('data_type')
+                enhanced_comment = col.get('enhanced_comment', col.get('comment', ''))
+                
+                # Truncate long descriptions for overview
+                if len(enhanced_comment) > 100:
+                    enhanced_comment = enhanced_comment[:97] + "..."
+                
+                column_lines.append(f"• {col_name} ({col_type}): {enhanced_comment}")
+                
+                # Track categorical fields with top values
+                if 'value_dictionary' in col and col['value_dictionary']:
+                    top_values = list(col['value_dictionary'].keys())[:3]
+                    categorical_fields.append(f"• {col_name}: {', '.join(top_values)}")
+            
+            table_overview_text = f"""Table: {table_name}
+Full Path: {table_id}
+Space: {space_title}
+
+Columns ({len(columns)} total):
+{chr(10).join(column_lines)}
+"""
+            
+            if categorical_fields:
+                table_overview_text += f"""
+Key Categorical Fields:
+{chr(10).join(categorical_fields)}
+"""
+            
+            all_chunks.append({
+                'chunk_id': chunk_id,
+                'chunk_type': 'table_overview',
+                'space_id': space_id,
+                'space_title': space_title,
+                'table_name': table_name,
+                'column_name': None,
+                'searchable_content': table_overview_text,
+                'is_categorical': any('value_dictionary' in c for c in columns),
+                'is_temporal': any(any(t in c.get('data_type', '').lower() for t in ['date', 'time', 'timestamp']) for c in columns),
+                'is_identifier': any(any(k in c['column_name'].lower() for k in ['_id', 'id_']) for c in columns),
+                'has_value_dictionary': any('value_dictionary' in c for c in columns),
+                'metadata_json': json.dumps({
+                    'table_identifier': table_id,
+                    'total_columns': len(columns)
+                }, default=json_serializer)
+            })
+            chunk_id += 1
+            
+            # ===================================================================
+            # Level 3: Column Detail Chunks (one per column)
+            # ===================================================================
+            for col in columns:
+                col_name = col.get('column_name')
+                col_type = col.get('data_type')
+                enhanced_comment = col.get('enhanced_comment', col.get('comment', ''))
+                sample_values = col.get('sample_values', [])
+                value_dict = col.get('value_dictionary', {})
+                
+                # Determine column characteristics
+                is_categorical = len(value_dict) > 0
+                is_temporal = any(t in col_type.lower() for t in ['date', 'time', 'timestamp'])
+                is_identifier = any(k in col_name.lower() for k in ['_id', 'id_'])
+                has_value_dictionary = len(value_dict) > 0
+                
+                # Build column detail text
+                column_detail_text = f"""Column: {col_name}
+Table: {table_name}
+Full Table Path: {table_id}
+Space: {space_title}
+Data Type: {col_type}
+
+Description: {enhanced_comment}
+"""
+                
+                # Add sample values (limited to 5 for readability)
+                if sample_values:
+                    limited_samples = sample_values[:5]
+                    column_detail_text += f"""
+Sample Values: {', '.join([str(v) for v in limited_samples])}
+"""
+                
+                # Add top values from value dictionary
+                if value_dict:
+                    top_entries = sorted(value_dict.items(), key=lambda x: x[1], reverse=True)[:10]
+                    value_lines = [f"  - {val}: {count:,} records" for val, count in top_entries]
+                    column_detail_text += f"""
+Top Values:
+{chr(10).join(value_lines)}
+"""
+                
+                # Add classification info
+                characteristics = []
+                if is_categorical:
+                    characteristics.append("categorical")
+                if is_temporal:
+                    characteristics.append("temporal")
+                if is_identifier:
+                    characteristics.append("identifier")
+                
+                if characteristics:
+                    column_detail_text += f"""
+Classification: {', '.join(characteristics)}
+"""
+                
+                all_chunks.append({
+                    'chunk_id': chunk_id,
+                    'chunk_type': 'column_detail',
+                    'space_id': space_id,
+                    'space_title': space_title,
+                    'table_name': table_name,
+                    'column_name': col_name,
+                    'searchable_content': column_detail_text,
+                    'is_categorical': is_categorical,
+                    'is_temporal': is_temporal,
+                    'is_identifier': is_identifier,
+                    'has_value_dictionary': has_value_dictionary,
+                    'metadata_json': json.dumps({
+                        'data_type': col_type,
+                        'sample_values': sample_values[:5],
+                        'value_dictionary_size': len(value_dict)
+                    }, default=json_serializer)
+                })
+                chunk_id += 1
+    
+    return all_chunks
+
+
+# Create multi-level chunks
+print(f"\n{'='*80}")
+print("Creating Multi-Level Chunks for Vector Search")
+print(f"{'='*80}")
+
+all_chunks = create_multi_level_chunks(all_enriched_docs)
+
+print(f"\n✓ Created {len(all_chunks)} total chunks:")
+chunk_type_counts = {}
+for chunk in all_chunks:
+    chunk_type = chunk['chunk_type']
+    chunk_type_counts[chunk_type] = chunk_type_counts.get(chunk_type, 0) + 1
+
+for chunk_type, count in chunk_type_counts.items():
+    print(f"  - {chunk_type}: {count} chunks")
+
+# Convert to Spark DataFrame
+df_chunks = spark.createDataFrame(all_chunks)
+
+# Save to Delta table
+chunks_table_name = f"{enriched_docs_table}_chunks"
+df_chunks.write.mode("overwrite").saveAsTable(chunks_table_name)
+
+print(f"\n✓ Saved chunks to: {chunks_table_name}")
+print(f"  Total records: {df_chunks.count()}")
+
+# Display samples of each chunk type
+print("\n" + "="*80)
+print("Sample Chunks by Type")
+print("="*80)
+
+for chunk_type in ['space_summary', 'table_overview', 'column_detail']:
+    print(f"\n{chunk_type.upper()}:")
+    sample = spark.table(chunks_table_name).filter(f"chunk_type = '{chunk_type}'").limit(1)
+    display(sample.select('chunk_id', 'chunk_type', 'space_title', 'table_name', 'column_name', 'searchable_content'))
 
 # COMMAND ----------
 
@@ -466,7 +683,15 @@ display(spark.table(flattened_view_name).limit(5))
 # MAGIC 3. ✓ Enhanced column descriptions using LLM
 # MAGIC 4. ✓ Enriched Genie space.json exports with table metadata
 # MAGIC 5. ✓ Saved enriched docs to Unity Catalog delta table
-# MAGIC 6. ✓ Created flattened view for vector search
+# MAGIC 6. ✓ Created multi-level chunks using Hybrid Multi-Level Chunking Strategy:
+# MAGIC    - **Level 1**: Space Summary Chunks (overview of all tables in a space)
+# MAGIC    - **Level 2**: Table Overview Chunks (column list and summaries per table)
+# MAGIC    - **Level 3**: Column Detail Chunks (full descriptions, samples, value dictionaries)
+# MAGIC 7. ✓ Added metadata fields for filtered retrieval (chunk_type, is_categorical, is_temporal, etc.)
 # MAGIC 
-# MAGIC Next: Use these enriched docs to build vector search index (02_VS_generation.py)
+# MAGIC **Key Outputs:**
+# MAGIC - Enriched Docs Table: `{enriched_docs_table}`
+# MAGIC - Multi-Level Chunks Table: `{enriched_docs_table}_chunks`
+# MAGIC 
+# MAGIC Next: Use these chunks to build vector search index (04_VS_Enriched_Genie_Spaces.py)
 
