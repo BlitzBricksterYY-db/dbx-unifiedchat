@@ -114,11 +114,8 @@ class ThinkingPlanningAgent:
         self.name = "ThinkingPlanning"
     
     def _search_relevant_spaces(self, query: str, num_results: int = 5) -> List[Dict]:
-        """Search for relevant Genie spaces using vector search Python SDK."""
-        from databricks.vector_search.client import VectorSearchClient
-        
-        # Initialize Vector Search client
-        client = VectorSearchClient()
+        """Search for relevant Genie spaces using AI Bridge VectorSearchRetrieverTool."""
+        from databricks_langchain import VectorSearchRetrieverTool
         
         # Extract index name from function name
         parts = self.vector_search_function.split('.')
@@ -126,31 +123,27 @@ class ThinkingPlanningAgent:
         schema = parts[1]
         index_name = f"{catalog}.{schema}.enriched_genie_docs_chunks_vs_index"
         
-        # Get the index
-        vs_index = client.get_index(index_name=index_name)
-        
-        # Search with filters for space_summary chunks
-        results = vs_index.similarity_search(
-            query_text=query,
-            columns=["space_id", "space_title", "score"],
+        # Create VectorSearchRetrieverTool with filter for space_summary chunks
+        vs_tool = VectorSearchRetrieverTool(
+            index_name=index_name,
+            num_results=num_results,
             filters={"chunk_type": "space_summary"},
-            num_results=num_results
+            query_type="ANN",
         )
         
-        # Extract result data
-        result_data = results.get('result', {})
-        manifest = result_data.get('manifest', {})
-        data_array = result_data.get('data_array', [])
+        # Invoke the tool to get results
+        docs = vs_tool.invoke({"query": query})
         
-        # Get column names from manifest
-        column_names = [col.get('name') if isinstance(col, dict) else str(col) 
-                       for col in manifest.get('columns', [])]
+        # Extract space information from document metadata
+        relevant_spaces = []
+        for doc in docs:
+            relevant_spaces.append({
+                "space_id": doc.metadata.get("space_id", ""),
+                "space_title": doc.metadata.get("space_title", ""),
+                "score": doc.metadata.get("score", 0.0)
+            })
         
-        # Convert to list of dictionaries
-        if len(data_array) > 0 and len(column_names) > 0:
-            return [dict(zip(column_names, row)) for row in data_array]
-        else:
-            return []
+        return relevant_spaces
     
     def analyze_query(self, query: str) -> QueryPlan:
         """

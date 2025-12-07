@@ -12,7 +12,6 @@ These functions can be registered in Unity Catalog and called by the LangGraph s
 import json
 from typing import Dict, List, Optional, Any
 from databricks.sdk.runtime import spark
-from databricks.vector_search.client import VectorSearchClient
 
 
 ########################################
@@ -88,30 +87,30 @@ def analyze_query_plan(
             "clarification_options": clarity_result.get("clarification_options", [])
         })
     
-    # Step 2: Search for relevant Genie spaces
-    client = VectorSearchClient()
-    vs_index = client.get_index(index_name=vector_search_index)
+    # Step 2: Search for relevant Genie spaces using AI Bridge VectorSearchRetrieverTool
+    from databricks_langchain import VectorSearchRetrieverTool
     
-    results = vs_index.similarity_search(
-        query_text=query,
-        columns=["space_id", "space_title", "score"],
+    # Create VectorSearchRetrieverTool with filter for space_summary chunks
+    vs_tool = VectorSearchRetrieverTool(
+        index_name=vector_search_index,
+        num_results=num_results,
         filters={"chunk_type": "space_summary"},
-        num_results=num_results
+        query_type="ANN",
     )
     
-    # Extract result data
-    result_data = results.get('result', {})
-    manifest = result_data.get('manifest', {})
-    data_array = result_data.get('data_array', [])
+    # Invoke the tool to get results
+    docs = vs_tool.invoke({"query": query})
     
-    # Get column names from manifest
-    column_names = [col.get('name') if isinstance(col, dict) else str(col) 
-                   for col in manifest.get('columns', [])]
+    # Extract space information from document metadata
+    relevant_spaces = []
+    for doc in docs:
+        relevant_spaces.append({
+            "space_id": doc.metadata.get("space_id", ""),
+            "space_title": doc.metadata.get("space_title", ""),
+            "score": doc.metadata.get("score", 0.0)
+        })
     
-    # Convert to list of dictionaries
-    if len(data_array) > 0 and len(column_names) > 0:
-        relevant_spaces = [dict(zip(column_names, row)) for row in data_array]
-    else:
+    if not relevant_spaces:
         relevant_spaces = []
     
     # Step 3: Create execution plan
