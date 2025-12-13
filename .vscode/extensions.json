@@ -1,5 +1,6 @@
 {
     "recommendations": [
-        "paiqo.databricks-vscode"
+        "paiqo.databricks-vscode",
+        "alefragnani.bookmarks"
     ]
 }
