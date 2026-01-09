@@ -1787,49 +1787,16 @@ for tool in tools:
 
 # COMMAND ----------
 
-genie_agents
-
-# COMMAND ----------
-
-genie_agent_tools
-
-# COMMAND ----------
-
-import time
-
-# Freeze execution for 4 hours (4 * 60 * 60 seconds)
-time.sleep(4 * 60 * 60)
-
-# COMMAND ----------
-
-#  - 01f0956a387714969edde65458dcc22a:Genie_HealthVerityClaims
-#   - 01f0956a4b0512e2a8aa325ffbac821b:Genie_HealthVerityProcedureDiagnosis
-#   - 01f0956a54af123e9cd23907e8167df9:Genie_HealthVerityProviderEnrollment
-
-# COMMAND ----------
-
-query = """What is the average cost of medical claims for patients diagnosed with diabetes, broken down by insurance payer type and patient age group? Use age group of this: 0-17
-18-34
-35-49
-50-64
-65+""" # use this full complete query to test the agent if can still return meaningful result. however, even that, hard to control what is expected to return.
-print(query)
-
-# COMMAND ----------
-
-tools
-
-# COMMAND ----------
-
-print(plan_result)
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC ## (Optional) SQL Query Validation Agent
 # MAGIC
 # MAGIC ### Validation Plan:
 # MAGIC Validate the SQL is executable by checking the fields are all there in the tables before calling SQL Execuation Tool.
+# MAGIC
+# MAGIC ### Skip Plan:
+# MAGIC 1. However, the validation agent will again use the UC functions of SQL tools to verify the table/column names and joins in the synthesized SQL are legit, which will be time consuming.
+# MAGIC
+# MAGIC 2. **An efficient alternative** is to directly call the execution tool return msg to super agent and super agent decide next step.
 # MAGIC
 
 # COMMAND ----------
