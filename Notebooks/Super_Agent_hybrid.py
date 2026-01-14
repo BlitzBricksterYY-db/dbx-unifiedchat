@@ -1,0 +1,1443 @@
+# Databricks notebook source
+# DBTITLE 1,Install Packages
+# MAGIC %pip install databricks-langchain databricks-vectorsearch langgraph
+
+# COMMAND ----------
+
+# MAGIC %restart_python
+
+# COMMAND ----------
+
+"""
+Super Agent (Hybrid Architecture) - Multi-Agent System Orchestrator
+
+This notebook implements a hybrid architecture combining:
+- OOP agent classes (from agent.py) for modularity and reusability
+- Explicit state management (from Super_Agent.py) for observability and debugging
+
+Architecture Benefits:
+1. ✅ OOP modularity for agent logic - Easy to test and maintain
+2. ✅ Explicit state for observability - Clear debugging and monitoring
+3. ✅ Best practices from both approaches
+4. ✅ Production-ready with rapid development capabilities
+
+Components:
+1. Clarification Agent - Validates query clarity (OOP class)
+2. Planning Agent - Creates execution plan and identifies relevant spaces (OOP class)
+3. SQL Synthesis Agent (Fast Route) - Generates SQL using UC tools (OOP class)
+4. SQL Synthesis Agent (Slow Route) - Generates SQL using Genie agents (OOP class)
+5. SQL Execution Agent - Executes SQL and returns results (OOP class)
+
+The Super Agent uses LangGraph with explicit state tracking for orchestration.
+"""
+
+import json
+from typing import Dict, List, Optional, Any, Annotated, Literal, Generator
+from typing_extensions import TypedDict
+import operator
+from uuid import uuid4
+import re
+
+# COMMAND ----------
+
+# DBTITLE 1,Configuration
+# Configuration
+CATALOG = "yyang"
+SCHEMA = "multi_agent_genie"
+TABLE_NAME = f"{CATALOG}.{SCHEMA}.enriched_genie_docs_chunks"
+VECTOR_SEARCH_INDEX = f"{CATALOG}.{SCHEMA}.enriched_genie_docs_chunks_vs_index"
+LLM_ENDPOINT_CLARIFICATION = "databricks-claude-haiku-4-5"
+LLM_ENDPOINT_PLANNING = "databricks-claude-haiku-4-5"
+LLM_ENDPOINT_SQL_SYNTHESIS = "databricks-claude-sonnet-4-5"  # More powerful for SQL synthesis
+
+print("="*80)
+print("SUPER AGENT (HYBRID) CONFIGURATION")
+print("="*80)
+print(f"Catalog: {CATALOG}")
+print(f"Schema: {SCHEMA}")
+print(f"Table: {TABLE_NAME}")
+print(f"Vector Search Index: {VECTOR_SEARCH_INDEX}")
+print("="*80)
+
+# COMMAND ----------
+
+# DBTITLE 1,Import Dependencies
+from databricks_langchain import (
+    ChatDatabricks,
+    VectorSearchRetrieverTool,
+    DatabricksFunctionClient,
+    UCFunctionToolkit,
+    set_uc_function_client,
+)
+from databricks_langchain.genie import GenieAgent
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import Runnable, RunnableLambda
+import mlflow
+
+# LangGraph imports
+from langgraph.graph import StateGraph, END
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.checkpoint.memory import MemorySaver
+
+# MLflow ResponsesAgent imports
+from mlflow.pyfunc import ResponsesAgent
+from mlflow.types.responses import (
+    ResponsesAgentRequest,
+    ResponsesAgentResponse,
+    ResponsesAgentStreamEvent,
+    output_to_responses_items_stream,
+    to_chat_completions_input,
+)
+
+print("✓ All dependencies imported successfully")
+
+# COMMAND ----------
+
+# DBTITLE 1,Helper Function - Query Delta Table
+def query_delta_table(table_name: str, filter_field: str, filter_value: str, select_fields: List[str] = None) -> Any:
+    """
+    Query a delta table with a filter condition.
+    
+    Args:
+        table_name: Full table name (catalog.schema.table)
+        filter_field: Field name to filter on
+        filter_value: Value to filter by
+        select_fields: List of fields to select (None = all fields)
+    
+    Returns:
+        Spark DataFrame with query results
+    """
+    if select_fields:
+        fields_str = ", ".join(select_fields)
+    else:
+        fields_str = "*"
+    
+    df = spark.sql(f"""
+        SELECT {fields_str}
+        FROM {table_name}
+        WHERE {filter_field} = '{filter_value}'
+    """)
+    
+    return df
+
+# Load space summaries for context
+space_summary_df = query_delta_table(
+    table_name=TABLE_NAME,
+    filter_field="chunk_type",
+    filter_value="space_summary",
+    select_fields=["space_id", "space_title", "searchable_content"]
+)
+
+# Convert to context dictionary
+space_summary_list = space_summary_df.collect()
+context = {}
+for row in space_summary_list:
+    space_id = row["space_id"]
+    context[space_id] = row["searchable_content"]
+
+print(f"✓ Loaded {len(context)} Genie spaces for context")
+
+# COMMAND ----------
+
+# DBTITLE 1,Define Agent State (Explicit State Management)
+class AgentState(TypedDict):
+    """
+    Explicit state that flows through the multi-agent system.
+    This provides full observability and makes debugging easier.
+    """
+    # Input
+    original_query: str
+    
+    # Clarification
+    question_clear: bool
+    clarification_needed: Optional[str]
+    clarification_options: Optional[List[str]]
+    
+    # Planning
+    sub_questions: Optional[List[str]]
+    requires_multiple_spaces: Optional[bool]
+    relevant_space_ids: Optional[List[str]]
+    relevant_spaces: Optional[List[Dict[str, Any]]]
+    vector_search_relevant_spaces_info: Optional[List[Dict[str, str]]]
+    requires_join: Optional[bool]
+    join_strategy: Optional[str]  # "fast_route" or "slow_route"
+    execution_plan: Optional[str]
+    genie_route_plan: Optional[Dict[str, str]]
+    
+    # SQL Synthesis
+    sql_query: Optional[str]
+    synthesis_error: Optional[str]
+    
+    # Execution
+    execution_result: Optional[Dict[str, Any]]
+    execution_error: Optional[str]
+    
+    # Control flow
+    next_agent: Optional[str]
+    messages: Annotated[List, operator.add]
+    
+print("✓ Agent State defined with explicit fields for observability")
+
+# COMMAND ----------
+
+# DBTITLE 1,Agent Class 1: Clarification Agent (OOP)
+class ClarificationAgent:
+    """
+    Agent responsible for checking query clarity.
+    
+    OOP design for modularity and reusability.
+    """
+    
+    def __init__(self, llm: Runnable, context: Dict[str, str]):
+        self.llm = llm
+        self.context = context
+        self.name = "Clarification"
+    
+    def check_clarity(self, query: str) -> Dict[str, Any]:
+        """
+        Check if the user query is clear and answerable.
+        
+        Args:
+            query: User's question
+            
+        Returns:
+            Dictionary with clarity analysis
+        """
+        clarity_prompt = f"""
+Analyze the following question for clarity and specificity based on the context.
+
+Question: {query}
+
+Context: {json.dumps(self.context, indent=2)}
+
+Determine if:
+1. The question is clear and answerable as-is
+2. The question needs clarification
+
+If clarification is needed, provide:
+- A brief explanation of what's unclear
+- 2-3 specific clarification options the user can choose from
+
+Return your analysis as JSON:
+{{
+    "question_clear": true/false,
+    "clarification_needed": "explanation if unclear",
+    "clarification_options": ["option 1", "option 2", "option 3"]
+}}
+
+Only return valid JSON, no explanations.
+"""
+        
+        response = self.llm.invoke(clarity_prompt)
+        json_str = response.content.strip('```json').strip('```')
+        
+        try:
+            clarity_result = json.loads(json_str)
+            return clarity_result
+        except json.JSONDecodeError as e:
+            print(f"⚠ JSON parsing error: {e}, defaulting to clear")
+            return {"question_clear": True}
+    
+    def __call__(self, query: str) -> Dict[str, Any]:
+        """Make agent callable for easy invocation."""
+        return self.check_clarity(query)
+
+print("✓ ClarificationAgent class defined")
+
+# COMMAND ----------
+
+# DBTITLE 1,Agent Class 2: Planning Agent (OOP)
+class PlanningAgent:
+    """
+    Agent responsible for query analysis and execution planning.
+    
+    OOP design with vector search integration.
+    """
+    
+    def __init__(self, llm: Runnable, vector_search_index: str):
+        self.llm = llm
+        self.vector_search_index = vector_search_index
+        self.name = "Planning"
+    
+    def search_relevant_spaces(self, query: str, num_results: int = 5) -> List[Dict[str, Any]]:
+        """
+        Search for relevant Genie spaces using vector search.
+        
+        Args:
+            query: User's question
+            num_results: Number of results to return
+            
+        Returns:
+            List of relevant space dictionaries
+        """
+        vs_tool = VectorSearchRetrieverTool(
+            index_name=self.vector_search_index,
+            num_results=num_results,
+            columns=["space_id", "space_title", "searchable_content"],
+            filters={"chunk_type": "space_summary"},
+            query_type="ANN",
+            include_metadata=True,
+            include_score=True
+        )
+        
+        docs = vs_tool.invoke({"query": query})
+        
+        relevant_spaces = []
+        for doc in docs:
+            relevant_spaces.append({
+                "space_id": doc.metadata.get("space_id", ""),
+                "space_title": doc.metadata.get("space_title", ""),
+                "searchable_content": doc.page_content,
+                "score": doc.metadata.get("score", 0.0)
+            })
+        
+        return relevant_spaces
+    
+    def create_execution_plan(
+        self, 
+        query: str, 
+        relevant_spaces: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Create execution plan based on query and relevant spaces.
+        
+        Args:
+            query: User's question
+            relevant_spaces: List of relevant Genie spaces
+            
+        Returns:
+            Dictionary with execution plan
+        """
+        planning_prompt = f"""
+You are a query planning expert. Analyze the following question and create an execution plan.
+
+Question: {query}
+
+Potentially relevant Genie spaces:
+{json.dumps(relevant_spaces, indent=2)}
+
+Break down the question and determine:
+1. What are the sub-questions or analytical components?
+2. How many Genie spaces are needed to answer completely? (List their space_ids)
+3. If multiple spaces are needed, do we need to JOIN data across them? Reasoning whether the sub-questions are totally independent without joining need.
+    - JOIN needed: E.g., "How many active plan members over 50 are on Lexapro?" requires joining member data with pharmacy claims.
+    - No need for JOIN: E.g., "How many active plan members over 50? How much total cost for all Lexapro claims?" - Two independent questions.
+4. If JOIN is needed, what's the best strategy:
+    - "fast_route": Directly synthesize SQL across multiple tables
+    - "slow_route": Query each Genie Space Agent separately, then combine SQL queries
+    - If user explicitly asks for "slow_route", use it; otherwise, use "fast_route"
+5. Execution plan: A brief description of how to execute the plan.
+    - For slow_route: Return {{'space_id_1':'partial_question_1', 'space_id_2':'partial_question_2'}}
+    - Each partial_question should be similar to original but scoped to that space
+    - Add "Please limit to top 10 rows" to each partial question
+
+Return your analysis as JSON:
+{{
+    "original_query": "{query}",
+    "vector_search_relevant_spaces_info": {[(sp['space_id'], sp['space_title']) for sp in relevant_spaces]},
+    "question_clear": true,
+    "sub_questions": ["sub-question 1", "sub-question 2", ...],
+    "requires_multiple_spaces": true/false,
+    "relevant_space_ids": ["space_id_1", "space_id_2", ...],
+    "requires_join": true/false,
+    "join_strategy": "fast_route" or "slow_route" or null,
+    "execution_plan": "Brief description of execution plan",
+    "genie_route_plan": {{'space_id_1':'partial_question_1', 'space_id_2':'partial_question_2'}} or null
+}}
+
+Only return valid JSON, no explanations.
+"""
+        
+        response = self.llm.invoke(planning_prompt)
+        json_str = response.content.strip('```json').strip('```')
+        
+        try:
+            plan_result = json.loads(json_str)
+            return plan_result
+        except json.JSONDecodeError as e:
+            print(f"❌ Planning JSON parsing error: {e}")
+            raise
+    
+    def __call__(self, query: str) -> Dict[str, Any]:
+        """
+        Analyze query and create execution plan.
+        
+        Returns:
+            Complete execution plan with relevant spaces
+        """
+        # Search for relevant spaces
+        relevant_spaces = self.search_relevant_spaces(query)
+        
+        # Create execution plan
+        plan = self.create_execution_plan(query, relevant_spaces)
+        plan["relevant_spaces"] = relevant_spaces
+        
+        return plan
+
+print("✓ PlanningAgent class defined")
+
+# COMMAND ----------
+
+# DBTITLE 1,Agent Class 3a: SQL Synthesis Agent - Fast Route (OOP)
+class SQLSynthesisFastAgent:
+    """
+    Agent responsible for fast SQL synthesis using UC function tools.
+    
+    OOP design with UC toolkit integration.
+    """
+    
+    def __init__(
+        self, 
+        llm: Runnable, 
+        catalog: str, 
+        schema: str
+    ):
+        self.llm = llm
+        self.catalog = catalog
+        self.schema = schema
+        self.name = "SQLSynthesisFast"
+        
+        # Initialize UC Function Client
+        client = DatabricksFunctionClient()
+        set_uc_function_client(client)
+        
+        # Create UC Function Toolkit
+        uc_function_names = [
+            f"{catalog}.{schema}.get_space_summary",
+            f"{catalog}.{schema}.get_table_overview",
+            f"{catalog}.{schema}.get_column_detail",
+            f"{catalog}.{schema}.get_space_details",
+        ]
+        
+        self.uc_toolkit = UCFunctionToolkit(function_names=uc_function_names)
+        self.tools = self.uc_toolkit.tools
+        
+        # Create SQL synthesis agent with tools
+        self.agent = create_agent(
+            model=llm,
+            tools=self.tools,
+            system_prompt=(
+                "You are a specialized SQL synthesis agent in a multi-agent system.\n\n"
+                "ROLE: You receive execution plans from the planning agent and generate SQL queries.\n\n"
+
+                "## WORKFLOW:\n"
+                "1. Review the execution plan and provided metadata\n"
+                "2. If metadata is sufficient → Generate SQL immediately\n"
+                "3. If insufficient, call UC function tools in this order:\n"
+                "   a) get_space_summary for space information\n"
+                "   b) get_table_overview for table schemas\n"
+                "   c) get_column_detail for specific columns\n"
+                "   d) get_space_details ONLY as last resort (token intensive)\n"
+                "4. Generate complete, executable SQL\n\n"
+
+                "## UC FUNCTION USAGE:\n"
+                "- Pass arguments as JSON array strings: '[\"space_id_1\", \"space_id_2\"]' or 'null'\n"
+                "- Only query spaces from execution plan's relevant_space_ids\n"
+                "- Use minimal sufficiency: only query what you need\n\n"
+
+                "## OUTPUT REQUIREMENTS:\n"
+                "- Generate complete, executable SQL with:\n"
+                "  * Proper JOINs based on execution plan\n"
+                "  * WHERE clauses for filtering\n"
+                "  * Appropriate aggregations\n"
+                "  * Clear column aliases\n"
+                "  * Always use real column names, never make up ones\n"
+                "- Return ONLY the SQL query without explanations or markdown\n"
+                "- If SQL cannot be generated, explain what metadata is missing"
+            ),
+        )
+    
+    def synthesize_sql(self, plan: Dict[str, Any]) -> str:
+        """
+        Synthesize SQL query based on execution plan.
+        
+        Args:
+            plan: Execution plan from planning agent
+            
+        Returns:
+            SQL query string
+        """
+        # Prepare plan summary for agent
+        plan_summary = {
+            "original_query": plan.get("original_query", ""),
+            "vector_search_relevant_spaces_info": plan.get("vector_search_relevant_spaces_info", []),
+            "relevant_space_ids": plan.get("relevant_space_ids", []),
+            "execution_plan": plan.get("execution_plan", ""),
+            "requires_join": plan.get("requires_join", False),
+            "sub_questions": plan.get("sub_questions", [])
+        }
+        
+        # Invoke agent
+        agent_message = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"""
+Generate a SQL query to answer the question according to the Query Plan:
+{json.dumps(plan_summary, indent=2)}
+
+Use your available UC function tools to gather metadata intelligently.
+"""
+                }
+            ]
+        }
+        
+        result = self.agent.invoke(agent_message)
+        
+        # Extract SQL from response
+        if result and "messages" in result:
+            final_content = result["messages"][-1].content
+            
+            # Extract from markdown if present
+            if "```sql" in final_content.lower():
+                sql_match = re.search(r'```sql\s*(.*?)\s*```', final_content, re.IGNORECASE | re.DOTALL)
+                if sql_match:
+                    final_content = sql_match.group(1).strip()
+            elif "```" in final_content:
+                sql_match = re.search(r'```\s*(.*?)\s*```', final_content, re.DOTALL)
+                if sql_match:
+                    final_content = sql_match.group(1).strip()
+            
+            return final_content
+        else:
+            raise Exception("No SQL generated by agent")
+    
+    def __call__(self, plan: Dict[str, Any]) -> str:
+        """Make agent callable."""
+        return self.synthesize_sql(plan)
+
+print("✓ SQLSynthesisFastAgent class defined")
+
+# COMMAND ----------
+
+# DBTITLE 1,Agent Class 3b: SQL Synthesis Agent - Slow Route (OOP)
+class SQLSynthesisSlowAgent:
+    """
+    Agent responsible for slow SQL synthesis using Genie agents.
+    
+    OOP design with Genie agent integration.
+    """
+    
+    def __init__(self, llm: Runnable, space_summary_df):
+        self.llm = llm
+        self.space_summary_df = space_summary_df
+        self.name = "SQLSynthesisSlow"
+        
+        # Create Genie agents
+        self.genie_agents_dict = self._create_genie_agents()
+    
+    def _create_genie_agents(self) -> Dict[str, GenieAgent]:
+        """Create Genie agents for each space."""
+        def enforce_limit(messages, n=10):
+            last = messages[-1] if messages else {"content": ""}
+            content = last.get("content", "") if isinstance(last, dict) else last.content
+            return f"{content}\n\nPlease limit the result to at most {n} rows."
+        
+        genie_agents = {}
+        for row in self.space_summary_df.collect():
+            space_id = row["space_id"]
+            space_title = row["space_title"]
+            searchable_content = row["searchable_content"]
+            
+            genie_agent = GenieAgent(
+                genie_space_id=space_id,
+                genie_agent_name=f"Genie_{space_title}",
+                description=searchable_content,
+                include_context=True,
+                message_processor=lambda msgs: enforce_limit(msgs, n=10)
+            )
+            genie_agents[space_id] = genie_agent
+        
+        return genie_agents
+    
+    def query_genie_agents(self, genie_route_plan: Dict[str, str]) -> Dict[str, Dict[str, str]]:
+        """
+        Query Genie agents with partial questions.
+        
+        Args:
+            genie_route_plan: Mapping of space_id to partial question
+            
+        Returns:
+            Dictionary of space_id to {question, sql}
+        """
+        sql_fragments = {}
+        
+        for space_id, partial_question in genie_route_plan.items():
+            if space_id not in self.genie_agents_dict:
+                print(f"⚠ Warning: Space {space_id} not found in Genie agents")
+                continue
+            
+            try:
+                genie_agent = self.genie_agents_dict[space_id]
+                resp = genie_agent.invoke({
+                    "messages": [{"role": "user", "content": partial_question}]
+                })
+                
+                # Extract SQL from response
+                sql = None
+                for msg in resp["messages"]:
+                    if isinstance(msg, AIMessage) and msg.name == "query_sql":
+                        sql = msg.content
+                        break
+                
+                if sql:
+                    sql_fragments[space_id] = {
+                        "question": partial_question,
+                        "sql": sql
+                    }
+            except Exception as e:
+                print(f"❌ Error querying space {space_id}: {e}")
+        
+        return sql_fragments
+    
+    def combine_sql_fragments(
+        self, 
+        original_query: str,
+        execution_plan: str,
+        sql_fragments: Dict[str, Dict[str, str]]
+    ) -> str:
+        """
+        Combine SQL fragments into a single query.
+        
+        Args:
+            original_query: Original user question
+            execution_plan: Execution plan description
+            sql_fragments: SQL fragments from Genie agents
+            
+        Returns:
+            Combined SQL query
+        """
+        combine_prompt = f"""
+You are an expert SQL developer. Combine the following SQL fragments into a single executable SQL query.
+
+Original Question: {original_query}
+
+Execution Plan: {execution_plan}
+
+SQL Fragments from Genie Agents:
+{json.dumps(sql_fragments, indent=2)}
+
+Generate a complete SQL query that:
+1. Combines these fragments with proper JOINs
+2. Answers the original question
+3. Uses real table and column names from the fragments
+4. Includes proper WHERE clauses and aggregations
+
+Return ONLY the final SQL query, no explanations or markdown.
+"""
+        
+        response = self.llm.invoke(combine_prompt)
+        combined_sql = response.content.strip()
+        
+        # Clean markdown if present
+        if "```" in combined_sql:
+            sql_match = re.search(r'```(?:sql)?\s*(.*?)\s*```', combined_sql, re.IGNORECASE | re.DOTALL)
+            if sql_match:
+                combined_sql = sql_match.group(1).strip()
+        
+        return combined_sql
+    
+    def synthesize_sql(
+        self, 
+        original_query: str,
+        execution_plan: str,
+        genie_route_plan: Dict[str, str]
+    ) -> str:
+        """
+        Synthesize SQL using Genie agents (slow route).
+        
+        Args:
+            original_query: Original user question
+            execution_plan: Execution plan description
+            genie_route_plan: Mapping of space_id to partial question
+            
+        Returns:
+            Combined SQL query
+        """
+        # Query Genie agents
+        sql_fragments = self.query_genie_agents(genie_route_plan)
+        
+        if not sql_fragments:
+            raise Exception("No SQL fragments collected from Genie agents")
+        
+        # Combine SQL fragments
+        combined_sql = self.combine_sql_fragments(
+            original_query,
+            execution_plan,
+            sql_fragments
+        )
+        
+        return combined_sql
+    
+    def __call__(
+        self, 
+        original_query: str,
+        execution_plan: str,
+        genie_route_plan: Dict[str, str]
+    ) -> str:
+        """Make agent callable."""
+        return self.synthesize_sql(original_query, execution_plan, genie_route_plan)
+
+print("✓ SQLSynthesisSlowAgent class defined")
+
+# COMMAND ----------
+
+# DBTITLE 1,Agent Class 4: SQL Execution Agent (OOP)
+class SQLExecutionAgent:
+    """
+    Agent responsible for executing SQL queries.
+    
+    OOP design for clean execution logic.
+    """
+    
+    def __init__(self):
+        self.name = "SQLExecution"
+    
+    def execute_sql(self, sql_query: str, max_rows: int = 100) -> Dict[str, Any]:
+        """
+        Execute SQL query on delta tables.
+        
+        Args:
+            sql_query: SQL query to execute
+            max_rows: Maximum rows to return
+            
+        Returns:
+            Dictionary with execution results
+        """
+        # Extract SQL from markdown if present
+        extracted_sql = sql_query.strip()
+        
+        if "```sql" in extracted_sql.lower():
+            sql_match = re.search(r'```sql\s*(.*?)\s*```', extracted_sql, re.IGNORECASE | re.DOTALL)
+            if sql_match:
+                extracted_sql = sql_match.group(1).strip()
+        elif "```" in extracted_sql:
+            sql_match = re.search(r'```\s*(.*?)\s*```', extracted_sql, re.DOTALL)
+            if sql_match:
+                extracted_sql = sql_match.group(1).strip()
+        
+        # Add LIMIT if not present
+        if "limit" not in extracted_sql.lower():
+            extracted_sql = f"{extracted_sql.rstrip(';')} LIMIT {max_rows}"
+        
+        try:
+            df = spark.sql(extracted_sql)
+            results_list = df.collect()
+            row_count = len(results_list)
+            columns = df.columns
+            
+            # Format results
+            result_data = [row.asDict() for row in results_list]
+            
+            return {
+                "success": True,
+                "sql": extracted_sql,
+                "result": result_data,
+                "row_count": row_count,
+                "columns": columns
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "sql": extracted_sql,
+                "result": None,
+                "row_count": 0,
+                "columns": [],
+                "error": str(e)
+            }
+    
+    def __call__(self, sql_query: str) -> Dict[str, Any]:
+        """Make agent callable."""
+        return self.execute_sql(sql_query)
+
+print("✓ SQLExecutionAgent class defined")
+
+# COMMAND ----------
+
+# DBTITLE 1,Node Wrappers (Combining OOP Agents with Explicit State)
+def clarification_node(state: AgentState) -> AgentState:
+    """
+    Clarification node wrapping ClarificationAgent class.
+    Combines OOP modularity with explicit state management.
+    """
+    print("\n" + "="*80)
+    print("🔍 CLARIFICATION AGENT")
+    print("="*80)
+    
+    query = state["original_query"]
+    llm = ChatDatabricks(endpoint=LLM_ENDPOINT_CLARIFICATION)
+    
+    # Use OOP agent
+    clarification_agent = ClarificationAgent(llm, context)
+    clarity_result = clarification_agent(query)
+    
+    # Update explicit state
+    state["question_clear"] = clarity_result.get("question_clear", True)
+    state["clarification_needed"] = clarity_result.get("clarification_needed")
+    state["clarification_options"] = clarity_result.get("clarification_options")
+    
+    if state["question_clear"]:
+        print("✓ Query is clear - proceeding to planning")
+        state["next_agent"] = "planning"
+    else:
+        print("⚠ Query needs clarification")
+        state["next_agent"] = "end"
+    
+    state["messages"].append(
+        SystemMessage(content=f"Clarification result: {json.dumps(clarity_result, indent=2)}")
+    )
+    
+    return state
+
+
+def planning_node(state: AgentState) -> AgentState:
+    """
+    Planning node wrapping PlanningAgent class.
+    Combines OOP modularity with explicit state management.
+    """
+    print("\n" + "="*80)
+    print("📋 PLANNING AGENT")
+    print("="*80)
+    
+    query = state["original_query"]
+    llm = ChatDatabricks(endpoint=LLM_ENDPOINT_PLANNING)
+    
+    # Use OOP agent
+    planning_agent = PlanningAgent(llm, VECTOR_SEARCH_INDEX)
+    plan = planning_agent(query)
+    
+    # Update explicit state
+    state["sub_questions"] = plan.get("sub_questions", [])
+    state["requires_multiple_spaces"] = plan.get("requires_multiple_spaces", False)
+    state["relevant_space_ids"] = plan.get("relevant_space_ids", [])
+    state["requires_join"] = plan.get("requires_join", False)
+    state["join_strategy"] = plan.get("join_strategy")
+    state["execution_plan"] = plan.get("execution_plan", "")
+    state["genie_route_plan"] = plan.get("genie_route_plan")
+    state["relevant_spaces"] = plan.get("relevant_spaces", [])
+    state["vector_search_relevant_spaces_info"] = [
+        {"space_id": sp["space_id"], "space_title": sp["space_title"]}
+        for sp in plan.get("relevant_spaces", [])
+    ]
+    
+    # Determine next agent
+    if state["join_strategy"] == "slow_route":
+        print("✓ Plan complete - using SLOW ROUTE (Genie agents)")
+        state["next_agent"] = "sql_synthesis_slow"
+    else:
+        print("✓ Plan complete - using FAST ROUTE (direct SQL synthesis)")
+        state["next_agent"] = "sql_synthesis_fast"
+    
+    state["messages"].append(
+        SystemMessage(content=f"Execution plan: {json.dumps(plan, indent=2)}")
+    )
+    
+    return state
+
+
+def sql_synthesis_fast_node(state: AgentState) -> AgentState:
+    """
+    Fast SQL synthesis node wrapping SQLSynthesisFastAgent class.
+    Combines OOP modularity with explicit state management.
+    """
+    print("\n" + "="*80)
+    print("⚡ SQL SYNTHESIS AGENT - FAST ROUTE")
+    print("="*80)
+    
+    llm = ChatDatabricks(endpoint=LLM_ENDPOINT_SQL_SYNTHESIS, temperature=0.1)
+    
+    # Use OOP agent
+    sql_agent = SQLSynthesisFastAgent(llm, CATALOG, SCHEMA)
+    
+    # Prepare plan for agent
+    plan = {
+        "original_query": state["original_query"],
+        "vector_search_relevant_spaces_info": state.get("vector_search_relevant_spaces_info", []),
+        "relevant_space_ids": state.get("relevant_space_ids", []),
+        "execution_plan": state.get("execution_plan", ""),
+        "requires_join": state.get("requires_join", False),
+        "sub_questions": state.get("sub_questions", [])
+    }
+    
+    try:
+        print("🤖 Invoking SQL synthesis agent...")
+        sql_query = sql_agent(plan)
+        
+        state["sql_query"] = sql_query
+        state["next_agent"] = "sql_execution"
+        print("✓ SQL query synthesized successfully")
+        print(f"SQL Preview: {sql_query[:200]}...")
+        
+    except Exception as e:
+        print(f"❌ SQL synthesis failed: {e}")
+        state["synthesis_error"] = str(e)
+        state["next_agent"] = "end"
+    
+    return state
+
+
+def sql_synthesis_slow_node(state: AgentState) -> AgentState:
+    """
+    Slow SQL synthesis node wrapping SQLSynthesisSlowAgent class.
+    Combines OOP modularity with explicit state management.
+    """
+    print("\n" + "="*80)
+    print("🐢 SQL SYNTHESIS AGENT - SLOW ROUTE")
+    print("="*80)
+    
+    llm = ChatDatabricks(endpoint=LLM_ENDPOINT_SQL_SYNTHESIS, temperature=0.1)
+    
+    # Use OOP agent
+    sql_agent = SQLSynthesisSlowAgent(llm, space_summary_df)
+    
+    genie_route_plan = state.get("genie_route_plan", {})
+    
+    if not genie_route_plan:
+        print("❌ No genie_route_plan found in state")
+        state["synthesis_error"] = "No routing plan available for slow route"
+        state["next_agent"] = "end"
+        return state
+    
+    try:
+        print(f"🤖 Querying {len(genie_route_plan)} Genie agents...")
+        sql_query = sql_agent(
+            state["original_query"],
+            state.get("execution_plan", ""),
+            genie_route_plan
+        )
+        
+        state["sql_query"] = sql_query
+        state["next_agent"] = "sql_execution"
+        print("✓ SQL fragments combined successfully")
+        print(f"SQL Preview: {sql_query[:200]}...")
+        
+    except Exception as e:
+        print(f"❌ SQL synthesis failed: {e}")
+        state["synthesis_error"] = str(e)
+        state["next_agent"] = "end"
+    
+    return state
+
+
+def sql_execution_node(state: AgentState) -> AgentState:
+    """
+    SQL execution node wrapping SQLExecutionAgent class.
+    Combines OOP modularity with explicit state management.
+    """
+    print("\n" + "="*80)
+    print("🚀 SQL EXECUTION AGENT")
+    print("="*80)
+    
+    sql_query = state.get("sql_query")
+    
+    if not sql_query:
+        print("❌ No SQL query to execute")
+        state["execution_error"] = "No SQL query provided"
+        state["next_agent"] = "end"
+        return state
+    
+    # Use OOP agent
+    execution_agent = SQLExecutionAgent()
+    result = execution_agent(sql_query)
+    
+    if result["success"]:
+        print(f"✓ Query executed successfully!")
+        print(f"📊 Rows returned: {result['row_count']}")
+        print(f"📋 Columns: {', '.join(result['columns'])}")
+        
+        # Display preview
+        print("\n" + "="*80)
+        print("📄 RESULTS PREVIEW (first 10 rows)")
+        print("="*80)
+        df = spark.sql(result["sql"])
+        df.show(n=min(10, result['row_count']), truncate=False)
+        print("="*80)
+        
+        state["messages"].append(
+            SystemMessage(content=f"Execution successful: {result['row_count']} rows returned")
+        )
+    else:
+        print(f"❌ SQL execution failed: {result.get('error', 'Unknown error')}")
+        state["execution_error"] = result.get("error")
+        
+        state["messages"].append(
+            SystemMessage(content=f"Execution failed: {result.get('error')}")
+        )
+    
+    state["execution_result"] = result
+    state["next_agent"] = "end"
+    
+    return state
+
+print("✓ All node wrappers defined")
+
+# COMMAND ----------
+
+# DBTITLE 1,Build LangGraph Workflow
+def create_super_agent_hybrid():
+    """
+    Create the Hybrid Super Agent LangGraph workflow.
+    
+    Combines:
+    - OOP agent classes for modularity
+    - Explicit state management for observability
+    """
+    print("\n" + "="*80)
+    print("🏗️ BUILDING HYBRID SUPER AGENT WORKFLOW")
+    print("="*80)
+    
+    # Create the graph with explicit state
+    workflow = StateGraph(AgentState)
+    
+    # Add nodes (wrapping OOP agents)
+    workflow.add_node("clarification", clarification_node)
+    workflow.add_node("planning", planning_node)
+    workflow.add_node("sql_synthesis_fast", sql_synthesis_fast_node)
+    workflow.add_node("sql_synthesis_slow", sql_synthesis_slow_node)
+    workflow.add_node("sql_execution", sql_execution_node)
+    
+    # Define routing logic based on explicit state
+    def route_after_clarification(state: AgentState) -> str:
+        if state.get("question_clear", False):
+            return "planning"
+        return "end"
+    
+    def route_after_planning(state: AgentState) -> str:
+        next_agent = state.get("next_agent", "end")
+        if next_agent == "sql_synthesis_fast":
+            return "sql_synthesis_fast"
+        elif next_agent == "sql_synthesis_slow":
+            return "sql_synthesis_slow"
+        return "end"
+    
+    def route_after_synthesis(state: AgentState) -> str:
+        next_agent = state.get("next_agent", "end")
+        if next_agent == "sql_execution":
+            return "sql_execution"
+        return "end"
+    
+    # Add edges with conditional routing
+    workflow.set_entry_point("clarification")
+    
+    workflow.add_conditional_edges(
+        "clarification",
+        route_after_clarification,
+        {
+            "planning": "planning",
+            "end": END
+        }
+    )
+    
+    workflow.add_conditional_edges(
+        "planning",
+        route_after_planning,
+        {
+            "sql_synthesis_fast": "sql_synthesis_fast",
+            "sql_synthesis_slow": "sql_synthesis_slow",
+            "end": END
+        }
+    )
+    
+    workflow.add_conditional_edges(
+        "sql_synthesis_fast",
+        route_after_synthesis,
+        {
+            "sql_execution": "sql_execution",
+            "end": END
+        }
+    )
+    
+    workflow.add_conditional_edges(
+        "sql_synthesis_slow",
+        route_after_synthesis,
+        {
+            "sql_execution": "sql_execution",
+            "end": END
+        }
+    )
+    
+    workflow.add_edge("sql_execution", END)
+    
+    # Compile the graph with memory
+    memory = MemorySaver()
+    app = workflow.compile(checkpointer=memory)
+    
+    print("✓ Workflow nodes added:")
+    print("  1. Clarification Agent (OOP)")
+    print("  2. Planning Agent (OOP)")
+    print("  3. SQL Synthesis Agent - Fast Route (OOP)")
+    print("  4. SQL Synthesis Agent - Slow Route (OOP)")
+    print("  5. SQL Execution Agent (OOP)")
+    print("\n✓ Explicit state management enabled")
+    print("✓ Conditional routing configured")
+    print("✓ Memory checkpointer enabled")
+    print("\n✅ Hybrid Super Agent workflow compiled successfully!")
+    print("="*80)
+    
+    return app
+
+# Create the Hybrid Super Agent
+super_agent_hybrid = create_super_agent_hybrid()
+
+# COMMAND ----------
+
+# DBTITLE 1,ResponsesAgent Wrapper for Deployment
+class SuperAgentHybridResponsesAgent(ResponsesAgent):
+    """
+    Wrapper class to make the Hybrid Super Agent compatible with Databricks Model Serving.
+    
+    This class implements the ResponsesAgent interface required for deployment
+    to Databricks Model Serving endpoints with proper streaming support.
+    """
+    
+    def __init__(self, agent: CompiledStateGraph):
+        """
+        Initialize the ResponsesAgent wrapper.
+        
+        Args:
+            agent: The compiled LangGraph workflow
+        """
+        self.agent = agent
+        print("✓ SuperAgentHybridResponsesAgent initialized")
+    
+    def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
+        """
+        Make a prediction (non-streaming).
+        
+        Args:
+            request: The request containing input messages
+            
+        Returns:
+            ResponsesAgentResponse with output items
+        """
+        outputs = [
+            event.item
+            for event in self.predict_stream(request)
+            if event.type == "response.output_item.done"
+        ]
+        return ResponsesAgentResponse(output=outputs, custom_outputs=request.custom_inputs)
+    
+    def predict_stream(
+        self,
+        request: ResponsesAgentRequest,
+    ) -> Generator[ResponsesAgentStreamEvent, None, None]:
+        """
+        Make a streaming prediction.
+        
+        Args:
+            request: The request containing input messages
+            
+        Yields:
+            ResponsesAgentStreamEvent for each step in the workflow
+        """
+        # Convert request input to chat completions format
+        cc_msgs = to_chat_completions_input([i.model_dump() for i in request.input])
+        
+        # Initialize state with messages
+        initial_state = {
+            "original_query": cc_msgs[-1]["content"] if cc_msgs else "",
+            "question_clear": False,
+            "messages": [HumanMessage(content=msg["content"]) for msg in cc_msgs if msg["role"] == "user"],
+            "next_agent": "clarification"
+        }
+        
+        # Configure with thread ID
+        thread_id = request.custom_inputs.get("thread_id", "default") if request.custom_inputs else "default"
+        config = {"configurable": {"thread_id": thread_id}}
+        
+        first_message = True
+        seen_ids = set()
+        
+        # Stream the workflow execution
+        for _, events in self.agent.stream(initial_state, config, stream_mode=["updates"]):
+            new_msgs = [
+                msg
+                for v in events.values()
+                for msg in v.get("messages", [])
+                if hasattr(msg, 'id') and msg.id not in seen_ids
+            ]
+            
+            if first_message:
+                seen_ids.update(msg.id for msg in new_msgs[: len(cc_msgs)])
+                new_msgs = new_msgs[len(cc_msgs) :]
+                first_message = False
+            else:
+                seen_ids.update(msg.id for msg in new_msgs)
+                # Get node name
+                if events:
+                    node_name = tuple(events.keys())[0]
+                    yield ResponsesAgentStreamEvent(
+                        type="response.output_item.done",
+                        item=self.create_text_output_item(
+                            text=f"<name>{node_name}</name>", id=str(uuid4())
+                        ),
+                    )
+            
+            if len(new_msgs) > 0:
+                yield from output_to_responses_items_stream(new_msgs)
+
+
+# Create the deployable agent
+AGENT = SuperAgentHybridResponsesAgent(super_agent_hybrid)
+
+print("\n" + "="*80)
+print("✅ HYBRID SUPER AGENT RESPONSES AGENT CREATED")
+print("="*80)
+print("Architecture: OOP Agents + Explicit State Management")
+print("Benefits:")
+print("  ✓ Modular and testable agent classes")
+print("  ✓ Full state observability for debugging")
+print("  ✓ Production-ready with development-friendly design")
+print("\nThis agent is now ready for:")
+print("  1. Local testing with AGENT.predict()")
+print("  2. Logging with mlflow.pyfunc.log_model()")
+print("  3. Deployment to Databricks Model Serving")
+print("="*80)
+
+# Set the agent for MLflow tracking
+mlflow.langchain.autolog()
+mlflow.models.set_model(AGENT)
+
+# COMMAND ----------
+
+# DBTITLE 1,Helper Function: Invoke Hybrid Super Agent
+def invoke_super_agent_hybrid(query: str, thread_id: str = "default") -> Dict[str, Any]:
+    """
+    Invoke the Hybrid Super Agent with a user query.
+    
+    Args:
+        query: User's question
+        thread_id: Thread ID for conversation tracking (default: "default")
+    
+    Returns:
+        Final state with execution results
+    """
+    print("\n" + "="*80)
+    print("🚀 INVOKING HYBRID SUPER AGENT")
+    print("="*80)
+    print(f"Query: {query}")
+    print(f"Thread ID: {thread_id}")
+    print("="*80)
+    
+    # Initialize state
+    initial_state = {
+        "original_query": query,
+        "question_clear": False,
+        "messages": [HumanMessage(content=query)],
+        "next_agent": "clarification"
+    }
+    
+    # Configure with thread
+    config = {"configurable": {"thread_id": thread_id}}
+    
+    # Enable MLflow tracing
+    mlflow.langchain.autolog()
+    
+    # Invoke the workflow
+    final_state = super_agent_hybrid.invoke(initial_state, config)
+    
+    print("\n" + "="*80)
+    print("✅ HYBRID SUPER AGENT EXECUTION COMPLETE")
+    print("="*80)
+    
+    return final_state
+
+# COMMAND ----------
+
+# DBTITLE 1,Helper Function: Display Results
+def display_results(final_state: Dict[str, Any]):
+    """
+    Display the results from the Hybrid Super Agent execution.
+    """
+    print("\n" + "="*80)
+    print("📊 FINAL RESULTS")
+    print("="*80)
+    
+    # Query info
+    print(f"\n🔍 Original Query:")
+    print(f"  {final_state['original_query']}")
+    
+    # Clarification
+    print(f"\n✓ Clarification:")
+    if final_state.get('question_clear'):
+        print("  Query is clear")
+    else:
+        print("  ⚠ Clarification needed:")
+        print(f"    {final_state.get('clarification_needed', 'N/A')}")
+        if final_state.get('clarification_options'):
+            print("  Options:")
+            for opt in final_state['clarification_options']:
+                print(f"    - {opt}")
+        return
+    
+    # Planning
+    print(f"\n📋 Execution Plan:")
+    print(f"  Strategy: {final_state.get('join_strategy', 'N/A')}")
+    print(f"  Multiple Spaces: {final_state.get('requires_multiple_spaces', False)}")
+    print(f"  Requires JOIN: {final_state.get('requires_join', False)}")
+    print(f"  Relevant Spaces: {len(final_state.get('relevant_space_ids', []))}")
+    
+    # SQL
+    if final_state.get('sql_query'):
+        print(f"\n💻 Generated SQL:")
+        print("─"*80)
+        print(final_state['sql_query'][:1000])
+        if len(final_state['sql_query']) > 1000:
+            print("... (truncated)")
+        print("─"*80)
+    
+    # Execution
+    exec_result = final_state.get('execution_result')
+    if exec_result:
+        if exec_result.get('success'):
+            print(f"\n✅ Execution Successful:")
+            print(f"  Rows: {exec_result.get('row_count', 0)}")
+            print(f"  Columns: {', '.join(exec_result.get('columns', []))}")
+            
+            # Show first few results
+            results = exec_result.get('result', [])
+            if results:
+                print(f"\n📄 Sample Results (first 3 rows):")
+                for i, row in enumerate(results[:3], 1):
+                    print(f"  Row {i}: {row}")
+        else:
+            print(f"\n❌ Execution Failed:")
+            print(f"  Error: {exec_result.get('error', 'Unknown error')}")
+    
+    # Errors
+    if final_state.get('synthesis_error'):
+        print(f"\n❌ Synthesis Error: {final_state['synthesis_error']}")
+    if final_state.get('execution_error'):
+        print(f"\n❌ Execution Error: {final_state['execution_error']}")
+    
+    print("\n" + "="*80)
+
+# COMMAND ----------
+
+# DBTITLE 1,Test Hybrid Super Agent
+# Example test query
+test_query = "What is the average cost of medical claims in 2024?"
+
+# Invoke Hybrid Super Agent
+final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_001")
+
+# Display results
+display_results(final_state)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Additional Test Cases
+
+# COMMAND ----------
+
+# DBTITLE 1,Test Case 1: Simple Single-Space Query
+test_query_1 = "How many patients are in the dataset?"
+result_1 = invoke_super_agent_hybrid(test_query_1, thread_id="test_hybrid_simple")
+display_results(result_1)
+
+# COMMAND ----------
+
+# DBTITLE 1,Test Case 2: Multi-Space Query with JOIN (Fast Route)
+test_query_2 = "What is the average cost of medical claims for patients diagnosed with diabetes?"
+result_2 = invoke_super_agent_hybrid(test_query_2, thread_id="test_hybrid_fast")
+display_results(result_2)
+
+# COMMAND ----------
+
+# DBTITLE 1,Test Case 3: Multi-Space Query with JOIN (Slow Route - Explicit)
+test_query_3 = "What is the average cost of medical claims for patients diagnosed with diabetes? Use slow route"
+result_3 = invoke_super_agent_hybrid(test_query_3, thread_id="test_hybrid_slow")
+display_results(result_3)
+
+# COMMAND ----------
+
+# DBTITLE 1,Test Case 4: Complex Multi-Space Query
+test_query_4 = "What is the average cost of medical claims for patients diagnosed with diabetes, broken down by insurance payer type and patient age group?"
+result_4 = invoke_super_agent_hybrid(test_query_4, thread_id="test_hybrid_complex")
+display_results(result_4)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Summary
+# MAGIC
+# MAGIC ```
+# MAGIC ===================================================================================
+# MAGIC HYBRID SUPER AGENT - BEST OF BOTH WORLDS
+# MAGIC ===================================================================================
+# MAGIC
+# MAGIC This notebook implements a hybrid architecture combining:
+# MAGIC
+# MAGIC 1. OOP AGENT CLASSES (from agent.py)
+# MAGIC    ✅ Modular and testable
+# MAGIC    ✅ Clean separation of concerns
+# MAGIC    ✅ Reusable across projects
+# MAGIC    ✅ Easy to extend and maintain
+# MAGIC
+# MAGIC 2. EXPLICIT STATE MANAGEMENT (from Super_Agent.py)
+# MAGIC    ✅ Full observability
+# MAGIC    ✅ Easy debugging
+# MAGIC    ✅ Clear data flow
+# MAGIC    ✅ Type-safe state tracking
+# MAGIC
+# MAGIC ARCHITECTURE:
+# MAGIC ══════════════
+# MAGIC
+# MAGIC Agent Classes (OOP):
+# MAGIC - ClarificationAgent
+# MAGIC - PlanningAgent
+# MAGIC - SQLSynthesisFastAgent
+# MAGIC - SQLSynthesisSlowAgent
+# MAGIC - SQLExecutionAgent
+# MAGIC
+# MAGIC Node Wrappers:
+# MAGIC - clarification_node(state) → calls ClarificationAgent, updates state
+# MAGIC - planning_node(state) → calls PlanningAgent, updates state
+# MAGIC - sql_synthesis_fast_node(state) → calls SQLSynthesisFastAgent, updates state
+# MAGIC - sql_synthesis_slow_node(state) → calls SQLSynthesisSlowAgent, updates state
+# MAGIC - sql_execution_node(state) → calls SQLExecutionAgent, updates state
+# MAGIC
+# MAGIC State Management:
+# MAGIC - AgentState(TypedDict) with explicit fields
+# MAGIC - Full observability at every step
+# MAGIC - Easy to debug and monitor
+# MAGIC
+# MAGIC BENEFITS:
+# MAGIC ═════════
+# MAGIC
+# MAGIC ✅ Production Ready - Clean OOP design for maintainability
+# MAGIC ✅ Easy Debugging - Explicit state shows exactly what's happening
+# MAGIC ✅ Modular - Agent classes can be tested independently
+# MAGIC ✅ Observable - All state transitions are visible
+# MAGIC ✅ Extensible - Easy to add new agents or modify existing ones
+# MAGIC ✅ Team-Friendly - Clear contracts and interfaces
+# MAGIC
+# MAGIC USAGE:
+# MAGIC ══════
+# MAGIC
+# MAGIC # Simple invocation
+# MAGIC final_state = invoke_super_agent_hybrid("Your question here", thread_id="session_123")
+# MAGIC display_results(final_state)
+# MAGIC
+# MAGIC # Access results programmatically
+# MAGIC if final_state['execution_result']['success']:
+# MAGIC     data = final_state['execution_result']['result']
+# MAGIC     sql = final_state['sql_query']
+# MAGIC
+# MAGIC NEXT STEPS:
+# MAGIC ═══════════
+# MAGIC
+# MAGIC 1. Deploy to Databricks as a ResponsesAgent endpoint
+# MAGIC 2. Monitor with MLflow tracing in production
+# MAGIC 3. Extend with additional specialized agents
+# MAGIC 4. Integrate with Genie UI
+# MAGIC
+# MAGIC ===================================================================================
+# MAGIC ```
+
+# COMMAND ----------
+
+
