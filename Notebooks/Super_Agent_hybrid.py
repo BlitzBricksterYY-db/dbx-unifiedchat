@@ -364,7 +364,7 @@ Only return valid JSON, no explanations.
 """
         
         response = self.llm.invoke(planning_prompt)
-        json_str = response.content.strip('```json').strip('```')
+        json_str = response.content.strip('```json').strip('```').strip('\n')
         
         try:
             plan_result = json.loads(json_str)
@@ -443,7 +443,8 @@ class SQLSynthesisFastAgent:
                 "   b) get_table_overview for table schemas\n"
                 "   c) get_column_detail for specific columns\n"
                 "   d) get_space_details ONLY as last resort (token intensive)\n"
-                "4. Generate complete, executable SQL\n\n"
+                "4. At last, if you still cannot find enough metadata in relevant spaces provided, dont stuck there. Expand the searching scope to all spaces mentioned in the execution plan's 'vector_search_relevant_spaces_info' field. Extract the space_id from 'vector_search_relevant_spaces_info'. \n"
+                "5. Generate complete, executable SQL\n\n"
 
                 "## UC FUNCTION USAGE:\n"
                 "- Pass arguments as JSON array strings: '[\"space_id_1\", \"space_id_2\"]' or 'null'\n"
@@ -526,6 +527,7 @@ print("✓ SQLSynthesisFastAgent class defined")
 # COMMAND ----------
 
 # DBTITLE 1,Agent Class 3b: SQL Synthesis Agent - Slow Route (OOP)
+
 class SQLSynthesisSlowAgent:
     """
     Agent responsible for slow SQL synthesis using Genie agents.
@@ -1459,12 +1461,24 @@ def display_results(final_state: Dict[str, Any]):
 
 # COMMAND ----------
 
-# DBTITLE 1,Test Hybrid Super Agent
+# DBTITLE 1,Test Hybrid Super Agent (quick route)
 # Example test query
-test_query = "What is the average cost of medical claims in 2024?"
+test_query = "What is the average cost of medical claims per claim in 2024?"
 
 # Invoke Hybrid Super Agent
 final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_001")
+
+# Display results
+display_results(final_state)
+
+# COMMAND ----------
+
+# DBTITLE 1,Test Hybrid Super Agent (slow route)
+# Example test query
+test_query = "What is the average cost of medical claims  per claim in 2024? use slow route"
+
+# Invoke Hybrid Super Agent
+final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_002")
 
 # Display results
 display_results(final_state)
