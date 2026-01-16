@@ -366,7 +366,8 @@ Break down the question and determine:
     - "slow_route": Query each Genie Space Agent separately, then combine SQL queries
     - If user explicitly asks for "slow_route", use it; otherwise, use "fast_route"
 5. Execution plan: A brief description of how to execute the plan.
-    - For slow_route: Return {{'space_id_1':'partial_question_1', 'space_id_2':'partial_question_2'}}
+    - For slow_route: Return "genie_route_plan": {{'space_id_1':'partial_question_1', 'space_id_2':'partial_question_2'}}
+    - For fast_route: Return "genie_route_plan": null
     - Each partial_question should be similar to original but scoped to that space
     - Add "Please limit to top 10 rows" to each partial question
 
@@ -952,7 +953,7 @@ print("✓ SQLExecutionAgent class defined")
 
 # COMMAND ----------
 
-# DBTITLE 1,Result Summarize Agent (OOP Design)
+# DBTITLE 1,Agent Class 5: Result Summarize Agent (OOP Design)
 class ResultSummarizeAgent:
     """
     Agent responsible for generating a final summary of the workflow execution.
@@ -2027,9 +2028,33 @@ print("✓ Helper functions defined")
 
 # Example test query
 test_query = "What is the average cost of medical claims per claim in 2024?"
-
 # Invoke Hybrid Super Agent
 final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_001")
+
+# COMMAND ----------
+
+# Example test query
+test_query = "What is the average cost of medical claims for patients diagnosed with diabetes, broken down by insurance payer type and patient age group?"
+# Invoke Hybrid Super Agent
+final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_003")
+
+##----clarify quetsions-----
+#  Options:
+#      1. Which specific diabetes diagnosis codes (ICD-10) should be included in the analysis (e.g., E10.x for Type 1, E11.x for Type 2, or all diabetes-related codes)?
+#      2. Which cost metric should be used: line charges, allowed amounts, patient copays, or another financial measure from the claims data?
+#      3. Should the analysis include only claims where diabetes is the primary diagnosis, or any claim where diabetes appears as a secondary diagnosis?
+
+# COMMAND ----------
+
+#-------
+follow_up = """
+ 1. E10 and E11
+  2. line charges
+  3. both
+
+"""
+# Invoke Hybrid Super Agent
+final_state = invoke_super_agent_hybrid(follow_up, thread_id="test_hybrid_003")
 
 # COMMAND ----------
 
@@ -2237,7 +2262,7 @@ else:
 # MAGIC sql = final_state.get('sql_query')  # Generated SQL
 # MAGIC explanation = final_state.get('sql_synthesis_explanation')  # SQL generation explanation
 # MAGIC plan = final_state.get('execution_plan')  # Execution plan
-# MAGIC 
+# MAGIC
 # MAGIC if final_state['execution_result']['success']:
 # MAGIC     data = final_state['execution_result']['result']  # Query results
 # MAGIC     row_count = final_state['execution_result']['row_count']  # Number of rows
