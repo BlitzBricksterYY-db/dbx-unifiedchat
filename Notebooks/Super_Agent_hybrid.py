@@ -1183,7 +1183,8 @@ def planning_node(state: AgentState) -> AgentState:
     state["join_strategy"] = plan.get("join_strategy")
     state["execution_plan"] = plan.get("execution_plan", "")
     state["genie_route_plan"] = plan.get("genie_route_plan")
-    state["relevant_spaces"] = plan.get("relevant_spaces", [])
+    # Note: relevant_spaces with searchable_content removed to save tokens
+    # Only store space_id and space_title in vector_search_relevant_spaces_info
     state["vector_search_relevant_spaces_info"] = [
         {"space_id": sp["space_id"], "space_title": sp["space_title"]}
         for sp in plan.get("relevant_spaces", [])
@@ -1388,8 +1389,8 @@ def summarize_node(state: AgentState) -> AgentState:
     print("📝 RESULT SUMMARIZE AGENT")
     print("="*80)
     
-    # Create LLM for summarization
-    llm = ChatDatabricks(endpoint=LLM_ENDPOINT_SUMMARIZE, temperature=0.1)
+    # Create LLM for summarization (no max_tokens limit for comprehensive output)
+    llm = ChatDatabricks(endpoint=LLM_ENDPOINT_SUMMARIZE, temperature=0.1, max_tokens=2000)
     
     # Use OOP agent to generate summary
     summarize_agent = ResultSummarizeAgent(llm)
