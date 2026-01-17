@@ -1176,6 +1176,7 @@ def planning_node(state: AgentState) -> AgentState:
     plan = planning_agent(query)
     
     # Update explicit state
+    state["plan"] = plan
     state["sub_questions"] = plan.get("sub_questions", [])
     state["requires_multiple_spaces"] = plan.get("requires_multiple_spaces", False)
     state["relevant_space_ids"] = plan.get("relevant_space_ids", [])
