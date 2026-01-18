@@ -314,7 +314,7 @@ print("="*80)
 
 # COMMAND ----------
 
-# DBTITLE 1,Helper Function - Query Delta Table
+# DBTITLE 1,Helper Functions - Data Loading
 def query_delta_table(table_name: str, filter_field: str, filter_value: str, select_fields: List[str] = None) -> Any:
     """
     Query a delta table with a filter condition.
@@ -341,22 +341,31 @@ def query_delta_table(table_name: str, filter_field: str, filter_value: str, sel
     
     return df
 
-# Load space summaries for context
-space_summary_df = query_delta_table(
-    table_name=TABLE_NAME,
-    filter_field="chunk_type",
-    filter_value="space_summary",
-    select_fields=["space_id", "space_title", "searchable_content"]
-)
+def load_space_context(table_name: str) -> Dict[str, str]:
+    """
+    Load space context from Delta table.
+    Called fresh on each request - no caching for dynamic refresh.
+    
+    Args:
+        table_name: Full table name (catalog.schema.table)
+        
+    Returns:
+        Dictionary mapping space_id to searchable_content
+    """
+    df = spark.sql(f"""
+        SELECT space_id, searchable_content
+        FROM {table_name}
+        WHERE chunk_type = 'space_summary'
+    """)
+    
+    context = {row["space_id"]: row["searchable_content"] 
+               for row in df.collect()}
+    
+    print(f"✓ Loaded {len(context)} Genie spaces for context")
+    return context
 
-# Convert to context dictionary
-space_summary_list = space_summary_df.collect()
-context = {}
-for row in space_summary_list:
-    space_id = row["space_id"]
-    context[space_id] = row["searchable_content"]
-
-print(f"✓ Loaded {len(context)} Genie spaces for context")
+# Note: Context is now loaded dynamically in clarification_node
+# This allows refresh without model redeployment
 
 # COMMAND ----------
 
@@ -414,13 +423,43 @@ class ClarificationAgent:
     """
     Agent responsible for checking query clarity.
     
-    OOP design for modularity and reusability.
+    Hybrid approach: Can accept context directly (for testing) or load from table (for production).
+    
+    Usage:
+        # Testing: Pass mock context
+        agent = ClarificationAgent(llm, {"space1": "mock data"})
+        
+        # Production: Load from table
+        agent = ClarificationAgent.from_table(llm, TABLE_NAME)
     """
     
     def __init__(self, llm: Runnable, context: Dict[str, str]):
+        """
+        Initialize with context directly.
+        
+        Args:
+            llm: Language model for clarity checking
+            context: Dictionary mapping space_id to searchable_content
+        """
         self.llm = llm
         self.context = context
         self.name = "Clarification"
+    
+    @classmethod
+    def from_table(cls, llm: Runnable, table_name: str):
+        """
+        Factory method to create agent by loading context from Delta table.
+        Loads fresh context on each call - no caching for dynamic refresh.
+        
+        Args:
+            llm: Language model for clarity checking
+            table_name: Full table name (catalog.schema.table)
+            
+        Returns:
+            ClarificationAgent instance with fresh context
+        """
+        context = load_space_context(table_name)
+        return cls(llm, context)
     
     def check_clarity(self, query: str, clarification_count: int = 0) -> Dict[str, Any]:
         """
@@ -822,28 +861,46 @@ class SQLSynthesisGenieAgent:
     Agent responsible for slow SQL synthesis using Genie agents.
     
     OOP design with Genie agent integration.
+    Optimized to only create Genie agents for relevant spaces (not all spaces).
     """
     
-    def __init__(self, llm: Runnable, space_summary_df):
+    def __init__(self, llm: Runnable, relevant_spaces: List[Dict[str, Any]]):
+        """
+        Initialize SQL Synthesis Genie Agent.
+        
+        Args:
+            llm: Language model for SQL synthesis
+            relevant_spaces: List of relevant spaces from PlanningAgent's Vector Search.
+                            Each dict should have: space_id, space_title, searchable_content
+        """
         self.llm = llm
-        self.space_summary_df = space_summary_df
+        self.relevant_spaces = relevant_spaces
         self.name = "SQLSynthesisSlow"
         
-        # Create Genie agents
+        # Create Genie agents only for relevant spaces (efficiency optimization)
         self.genie_agents_dict = self._create_genie_agents()
     
     def _create_genie_agents(self) -> Dict[str, GenieAgent]:
-        """Create Genie agents for each space."""
+        """
+        Create Genie agents only for relevant spaces discovered by PlanningAgent.
+        This is more efficient than creating agents for all spaces.
+        """
         def enforce_limit(messages, n=10):
             last = messages[-1] if messages else {"content": ""}
             content = last.get("content", "") if isinstance(last, dict) else last.content
             return f"{content}\n\nPlease limit the result to at most {n} rows."
         
         genie_agents = {}
-        for row in self.space_summary_df.collect():
-            space_id = row["space_id"]
-            space_title = row["space_title"]
-            searchable_content = row["searchable_content"]
+        print(f"  Creating Genie agents for {len(self.relevant_spaces)} relevant spaces...")
+        
+        for space in self.relevant_spaces:
+            space_id = space.get("space_id")
+            space_title = space.get("space_title", space_id)
+            searchable_content = space.get("searchable_content", "")
+            
+            if not space_id:
+                print(f"  ⚠ Warning: Space missing space_id, skipping: {space}")
+                continue
             
             genie_agent = GenieAgent(
                 genie_space_id=space_id,
@@ -853,6 +910,7 @@ class SQLSynthesisGenieAgent:
                 message_processor=lambda msgs: enforce_limit(msgs, n=10)
             )
             genie_agents[space_id] = genie_agent
+            print(f"  ✓ Created Genie agent for: {space_title} ({space_id})")
         
         return genie_agents
     
@@ -1357,7 +1415,8 @@ def clarification_node(state: AgentState) -> AgentState:
     llm = ChatDatabricks(endpoint=LLM_ENDPOINT_CLARIFICATION)
     
     # Use OOP agent with clarification count
-    clarification_agent = ClarificationAgent(llm, context)
+    # Load context fresh from table (no redeployment needed for updates)
+    clarification_agent = ClarificationAgent.from_table(llm, TABLE_NAME)
     clarity_result = clarification_agent(query, clarification_count)
     
     # Update explicit state
@@ -1432,7 +1491,12 @@ def planning_node(state: AgentState) -> AgentState:
     
     # Use OOP agent
     planning_agent = PlanningAgent(llm, VECTOR_SEARCH_INDEX)
-    plan = planning_agent(query)
+    
+    # Get relevant spaces with full metadata (for Genie agents)
+    relevant_spaces_full = planning_agent.search_relevant_spaces(query)
+    
+    # Create execution plan
+    plan = planning_agent.create_execution_plan(query, relevant_spaces_full)
     
     # Update explicit state
     state["plan"] = plan
@@ -1444,12 +1508,10 @@ def planning_node(state: AgentState) -> AgentState:
     state["execution_plan"] = plan.get("execution_plan", "")
     state["genie_route_plan"] = plan.get("genie_route_plan")
     state["vector_search_relevant_spaces_info"] = plan.get("vector_search_relevant_spaces_info", [])
-    # Note: relevant_spaces with searchable_content removed to save tokens
-    # Only store space_id and space_title in vector_search_relevant_spaces_info
-    # state["vector_search_relevant_spaces_info"] = [
-    #     {"space_id": sp["space_id"], "space_title": sp["space_title"]}
-    #     for sp in plan.get("relevant_spaces", [])
-    # ]
+    
+    # Store full relevant_spaces for Genie agents (includes searchable_content)
+    # This avoids re-querying and reuses Vector Search results
+    state["relevant_spaces"] = relevant_spaces_full
     
     # Determine next agent
     if state["join_strategy"] == "genie_route":
@@ -1541,6 +1603,8 @@ def sql_synthesis_genie_node(state: AgentState) -> AgentState:
     """
     Slow SQL synthesis node wrapping SQLSynthesisGenieAgent class.
     Combines OOP modularity with explicit state management.
+    
+    Uses relevant_spaces from PlanningAgent (no need to re-query all spaces).
     """
     print("\n" + "="*80)
     print("🐢 SQL SYNTHESIS AGENT - GENIE ROUTE")
@@ -1548,8 +1612,17 @@ def sql_synthesis_genie_node(state: AgentState) -> AgentState:
     
     llm = ChatDatabricks(endpoint=LLM_ENDPOINT_SQL_SYNTHESIS, temperature=0.1)
     
-    # Use OOP agent
-    sql_agent = SQLSynthesisGenieAgent(llm, space_summary_df)
+    # Get relevant spaces from state (already discovered by PlanningAgent)
+    relevant_spaces = state.get("relevant_spaces", [])
+    
+    if not relevant_spaces:
+        print("❌ No relevant_spaces found in state")
+        state["synthesis_error"] = "No relevant spaces available for genie route"
+        state["next_agent"] = "end"
+        return state
+    
+    # Use OOP agent - only creates Genie agents for relevant spaces
+    sql_agent = SQLSynthesisGenieAgent(llm, relevant_spaces)
     
     genie_route_plan = state.get("genie_route_plan", {})
     
