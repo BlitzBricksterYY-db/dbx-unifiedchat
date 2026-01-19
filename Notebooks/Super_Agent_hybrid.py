@@ -620,6 +620,7 @@ Break down the question and determine:
     - "table_route": Directly synthesize SQL across multiple tables
     - "genie_route": Query each Genie Space Agent separately, then combine SQL queries
     - If user explicitly asks for "genie_route", use it; otherwise, use "table_route"
+    - always populate the join_strategy field in the JSON output.
 5. Execution plan: A brief description of how to execute the plan.
     - For genie_route: Return "genie_route_plan": {{'space_id_1':'partial_question_1', 'space_id_2':'partial_question_2'}}
     - For table_route: Return "genie_route_plan": null
@@ -635,7 +636,7 @@ Return your analysis as JSON:
     "requires_multiple_spaces": true/false,
     "relevant_space_ids": ["space_id_1", "space_id_2", ...],
     "requires_join": true/false,
-    "join_strategy": "table_route" or "genie_route" or null,
+    "join_strategy": "table_route" or "genie_route",
     "execution_plan": "Brief description of execution plan",
     "genie_route_plan": {{'space_id_1':'partial_question_1', 'space_id_2':'partial_question_2'}} or null
 }}
