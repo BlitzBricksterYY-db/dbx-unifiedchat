@@ -1958,7 +1958,7 @@ def create_super_agent_hybrid():
     def route_after_clarification(state: AgentState) -> str:
         if state.get("question_clear", False):
             return "planning"
-        return "summarize"  # Summarize if clarification needed
+        return END  # End if clarification needed
     
     def route_after_planning(state: AgentState) -> str:
         next_agent = state.get("next_agent", "summarize")
@@ -1982,7 +1982,7 @@ def create_super_agent_hybrid():
         route_after_clarification,
         {
             "planning": "planning",
-            "summarize": "summarize"
+            END: END
         }
     )
     
