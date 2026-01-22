@@ -1346,12 +1346,12 @@ class ResultSummarizeAgent:
                 prompt += f"""**SQL Generation:** ✅ Successful
 **SQL Query:** 
 ```sql
-{sql_query[:300]}{'...' if len(sql_query) > 300 else ''}
+{sql_query}
 ```
 
 """
                 if sql_explanation:
-                    prompt += f"""**SQL Synthesis Explanation:** {sql_explanation[:200]}{'...' if len(sql_explanation) > 200 else ''}
+                    prompt += f"""**SQL Synthesis Explanation:** {sql_explanation[:2000]}{'...' if len(sql_explanation) > 2000 else ''}
 
 """
                 
@@ -2605,10 +2605,18 @@ final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_001")
 
 # COMMAND ----------
 
+# DBTITLE 1,same query for genie route
+# Example test query
+test_query = "What is the average cost of medical claims per claim in 2024? Use genie route"
+# Invoke Hybrid Super Agent
+final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_001_genie")
+
+# COMMAND ----------
+
 # Example test query
 test_query = "What is the average cost of medical claims for patients diagnosed with diabetes, broken down by insurance payer type and patient age group?"
 # Invoke Hybrid Super Agent
-final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_003")
+final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_003_table")
 
 ##----clarify quetsions-----
 #  Options:
@@ -2620,13 +2628,46 @@ final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_003")
 
 #-------
 follow_up = """
- 1. E10 and E11
-  2. line charges
-  3. both
+ 1. E10-E14
+  2. both line charges and allowed
+  3. any claim where a diabetes diagnosis appears
 
 """
+# User provides clarification
+final_state = respond_to_clarification(
+    follow_up,
+    previous_state=final_state,
+    thread_id="test_hybrid_003_table"
+)
+
+# COMMAND ----------
+
+# Example test query
+test_query = "What is the average cost of medical claims for patients diagnosed with diabetes, broken down by insurance payer type and patient age group? Use genie route"
 # Invoke Hybrid Super Agent
-final_state = invoke_super_agent_hybrid(follow_up, thread_id="test_hybrid_003")
+final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_003_genie")
+
+##----clarify quetsions-----
+#  Options:
+#      1. Which specific diabetes diagnosis codes (ICD-10) should be included in the analysis (e.g., E10.x for Type 1, E11.x for Type 2, or all diabetes-related codes)?
+#      2. Which cost metric should be used: line charges, allowed amounts, patient copays, or another financial measure from the claims data?
+#      3. Should the analysis include only claims where diabetes is the primary diagnosis, or any claim where diabetes appears as a secondary diagnosis?
+
+# COMMAND ----------
+
+#-------
+follow_up = """
+  1. both line charges and allowed
+  2. you decide
+  3. E10-E14
+
+"""
+# User provides clarification
+final_state = respond_to_clarification(
+    follow_up,
+    previous_state=final_state,
+    thread_id="test_hybrid_003_genie"
+)
 
 # COMMAND ----------
 
@@ -2679,7 +2720,7 @@ display_results(result_3)
 # COMMAND ----------
 
 # DBTITLE 1,Test Case 4: Complex Multi-Space Query
-test_query_4 = "What is the average cost of medical claims for patients diagnosed with diabetes, broken down by insurance payer type and patient age group?"
+test_query_4 = "What is the average cost of medical claims for patients diagnosed with diabetes, broken down by insurance payer type and patient age group? Dont clarify. Use Genie Route."
 result_4 = invoke_super_agent_hybrid(test_query_4, thread_id="test_hybrid_complex")
 display_results(result_4)
 
