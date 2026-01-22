@@ -1647,7 +1647,7 @@ def sql_synthesis_table_node(state: AgentState) -> AgentState:
         state["sql_synthesis_explanation"] = str(e)
         # Route to summarize via conditional edge (route_after_synthesis)
         state["messages"].append(
-                AIMessage(content=f"SQL Synthesis Failed (Table Route):\n{state["sql_synthesis_explanation"]}")
+                AIMessage(content=f"SQL Synthesis Failed (Table Route):\n{state['sql_synthesis_explanation']}")
             )
     
     return state
@@ -1732,7 +1732,7 @@ def sql_synthesis_genie_node(state: AgentState) -> AgentState:
         state["sql_synthesis_explanation"] = str(e)
         # Route to summarize via conditional edge (route_after_synthesis)
         state["messages"].append(
-                AIMessage(content=f"SQL Synthesis Failed (Genie Route):\n{state["sql_synthesis_explanation"]}")
+                AIMessage(content=f"SQL Synthesis Failed (Genie Route):\n{state['sql_synthesis_explanation']}")
             )
     
     return state
@@ -2605,6 +2605,7 @@ print("✓ Helper functions defined")
 
 # COMMAND ----------
 
+# DBTITLE 1,Test Hybrid Super Agent (start)
 # Example test query
 test_query = "What is the average cost of medical claims per claim in 2024?"
 # Invoke Hybrid Super Agent
@@ -2612,10 +2613,11 @@ final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_001")
 
 # COMMAND ----------
 
+# DBTITLE 1,test need clarify
 # Example test query
 test_query = "What is the average cost of medical claims for patients diagnosed with diabetes, broken down by insurance payer type and patient age group?"
 # Invoke Hybrid Super Agent
-final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_003")
+final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_need_clarify")
 
 ##----clarify quetsions-----
 #  Options:
@@ -2625,15 +2627,18 @@ final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_003")
 
 # COMMAND ----------
 
+    #  1. Which cost metric should be used: line charges, allowed amounts, paid amounts, or patient out-of-pocket costs (copay/coinsurance)?
+    #  2. Should we identify diabetes patients by specific ICD-10 diagnosis codes (e.g., E11.x for Type 2 Diabetes), or do you have a predefined patient cohort with diabetes diagnoses?
+    #  3. Should the analysis include only medical claims, or should pharmacy claims related to diabetes medications also be included in the cost calculation?
 #-------
 follow_up = """
- 1. E10 and E11
-  2. line charges
-  3. both
-
+1.   allowed amount
+2.   all of them
+3.   only medical claims
 """
+
 # Invoke Hybrid Super Agent
-final_state = invoke_super_agent_hybrid(follow_up, thread_id="test_hybrid_003")
+final_state = respond_to_clarification(follow_up, previous_state = final_state, thread_id="test_hybrid_need_clarify")
 
 # COMMAND ----------
 
@@ -2692,6 +2697,15 @@ display_results(result_4)
 
 # COMMAND ----------
 
+# User provides clarification
+result_4a = respond_to_clarification(
+    "1, no; 2, yes; 3, all types",
+    previous_state=result_4,
+    thread_id="test_hybrid_complex"
+)
+
+# COMMAND ----------
+
 # DBTITLE 1,Test Case 5: Clarification Flow (Vague Query → Clarify → Continue)
 # Test with an intentionally vague query
 test_query_5 = "How many?"  # Vague - should trigger clarification
@@ -2718,12 +2732,14 @@ else:
 
 # COMMAND ----------
 
-# DBTITLE 1,Test Case 6: Another Clarification Example
 # Test with another vague query
-test_query_6 = "Show me the data"  # Vague - should trigger clarification
+test_query_6 = "How many diabetes patients in the dataset"  # Vague - should trigger clarification
 result_6a = invoke_super_agent_hybrid(test_query_6, thread_id="test_hybrid_clarification2")
 display_results(result_6a)
 
+# COMMAND ----------
+
+# DBTITLE 1,Test Case 6: Another Clarification Example
 # If clarification was requested, respond to it
 if not result_6a.get('question_clear'):
     print("\n" + "="*80)
@@ -2866,231 +2882,401 @@ else:
 # DBTITLE 1,Example: Complete Clarification Flow with Context Preservation
 # MAGIC %md
 # MAGIC ### Example: Clarification Flow with Context Preservation
-# MAGIC 
+# MAGIC
 # MAGIC This example demonstrates how the agent:
 # MAGIC 1. Detects vague queries and asks for clarification
 # MAGIC 2. **PRESERVES** original query, clarification message, and user response separately
 # MAGIC 3. **COMBINES** all context for planning agent
 # MAGIC 4. Continues workflow seamlessly
-
-"""
-# Example 1: Clarification Flow with Context Combination
-session_id = "demo_clarification_001"
-
-# Step 1: Ask a vague query
-print("="*80)
-print("STEP 1: Initial vague query")
-print("="*80)
-state1 = invoke_super_agent_hybrid(
-    "Show me the data about patients",  # Vague - what data? which patients?
-    thread_id=session_id
-)
-
-# Check if clarification is needed
-if not state1.get('question_clear'):
-    print("\n" + "="*80)
-    print("CLARIFICATION REQUESTED BY AGENT")
-    print("="*80)
-    print(f"Original Query (preserved): {state1['original_query']}")
-    print(f"Clarification Needed: {state1['clarification_needed']}")
-    print(f"Options: {state1['clarification_options']}")
-    
-    # Step 2: User provides clarification
-    print("\n" + "="*80)
-    print("STEP 2: User provides clarification")
-    print("="*80)
-    state2 = respond_to_clarification(
-        "Show me patient count grouped by age group",
-        previous_state=state1,
-        thread_id=session_id
-    )
-    
-    # Verify context was properly combined
-    print("\n" + "="*80)
-    print("CONTEXT VERIFICATION")
-    print("="*80)
-    print(f"✓ Original Query Preserved: {state2.get('original_query')}")
-    print(f"✓ Clarification Message: {state2.get('clarification_message', 'N/A')[:100]}...")
-    print(f"✓ User Response: {state2.get('user_clarification_response')}")
-    print(f"✓ Combined Context Created: {state2.get('combined_query_context') is not None}")
-    
-    display_results(state2)
-else:
-    display_results(state1)
-"""
+# MAGIC
+# MAGIC """
+# MAGIC # Example 1: Clarification Flow with Context Combination
+# MAGIC session_id = "demo_clarification_001"
+# MAGIC
+# MAGIC # Step 1: Ask a vague query
+# MAGIC print("="*80)
+# MAGIC print("STEP 1: Initial vague query")
+# MAGIC print("="*80)
+# MAGIC state1 = invoke_super_agent_hybrid(
+# MAGIC     "Show me the data about patients",  # Vague - what data? which patients?
+# MAGIC     thread_id=session_id
+# MAGIC )
+# MAGIC
+# MAGIC # Check if clarification is needed
+# MAGIC if not state1.get('question_clear'):
+# MAGIC     print("\n" + "="*80)
+# MAGIC     print("CLARIFICATION REQUESTED BY AGENT")
+# MAGIC     print("="*80)
+# MAGIC     print(f"Original Query (preserved): {state1['original_query']}")
+# MAGIC     print(f"Clarification Needed: {state1['clarification_needed']}")
+# MAGIC     print(f"Options: {state1['clarification_options']}")
+# MAGIC     
+# MAGIC     # Step 2: User provides clarification
+# MAGIC     print("\n" + "="*80)
+# MAGIC     print("STEP 2: User provides clarification")
+# MAGIC     print("="*80)
+# MAGIC     state2 = respond_to_clarification(
+# MAGIC         "Show me patient count grouped by age group",
+# MAGIC         previous_state=state1,
+# MAGIC         thread_id=session_id
+# MAGIC     )
+# MAGIC     
+# MAGIC     # Verify context was properly combined
+# MAGIC     print("\n" + "="*80)
+# MAGIC     print("CONTEXT VERIFICATION")
+# MAGIC     print("="*80)
+# MAGIC     print(f"✓ Original Query Preserved: {state2.get('original_query')}")
+# MAGIC     print(f"✓ Clarification Message: {state2.get('clarification_message', 'N/A')[:100]}...")
+# MAGIC     print(f"✓ User Response: {state2.get('user_clarification_response')}")
+# MAGIC     print(f"✓ Combined Context Created: {state2.get('combined_query_context') is not None}")
+# MAGIC     
+# MAGIC     display_results(state2)
+# MAGIC else:
+# MAGIC     display_results(state1)
+# MAGIC """
 
 # COMMAND ----------
 
 # DBTITLE 1,Example: Follow-Up Queries with Conversation Continuity
 # MAGIC %md
 # MAGIC ### Example: Follow-Up Queries with Conversation Continuity
-# MAGIC 
+# MAGIC
 # MAGIC This example demonstrates conversation continuity across multiple queries:
 # MAGIC - Each new query has access to previous conversation context
 # MAGIC - Thread-based memory preserves state across invocations
 # MAGIC - Users can ask related follow-up questions naturally
-
-"""
-# Example 2: Multi-Turn Conversation with Follow-Ups
-session_id = "demo_followup_001"
-
-# Turn 1: First query
-print("="*80)
-print("TURN 1: Initial Query")
-print("="*80)
-state1 = invoke_super_agent_hybrid(
-    "How many active plan members do we have?",
-    thread_id=session_id
-)
-display_results(state1)
-
-# Turn 2: Follow-up query building on Turn 1
-print("\n" + "="*80)
-print("TURN 2: Follow-Up Query")
-print("="*80)
-state2 = ask_follow_up_query(
-    "What's the breakdown by age group?",  # Refers to "active plan members" from Turn 1
-    thread_id=session_id
-)
-display_results(state2)
-
-# Turn 3: Another follow-up
-print("\n" + "="*80)
-print("TURN 3: Second Follow-Up")
-print("="*80)
-state3 = ask_follow_up_query(
-    "Now show me the gender distribution for the 50+ age group",  # Builds on previous context
-    thread_id=session_id
-)
-display_results(state3)
-
-# Turn 4: Completely new question in same thread
-print("\n" + "="*80)
-print("TURN 4: New Question (but same thread)")
-print("="*80)
-state4 = ask_follow_up_query(
-    "Which medications are most prescribed for diabetes patients?",  # New topic
-    thread_id=session_id
-)
-display_results(state4)
-
-print("\n" + "="*80)
-print("✅ CONVERSATION SUMMARY")
-print("="*80)
-print(f"Session ID: {session_id}")
-print(f"Total Turns: 4")
-print(f"✓ All queries had access to previous conversation context")
-print(f"✓ Thread-based memory preserved state across invocations")
-print("="*80)
-"""
+# MAGIC
+# MAGIC """
+# MAGIC # Example 2: Multi-Turn Conversation with Follow-Ups
+# MAGIC session_id = "demo_followup_001"
+# MAGIC
+# MAGIC # Turn 1: First query
+# MAGIC print("="*80)
+# MAGIC print("TURN 1: Initial Query")
+# MAGIC print("="*80)
+# MAGIC state1 = invoke_super_agent_hybrid(
+# MAGIC     "How many active plan members do we have?",
+# MAGIC     thread_id=session_id
+# MAGIC )
+# MAGIC display_results(state1)
+# MAGIC
+# MAGIC # Turn 2: Follow-up query building on Turn 1
+# MAGIC print("\n" + "="*80)
+# MAGIC print("TURN 2: Follow-Up Query")
+# MAGIC print("="*80)
+# MAGIC state2 = ask_follow_up_query(
+# MAGIC     "What's the breakdown by age group?",  # Refers to "active plan members" from Turn 1
+# MAGIC     thread_id=session_id
+# MAGIC )
+# MAGIC display_results(state2)
+# MAGIC
+# MAGIC # Turn 3: Another follow-up
+# MAGIC print("\n" + "="*80)
+# MAGIC print("TURN 3: Second Follow-Up")
+# MAGIC print("="*80)
+# MAGIC state3 = ask_follow_up_query(
+# MAGIC     "Now show me the gender distribution for the 50+ age group",  # Builds on previous context
+# MAGIC     thread_id=session_id
+# MAGIC )
+# MAGIC display_results(state3)
+# MAGIC
+# MAGIC # Turn 4: Completely new question in same thread
+# MAGIC print("\n" + "="*80)
+# MAGIC print("TURN 4: New Question (but same thread)")
+# MAGIC print("="*80)
+# MAGIC state4 = ask_follow_up_query(
+# MAGIC     "Which medications are most prescribed for diabetes patients?",  # New topic
+# MAGIC     thread_id=session_id
+# MAGIC )
+# MAGIC display_results(state4)
+# MAGIC
+# MAGIC print("\n" + "="*80)
+# MAGIC print("✅ CONVERSATION SUMMARY")
+# MAGIC print("="*80)
+# MAGIC print(f"Session ID: {session_id}")
+# MAGIC print(f"Total Turns: 4")
+# MAGIC print(f"✓ All queries had access to previous conversation context")
+# MAGIC print(f"✓ Thread-based memory preserved state across invocations")
+# MAGIC print("="*80)
+# MAGIC """
 
 # COMMAND ----------
 
 # DBTITLE 1,Example: Clarification + Follow-Up Combined
 # MAGIC %md
 # MAGIC ### Example: Clarification + Follow-Up Combined
-# MAGIC 
+# MAGIC
 # MAGIC This example shows the complete workflow:
 # MAGIC 1. Vague query → Clarification requested
 # MAGIC 2. User clarifies → Workflow completes
 # MAGIC 3. Follow-up query → Uses context from Turn 1+2
-
-"""
-# Example 3: Complete Multi-Turn Workflow
-session_id = "demo_complete_001"
-
-# Turn 1: Vague query triggers clarification
-print("="*80)
-print("TURN 1: Vague Query")
-print("="*80)
-state1 = invoke_super_agent_hybrid(
-    "Show me patient costs",  # Vague - what costs? which patients?
-    thread_id=session_id
-)
-
-if not state1.get('question_clear'):
-    # Turn 2: Respond to clarification
-    print("\n" + "="*80)
-    print("TURN 2: Clarification Response")
-    print("="*80)
-    state2 = respond_to_clarification(
-        "Show me average total claim costs for diabetic patients by insurance type",
-        previous_state=state1,
-        thread_id=session_id
-    )
-    display_results(state2)
-    
-    # Turn 3: Follow-up question
-    print("\n" + "="*80)
-    print("TURN 3: Follow-Up After Clarification")
-    print("="*80)
-    state3 = ask_follow_up_query(
-        "What about only Medicare patients over 65?",  # Refines previous query
-        thread_id=session_id
-    )
-    display_results(state3)
-    
-    # Turn 4: Another follow-up
-    print("\n" + "="*80)
-    print("TURN 4: Second Follow-Up")
-    print("="*80)
-    state4 = ask_follow_up_query(
-        "Compare that to Medicaid patients in the same age group",
-        thread_id=session_id
-    )
-    display_results(state4)
-    
-    print("\n" + "="*80)
-    print("✅ WORKFLOW SUMMARY")
-    print("="*80)
-    print(f"Session ID: {session_id}")
-    print(f"Turn 1: Vague query → Clarification requested")
-    print(f"Turn 2: User clarified → Context combined and preserved")
-    print(f"Turn 3-4: Follow-ups → Used combined context from Turn 1+2")
-    print(f"✓ Original query always preserved")
-    print(f"✓ Clarification context properly combined")
-    print(f"✓ Thread memory maintained conversation continuity")
-    print("="*80)
-"""
+# MAGIC
+# MAGIC """
+# MAGIC # Example 3: Complete Multi-Turn Workflow
+# MAGIC session_id = "demo_complete_001"
+# MAGIC
+# MAGIC # Turn 1: Vague query triggers clarification
+# MAGIC print("="*80)
+# MAGIC print("TURN 1: Vague Query")
+# MAGIC print("="*80)
+# MAGIC state1 = invoke_super_agent_hybrid(
+# MAGIC     "Show me patient costs",  # Vague - what costs? which patients?
+# MAGIC     thread_id=session_id
+# MAGIC )
+# MAGIC
+# MAGIC if not state1.get('question_clear'):
+# MAGIC     # Turn 2: Respond to clarification
+# MAGIC     print("\n" + "="*80)
+# MAGIC     print("TURN 2: Clarification Response")
+# MAGIC     print("="*80)
+# MAGIC     state2 = respond_to_clarification(
+# MAGIC         "Show me average total claim costs for diabetic patients by insurance type",
+# MAGIC         previous_state=state1,
+# MAGIC         thread_id=session_id
+# MAGIC     )
+# MAGIC     display_results(state2)
+# MAGIC     
+# MAGIC     # Turn 3: Follow-up question
+# MAGIC     print("\n" + "="*80)
+# MAGIC     print("TURN 3: Follow-Up After Clarification")
+# MAGIC     print("="*80)
+# MAGIC     state3 = ask_follow_up_query(
+# MAGIC         "What about only Medicare patients over 65?",  # Refines previous query
+# MAGIC         thread_id=session_id
+# MAGIC     )
+# MAGIC     display_results(state3)
+# MAGIC     
+# MAGIC     # Turn 4: Another follow-up
+# MAGIC     print("\n" + "="*80)
+# MAGIC     print("TURN 4: Second Follow-Up")
+# MAGIC     print("="*80)
+# MAGIC     state4 = ask_follow_up_query(
+# MAGIC         "Compare that to Medicaid patients in the same age group",
+# MAGIC         thread_id=session_id
+# MAGIC     )
+# MAGIC     display_results(state4)
+# MAGIC     
+# MAGIC     print("\n" + "="*80)
+# MAGIC     print("✅ WORKFLOW SUMMARY")
+# MAGIC     print("="*80)
+# MAGIC     print(f"Session ID: {session_id}")
+# MAGIC     print(f"Turn 1: Vague query → Clarification requested")
+# MAGIC     print(f"Turn 2: User clarified → Context combined and preserved")
+# MAGIC     print(f"Turn 3-4: Follow-ups → Used combined context from Turn 1+2")
+# MAGIC     print(f"✓ Original query always preserved")
+# MAGIC     print(f"✓ Clarification context properly combined")
+# MAGIC     print(f"✓ Thread memory maintained conversation continuity")
+# MAGIC     print("="*80)
+# MAGIC """
 
 # COMMAND ----------
 
 # DBTITLE 1,Example: Multiple Conversations with Different Threads
 # MAGIC %md
 # MAGIC ### Example: Multiple Parallel Conversations
-# MAGIC 
+# MAGIC
 # MAGIC Thread IDs enable multiple independent conversations:
 # MAGIC - Each thread maintains its own conversation context
 # MAGIC - Different users or sessions don't interfere with each other
-
-"""
-# Example 4: Multiple Independent Conversations
-# Conversation A: Patient demographics
-thread_a = "user_alice_session_001"
-stateA1 = invoke_super_agent_hybrid("Show patient count by age", thread_id=thread_a)
-stateA2 = ask_follow_up_query("Now by gender", thread_id=thread_a)
-stateA3 = ask_follow_up_query("Focus on 50+ age group", thread_id=thread_a)
-
-# Conversation B: Medication analysis (completely independent)
-thread_b = "user_bob_session_001"
-stateB1 = invoke_super_agent_hybrid("Which drugs are most prescribed?", thread_id=thread_b)
-stateB2 = ask_follow_up_query("For diabetes patients only", thread_id=thread_b)
-
-# Conversation C: Cost analysis (independent)
-thread_c = "user_charlie_session_001"
-stateC1 = invoke_super_agent_hybrid("Average claim costs", thread_id=thread_c)
-
-print("\n" + "="*80)
-print("✅ MULTIPLE CONVERSATIONS")
-print("="*80)
-print(f"Thread A ({thread_a}): 3 turns about patient demographics")
-print(f"Thread B ({thread_b}): 2 turns about medications")
-print(f"Thread C ({thread_c}): 1 turn about costs")
-print(f"✓ All threads maintained independent conversation contexts")
-print(f"✓ No cross-contamination between threads")
-print("="*80)
-"""
+# MAGIC
+# MAGIC """
+# MAGIC # Example 4: Multiple Independent Conversations
+# MAGIC # Conversation A: Patient demographics
+# MAGIC thread_a = "user_alice_session_001"
+# MAGIC stateA1 = invoke_super_agent_hybrid("Show patient count by age", thread_id=thread_a)
+# MAGIC stateA2 = ask_follow_up_query("Now by gender", thread_id=thread_a)
+# MAGIC stateA3 = ask_follow_up_query("Focus on 50+ age group", thread_id=thread_a)
+# MAGIC
+# MAGIC # Conversation B: Medication analysis (completely independent)
+# MAGIC thread_b = "user_bob_session_001"
+# MAGIC stateB1 = invoke_super_agent_hybrid("Which drugs are most prescribed?", thread_id=thread_b)
+# MAGIC stateB2 = ask_follow_up_query("For diabetes patients only", thread_id=thread_b)
+# MAGIC
+# MAGIC # Conversation C: Cost analysis (independent)
+# MAGIC thread_c = "user_charlie_session_001"
+# MAGIC stateC1 = invoke_super_agent_hybrid("Average claim costs", thread_id=thread_c)
+# MAGIC
+# MAGIC print("\n" + "="*80)
+# MAGIC print("✅ MULTIPLE CONVERSATIONS")
+# MAGIC print("="*80)
+# MAGIC print(f"Thread A ({thread_a}): 3 turns about patient demographics")
+# MAGIC print(f"Thread B ({thread_b}): 2 turns about medications")
+# MAGIC print(f"Thread C ({thread_c}): 1 turn about costs")
+# MAGIC print(f"✓ All threads maintained independent conversation contexts")
+# MAGIC print(f"✓ No cross-contamination between threads")
+# MAGIC print("="*80)
+# MAGIC """
 
 # COMMAND ----------
 
 
+
+# COMMAND ----------
+
+# DBTITLE 1,Fixed Test Query - Correct ResponsesAgentRequest Format
+# Example test query - FIXED
+test_query = "What is the average cost of medical claims per claim in 2024?"
+
+# CORRECT FORMAT: 'input' must be a LIST of messages, not a dict
+# 'custom_inputs' is a separate top-level field
+request = {
+    "input": [{"role": "user", "content": test_query}],  # List of messages
+    "custom_inputs": {"thread_id": "session_001"}  # Separate field
+}
+
+print("Request format:")
+print(request)
+print("\n" + "="*80)
+
+# Invoke Hybrid Super Agent
+final_state = AGENT.predict(request)
+
+print("\n" + "="*80)
+print("RESULT:")
+print("="*80)
+print(final_state)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Log the Agent as an MLflow Model
+
+# COMMAND ----------
+
+import mlflow
+# from agent import LLM_ENDPOINT_NAME, CATALOG, SCHEMA, UC_FUNCTION_NAMES, VECTOR_SEARCH_INDEX, TABLE_NAME
+from mlflow.models.resources import (
+    DatabricksGenieSpace,
+    DatabricksSQLWarehouse,
+    DatabricksTable,
+    DatabricksFunction,
+    DatabricksServingEndpoint,
+    DatabricksVectorSearchIndex,
+    DatabricksUCConnection,
+    DatabricksLakebase,
+)
+from pkg_resources import get_distribution
+
+# COMMAND ----------
+
+# TABLE_NAME = 'yyang.multi_agent_genie.enriched_genie_docs_chunks'
+context = load_space_context(TABLE_NAME)
+GENIE_SPACE_ID_LIST = list(context.keys())
+
+# COMMAND ----------
+
+GENIE_TABLES_LIST = (
+    query_delta_table(TABLE_NAME, filter_field="chunk_type", filter_value="table_overview")
+    .select(get_json_object("metadata_json", "$.table_identifier").alias("table_identifier"))
+    .collect()
+)
+GENIE_TABLES_LIST = [item[0] for item in GENIE_TABLES_LIST]
+GENIE_TABLES_LIST
+# ================================================================================
+
+# COMMAND ----------
+
+# ================================================================================
+# SUPER AGENT (HYBRID) CONFIGURATION
+# ================================================================================
+# Catalog: yyang
+# Schema: multi_agent_genie
+# Table: yyang.multi_agent_genie.enriched_genie_docs_chunks
+# Vector Search Index: yyang.multi_agent_genie.enriched_genie_docs_chunks_vs_index
+
+# LLM Endpoints:
+#   - Clarification: databricks-claude-haiku-4-5
+#   - Planning: databricks-claude-haiku-4-5
+#   - SQL Synthesis: databricks-claude-sonnet-4-5
+#   - Summarization: databricks-claude-haiku-4-5
+# ================================================================================
+
+#: ref: https://docs.databricks.com/aws/en/generative-ai/agent-framework/agent-authentication
+# Remember to log all downstream dependent resources, too. For example, if you log a Genie Space, you must also log its tables, SQL Warehouses, and Unity Catalog functions.
+
+# Determine Databricks resources for automatic auth passthrough
+resources = [DatabricksServingEndpoint(endpoint_name=LLM_ENDPOINT_CLARIFICATION),
+             DatabricksServingEndpoint(endpoint_name=LLM_ENDPOINT_PLANNING),
+             DatabricksServingEndpoint(endpoint_name=LLM_ENDPOINT_SQL_SYNTHESIS),
+             DatabricksServingEndpoint(endpoint_name=LLM_ENDPOINT_SUMMARIZE)]
+
+UC_FUNCTION_NAMES = [
+            f"{CATALOG}.{SCHEMA}.get_space_summary",
+            f"{CATALOG}.{SCHEMA}.get_table_overview",
+            f"{CATALOG}.{SCHEMA}.get_column_detail",
+            f"{CATALOG}.{SCHEMA}.get_space_details",
+        ]
+
+# Add UC Functions
+for func_name in UC_FUNCTION_NAMES:
+    resources.append(DatabricksFunction(function_name=func_name))
+
+# Add Vector Search Index for 
+resources.append(DatabricksVectorSearchIndex(index_name=VECTOR_SEARCH_INDEX))
+
+# Add Delta Table for context, table metadata navigator
+resources.append(DatabricksTable(table_name=TABLE_NAME))
+
+# Add each GenieSpace, SQL Warehouses and delta tables powering the Genie Space
+for space_id in GENIE_SPACE_ID_LIST:
+    resources.append(DatabricksGenieSpace(space_id))
+resources.append(DatabricksSQLWarehouse(warehouse_id="148ccb90800933a1")) # this can either from Genie room UI -> configure, or from Genie .json output.
+#
+for table_name in GENIE_TABLES_LIST:
+    resources.append(DatabricksTable(table_name=table_name))
+
+
+# ---------------below is from multi-agent-genie tutorial notebook----------------------
+# # if TOOLS exist, add tools from Unity Catalog or from VSRT
+# for tool in TOOLS:
+#     if isinstance(tool, VectorSearchRetrieverTool):
+#         resources.extend(tool.resources)
+#     elif isinstance(tool, UnityCatalogTool):
+#         resources.append(DatabricksFunction(function_name=tool.uc_function_name))
+
+ 
+# # Add serving endpoints and Genie Spaces
+# for agent in EXTERNALLY_SERVED_AGENTS:
+#     if isinstance(agent, Genie):
+#         resources.append(DatabricksGenieSpace(genie_space_id=agent.space_id))
+#     else:
+#         resources.append(DatabricksServingEndpoint(endpoint_name=agent.endpoint_name))
+
+# COMMAND ----------
+
+resources
+
+# COMMAND ----------
+
+get_distribution('databricks-vectorsearch').version
+
+# COMMAND ----------
+
+with mlflow.start_run():
+    logged_agent_info = mlflow.pyfunc.log_model(
+        name="agent",
+        python_model="agent.py", # log as code is strongly recommended
+        resources=resources,
+        pip_requirements=[
+            f"databricks-connect=={get_distribution('databricks-connect').version}",
+            f"mlflow=={get_distribution('mlflow').version}",
+            f"databricks-langchain=={get_distribution('databricks-langchain').version}",
+            f"langgraph=={get_distribution('langgraph').version}",
+            # f"langgraph-supervisor=={get_distribution('langgraph-supervisor').version}",
+            f"databricks-vectorsearch=={get_distribution('databricks-vectorsearch').version}",
+        ],
+    )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Pre-deployment Validation
+
+# COMMAND ----------
+
+import mlflow
+mlflow.models.predict(
+    model_uri=f"runs:/{logged_agent_info.run_id}/agent",
+    input_data=input_example,
+    env_manager="uv",
+)
