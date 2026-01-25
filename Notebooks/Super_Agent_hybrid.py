@@ -2574,6 +2574,42 @@ Uses DatabricksStore with semantic search to find relevant memories.
 
 # COMMAND ----------
 
+# DBTITLE 1,🔄 Test agent.py (Recommended Workflow)
+"""
+RECOMMENDED WORKFLOW:
+1. Edit agent.py directly (use IDE, get autocomplete, syntax highlighting)
+2. Run this cell to test the agent.py file
+3. Make any revisions needed in agent.py
+4. Re-run this cell to test
+5. When ready, proceed to deployment
+
+ALTERNATIVE: If you prefer to develop in the notebook, see SYNC_WORKFLOW.md
+for instructions on using %%writefile to sync notebook → agent.py
+
+This cell imports AGENT from agent.py, so you're testing the exact code
+that will be deployed!
+"""
+
+# Import agent from agent.py (tests the deployment file!)
+%run ../agent.py
+
+print("\n" + "="*80)
+print("✅ AGENT LOADED FROM agent.py")
+print("="*80)
+print("This is the EXACT code that will be deployed to Model Serving!")
+print("\nFeatures:")
+print("  ✓ Short-term memory (CheckpointSaver)")
+print("  ✓ Long-term memory (DatabricksStore)")
+print("  ✓ ModelConfig for configuration")
+print("  ✓ Distributed serving ready")
+print("\nTo make changes:")
+print("  1. Edit ../agent.py")
+print("  2. Re-run this cell to test")
+print("  3. Deploy when ready!")
+print("="*80)
+
+# COMMAND ----------
+
 # DBTITLE 1,Helper: Find All Required Resources for Deployment
 """
 Run this helper to automatically discover all resources needed for deployment.
