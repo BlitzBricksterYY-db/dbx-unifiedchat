@@ -9,6 +9,48 @@ This guide walks you through deploying your Super Agent with both short-term and
 - ✅ One-time setup completed (checkpoint and store tables created)
 - ✅ Agent tested locally
 
+## Project Structure
+
+```
+KUMC_POC_hlsfieldtemp/
+├── agent.py                           # ⚠️ DEPLOYMENT FILE (MLflow entry point)
+├── config.py                          # Configuration management
+├── .env                               # Environment variables
+├── Notebooks/
+│   ├── Super_Agent_hybrid.py          # Full notebook with setup & deployment code
+│   └── MEMORY_IMPLEMENTATION_GUIDE.md # Memory features guide
+└── DEPLOYMENT_GUIDE.md                # This file
+```
+
+### Key Files
+
+**`agent.py`** (NEW!)
+- **Purpose**: Runtime-essential agent code for MLflow deployment
+- **Contains**: Agent classes, workflow creation, memory support, MLflow setup
+- **Configuration**: Uses `ModelConfig` with `development_config` for local testing
+- **Follows**: MLflow best practice with `mlflow.langchain.autolog()` and `mlflow.models.set_model(AGENT)`
+- **Excludes**: UC function definitions, setup code (stays in notebook)
+
+**`dev_config.yaml`** (NEW!)
+- **Purpose**: Development configuration for local testing
+- **Used by**: `agent.py` as `development_config` parameter in `ModelConfig`
+- **Contains**: All agent settings (catalog, schema, Lakebase, Genie spaces, etc.)
+
+**`prod_config.yaml`** (NEW!)
+- **Purpose**: Production configuration for Model Serving deployment
+- **Used by**: Deployment code via `log_model(model_config="prod_config.yaml")`
+- **Contains**: Production settings (may differ from dev, e.g., different Lakebase instance)
+
+**`Notebooks/Super_Agent_hybrid.py`**
+- **Purpose**: Complete notebook for development, testing, and deployment
+- **Contains**: Everything (UC function setup, agent code, testing, deployment)
+- **References**: `agent.py` + `prod_config.yaml` for deployment
+
+This separation follows MLflow and Databricks best practices:
+- Setup happens in notebook
+- Runtime logic lives in `agent.py`
+- Configuration is parametrized via `ModelConfig` (Databricks recommended approach)
+
 ---
 
 ## Prerequisites: Find Required Resource IDs
@@ -82,6 +124,38 @@ UNDERLYING_TABLES = [
 ```
 
 ### Step 2: Log Model with Resources (CRITICAL!)
+
+**⚠️ IMPORTANT: Databricks Best Practice - ModelConfig**
+
+We use **ModelConfig** to parametrize configuration across environments, as recommended in [Databricks documentation](https://docs.databricks.com/aws/en/generative-ai/agent-framework/author-agent?language=LangGraph#parametrize-code-for-deployment-across-environments):
+
+```python
+python_model="../agent.py"         # Runtime agent code
+model_config="../prod_config.yaml"  # Production configuration (versioned with model!)
+```
+
+**Why ModelConfig?**
+- ✅ **Databricks-recommended** for parametrizing agent code across environments
+- ✅ **Configuration versioned with model** - each model version has its own config
+- ✅ **No `environment_vars` parameter needed** - config packaged with model
+- ✅ **Type-safe and structured** - YAML format with validation
+- ✅ **Easier testing** - swap configs without changing code
+
+**Configuration flow:**
+```python
+# agent.py
+model_config = ModelConfig(development_config="dev_config.yaml")  # For local testing
+# When deployed, prod_config.yaml overrides development_config
+
+# MLflow setup (KEY!)
+mlflow.langchain.autolog()
+mlflow.models.set_model(AGENT)
+```
+
+**What gets packaged:**
+- `agent.py` - Runtime agent code
+- `prod_config.yaml` - Production configuration (versioned!)
+- `requirements.txt` - Python dependencies
 
 ```python
 # DBTITLE 1,Deploy Agent to Model Serving with Memory Support
@@ -158,9 +232,12 @@ input_example = {
 with mlflow.start_run():
     logged_agent_info = mlflow.pyfunc.log_model(
         name="super_agent_hybrid_with_memory",
-        python_model="Super_Agent_hybrid.py",  # This file
+        # ⚠️ IMPORTANT: Reference agent.py (MLflow best practice)
+        python_model="../agent.py",  # Path relative to Notebooks/ folder
         input_example=input_example,
         resources=resources,  # ⚠️ CRITICAL for distributed serving!
+        # ✅ ModelConfig: Configuration versioned with model (Databricks best practice!)
+        model_config="../prod_config.yaml",  # Production configuration
         pip_requirements=[
             f"databricks-langchain[memory]=={get_distribution('databricks-langchain').version}",
             f"databricks-agents=={get_distribution('databricks-agents').version}",
@@ -169,7 +246,20 @@ with mlflow.start_run():
         ]
     )
     print(f"✓ Model logged: {logged_agent_info.model_uri}")
+    print(f"✓ Configuration: prod_config.yaml")
 ```
+
+**What MLflow packages:**
+- ✅ `agent.py` - Your agent code (with mlflow.models.set_model())
+- ✅ `prod_config.yaml` - Production configuration (**versioned with model!**)
+- ✅ All pip requirements
+
+**NOT packaged:**
+- ❌ `.env` file (not needed!)
+- ❌ `config.py` (not needed with ModelConfig!)
+- ❌ Notebook files
+
+
 
 **Expected Output:**
 ```
@@ -204,29 +294,42 @@ print(f"✓ Model registered: {UC_MODEL_NAME} version {uc_model_info.version}")
 
 ---
 
-### Step 4: Deploy to Model Serving
+### Step 4: Deploy to Model Serving (Simple with ModelConfig!)
+
+**✅ With ModelConfig: No environment_vars needed!**
+
+Configuration is already packaged with the model via the `model_config` parameter in Step 2.
 
 ```python
 from databricks import agents
 
-# Deploy the model
+# ✅ With ModelConfig, deployment is clean and simple!
+# Configuration was already packaged with the model in Step 2
 deployment_info = agents.deploy(
     UC_MODEL_NAME,
     uc_model_info.version,
     scale_to_zero=True,      # Cost optimization
-    workload_size="Small"    # Start small, can scale up later
+    workload_size="Small",   # Start small, can scale up later
+    # ✅ NO environment_vars parameter needed!
+    # Configuration is versioned with the model
 )
 
 print(f"✓ Deployed to Model Serving: {deployment_info.endpoint_name}")
 print("\n" + "="*80)
-print("DEPLOYMENT COMPLETE")
+print("✅ DEPLOYMENT COMPLETE")
 print("="*80)
 print(f"Model: {UC_MODEL_NAME} v{uc_model_info.version}")
 print(f"Endpoint: {deployment_info.endpoint_name}")
+print(f"Configuration: prod_config.yaml (packaged with model)")
 print("\nMemory Features Enabled:")
 print("  ✓ Short-term: Multi-turn conversations via CheckpointSaver")
 print("  ✓ Long-term: User preferences via DatabricksStore")
 print("  ✓ Distributed serving: State shared across all instances")
+print("\nModelConfig Advantages:")
+print("  ✓ Configuration versioned with model")
+print("  ✓ No environment_vars parameter needed")
+print("  ✓ Easy to swap dev/staging/prod configs")
+print("  ✓ Type-safe and structured")
 print("="*80)
 ```
 
@@ -247,19 +350,29 @@ Memory Features Enabled:
 
 ---
 
-## Complete Deployment Code (Copy-Paste Ready)
+## Complete Deployment Code (Copy-Paste Ready with ModelConfig!)
 
-Here's the complete code block ready to run:
+Here's the complete code block with all improvements:
+- ✅ ModelConfig (no environment_vars needed!)
+- ✅ All resources (Genie spaces, SQL warehouse, tables)
+- ✅ Memory support (CheckpointSaver + DatabricksStore)
+
+**⚠️ Before running: Update these in the code below:**
+1. `SQL_WAREHOUSE_ID` - Your actual warehouse ID
+2. `UNDERLYING_TABLES` - Tables from your metadata query
 
 ```python
 # COMMAND ----------
 
-# DBTITLE 1,Deploy Agent to Model Serving with Memory Support
+# DBTITLE 1,Deploy Agent to Model Serving with Memory Support (ModelConfig!)
 from mlflow.models.resources import (
     DatabricksServingEndpoint,
     DatabricksLakebase,
     DatabricksFunction,
-    DatabricksVectorSearchIndex
+    DatabricksVectorSearchIndex,
+    DatabricksGenieSpace,
+    DatabricksSQLWarehouse,
+    DatabricksTable,
 )
 from pkg_resources import get_distribution
 from databricks import agents
@@ -267,6 +380,16 @@ from databricks import agents
 print("="*80)
 print("DEPLOYING SUPER AGENT WITH MEMORY TO MODEL SERVING")
 print("="*80)
+
+# Get Genie space IDs from config
+GENIE_SPACE_IDS = config.table_metadata.genie_space_ids
+
+# ⚠️ TODO: Update these values
+SQL_WAREHOUSE_ID = "148ccb90800933a1"  # Your SQL Warehouse ID
+UNDERLYING_TABLES = [
+    # TODO: Add tables from query: SELECT DISTINCT table_name FROM enriched_genie_docs_chunks
+    # Example: f"{CATALOG}.{SCHEMA}.patient_demographics",
+]
 
 # Step 1: Declare resources
 print("\n[1/4] Declaring resources...")
@@ -284,6 +407,16 @@ resources = [
     # Vector Search Index
     DatabricksVectorSearchIndex(index_name=VECTOR_SEARCH_INDEX),
     
+    # SQL Warehouse (required for Genie spaces)
+    DatabricksSQLWarehouse(warehouse_id=SQL_WAREHOUSE_ID),
+    
+    # Genie Spaces (all spaces used by agent)
+    *[DatabricksGenieSpace(genie_space_id=space_id) for space_id in GENIE_SPACE_IDS],
+    
+    # Tables
+    DatabricksTable(table_name=TABLE_NAME),  # Metadata table
+    *[DatabricksTable(table_name=table) for table in UNDERLYING_TABLES],
+    
     # UC Functions
     DatabricksFunction(function_name=f"{CATALOG}.{SCHEMA}.get_space_summary"),
     DatabricksFunction(function_name=f"{CATALOG}.{SCHEMA}.get_table_overview"),
@@ -291,19 +424,21 @@ resources = [
     DatabricksFunction(function_name=f"{CATALOG}.{SCHEMA}.get_space_details"),
 ]
 print(f"✓ Declared {len(resources)} resources")
+print(f"  - {len(GENIE_SPACE_IDS)} Genie Spaces")
+print(f"  - {len(UNDERLYING_TABLES) + 1} Tables")
 
-# Step 2: Log model
+# Step 2: Log model with ModelConfig
 print("\n[2/4] Logging model to MLflow...")
 input_example = {
     "input": [{"role": "user", "content": "Show me patient data"}],
     "custom_inputs": {"thread_id": "example-123"},
-    "context": {"conversation_id": "sess-001", "user_id": "user@example.com"}
 }
 
 with mlflow.start_run():
     logged_agent_info = mlflow.pyfunc.log_model(
         name="super_agent_hybrid_with_memory",
-        python_model="Super_Agent_hybrid.py",
+        python_model="../agent.py",
+        model_config="../prod_config.yaml",  # ✅ ModelConfig!
         input_example=input_example,
         resources=resources,
         pip_requirements=[
@@ -314,6 +449,7 @@ with mlflow.start_run():
         ]
     )
 print(f"✓ Model logged: {logged_agent_info.model_uri}")
+print(f"✓ Configuration: prod_config.yaml (versioned with model)")
 
 # Step 3: Register to Unity Catalog
 print("\n[3/4] Registering to Unity Catalog...")
@@ -333,6 +469,7 @@ deployment_info = agents.deploy(
     uc_model_info.version,
     scale_to_zero=True,
     workload_size="Small"
+    # ✅ NO environment_vars parameter needed with ModelConfig!
 )
 
 print("\n" + "="*80)
@@ -341,12 +478,17 @@ print("="*80)
 print(f"Model: {UC_MODEL_NAME}")
 print(f"Version: {uc_model_info.version}")
 print(f"Endpoint: {deployment_info.endpoint_name}")
+print(f"Configuration: prod_config.yaml (versioned with model)")
 print(f"\nEndpoint URL:")
 print(f"  https://{dbutils.notebook.entry_point.getDbutils().notebook().getContext().browserHostName().get()}/ml/endpoints/{deployment_info.endpoint_name}")
 print("\nMemory Features:")
 print("  ✓ Short-term: Multi-turn conversations (CheckpointSaver + Lakebase)")
 print("  ✓ Long-term: User preferences (DatabricksStore + Lakebase)")
 print("  ✓ Distributed: State shared across all serving instances")
+print("\nModelConfig Advantages:")
+print("  ✓ Configuration versioned with model")
+print("  ✓ No environment_vars parameter needed")
+print("  ✓ Easy to swap dev/staging/prod configs")
 print("\nNext Steps:")
 print("  1. Go to Machine Learning → Serving → Find your endpoint")
 print("  2. Test with sample queries")
@@ -480,10 +622,31 @@ agents.deploy(
 
 ## Troubleshooting
 
+### Issue: "Configuration error" or missing configuration values
+**Cause:** ModelConfig not properly configured  
+**Solution:** Verify `prod_config.yaml` has all required values:
+```yaml
+# prod_config.yaml
+catalog_name: yyang
+schema_name: multi_agent_genie
+lakebase_instance_name: your-actual-instance-name
+# ... all other config values
+```
+
+And that it's passed during logging:
+```python
+mlflow.pyfunc.log_model(
+    python_model="../agent.py",
+    model_config="../prod_config.yaml",  # ⚠️ CRITICAL!
+    ...
+)
+```
+
 ### Issue: "Resource not found: Lakebase instance"
-**Solution:** Verify Lakebase instance name in `.env`:
-```bash
-LAKEBASE_INSTANCE_NAME=your-actual-instance-name
+**Solution:** Verify Lakebase instance name in `prod_config.yaml`:
+```yaml
+# prod_config.yaml
+lakebase_instance_name: your-actual-instance-name  # Update this!
 ```
 
 ### Issue: "Permission denied accessing Lakebase"

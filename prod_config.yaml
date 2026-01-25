@@ -1,0 +1,42 @@
+# Production Configuration for Multi-Agent Genie System
+# This config is used for production deployment to Model Serving
+
+# Unity Catalog Configuration
+catalog_name: yyang
+schema_name: multi_agent_genie
+
+# LLM Endpoint Configuration
+llm_endpoint: databricks-claude-sonnet-4-5
+
+# Vector Search Configuration
+vs_endpoint_name: genie_multi_agent_vs
+embedding_model: databricks-gte-large-en
+
+# Lakebase Configuration (for State Management)
+# ⚠️ TODO: Update with your production Lakebase instance name
+lakebase_instance_name: multi-agent-genie-system-state-db
+lakebase_embedding_endpoint: databricks-gte-large-en
+lakebase_embedding_dims: 1024
+
+# Genie Space IDs (production spaces)
+# ⚠️ TODO: Update with your production Genie space IDs if different from dev
+genie_space_ids:
+  - 01f0eab621401f9faa11e680f5a2bcd0
+  - 01f0eababd9f1bcab5dea65cf67e48e3
+  - 01f0eac186d11b9897bc1d43836cc4e1
+
+# SQL Warehouse ID (for Genie spaces)
+# ⚠️ TODO: Update with your production SQL Warehouse ID if different
+sql_warehouse_id: 148ccb90800933a1
+
+# Table Metadata Enrichment
+sample_size: 100
+max_unique_values: 50
+genie_exports_volume: yyang.multi_agent_genie.volume
+enriched_docs_table: yyang.multi_agent_genie.enriched_genie_docs
+
+# Model Serving Configuration
+model_name: multi_agent_genie_system
+endpoint_name: multi-agent-genie-endpoint
+workload_size: Small
+scale_to_zero: true

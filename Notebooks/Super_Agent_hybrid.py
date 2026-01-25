@@ -2742,9 +2742,15 @@ Ref: https://docs.databricks.com/aws/en/generative-ai/agent-framework/agent-auth
 # with mlflow.start_run():
 #     logged_agent_info = mlflow.pyfunc.log_model(
 #         name="super_agent_hybrid_with_memory",
-#         python_model="Super_Agent_hybrid.py",
+#         # ⚠️ IMPORTANT: Reference agent.py for clean MLflow deployment
+#         # agent.py contains runtime-essential components extracted from this notebook
+#         # This follows MLflow best practices with mlflow.langchain.autolog() and mlflow.models.set_model()
+#         python_model="../agent.py",  # Path relative to Notebooks/ folder
 #         input_example=input_example,
 #         resources=resources,
+#         # ⚠️ CRITICAL: Pass production config via ModelConfig (Databricks best practice!)
+#         # This config overrides the development_config in agent.py
+#         model_config="../prod_config.yaml",  # Production configuration
 #         pip_requirements=[
 #             f"databricks-langchain[memory]=={get_distribution('databricks-langchain').version}",
 #             f"databricks-agents=={get_distribution('databricks-agents').version}",
@@ -2753,6 +2759,7 @@ Ref: https://docs.databricks.com/aws/en/generative-ai/agent-framework/agent-auth
 #         ]
 #     )
 #     print(f"✓ Model logged: {logged_agent_info.model_uri}")
+#     print(f"✓ Configuration: prod_config.yaml")
 # 
 # # Step 2: Register to Unity Catalog
 # mlflow.set_registry_uri("databricks-uc")
@@ -2764,25 +2771,34 @@ Ref: https://docs.databricks.com/aws/en/generative-ai/agent-framework/agent-auth
 # )
 # print(f"✓ Model registered: {UC_MODEL_NAME} version {uc_model_info.version}")
 # 
-# # Step 3: Deploy to Model Serving
+# # Step 3: Deploy to Model Serving (No environment_vars needed!)
 # from databricks import agents
 # 
+# # ✅ With ModelConfig, configuration is packaged with the model
+# # No need for environment_vars parameter!
 # deployment_info = agents.deploy(
 #     UC_MODEL_NAME,
 #     uc_model_info.version,
-#     scale_to_zero=True,
-#     workload_size="Small"
+#     scale_to_zero=True,      # Cost optimization
+#     workload_size="Small",   # Start small, can scale up later
+#     # ✅ NO environment_vars needed - config is in model package!
 # )
 # print(f"✓ Deployed to Model Serving: {deployment_info.endpoint_name}")
 # print("\n" + "="*80)
-# print("DEPLOYMENT COMPLETE")
+# print("✅ DEPLOYMENT COMPLETE")
 # print("="*80)
 # print(f"Model: {UC_MODEL_NAME} v{uc_model_info.version}")
 # print(f"Endpoint: {deployment_info.endpoint_name}")
+# print(f"Configuration: prod_config.yaml (packaged with model)")
 # print("\nMemory Features Enabled:")
 # print("  ✓ Short-term: Multi-turn conversations via CheckpointSaver")
 # print("  ✓ Long-term: User preferences via DatabricksStore")
 # print("  ✓ Distributed serving: State shared across all instances")
+# print("\nAdvantages of ModelConfig:")
+# print("  ✓ Configuration versioned with model")
+# print("  ✓ No environment_vars parameter needed")
+# print("  ✓ Easy to test different configs")
+# print("  ✓ Type-safe and structured")
 # print("="*80)
 
 # COMMAND ----------
