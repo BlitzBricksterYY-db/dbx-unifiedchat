@@ -1,23 +1,38 @@
 # Quick Reference: Clarification & Follow-Up Improvements
 
-## What Changed? ✅
+**Updated:** January 26, 2026 - SIMPLIFIED API v2
 
-### 1. Context Preservation (No More Overwriting!)
+## What Changed in v2? 🎉
 
-**Before:**
+### Major Simplification: Auto-Detection from Message History
+
+**Before (v1):**
 ```python
-# ❌ Original query was overwritten
-state["original_query"] = f"{original} [User Clarification: {response}]"
+# ❌ Required manual state passing
+custom_inputs = {
+    "thread_id": "session_001",
+    "is_clarification_response": True,
+    "original_query": "Show me patient data",
+    "clarification_message": "...",
+    "clarification_count": 1
+}
 ```
 
-**After:**
+**After (v2):**
 ```python
-# ✅ Original query preserved, context combined separately
-state["original_query"] = original  # Unchanged!
-state["clarification_message"] = clarif_msg
-state["user_clarification_response"] = user_response
-state["combined_query_context"] = structured_combination
+# ✅ Just thread_id - agent auto-detects everything!
+custom_inputs = {
+    "thread_id": "session_001"
+}
 ```
+
+### How It Works
+
+The agent now examines the `messages` array to:
+1. Detect if last AI message was a clarification question
+2. Extract original query from first human message
+3. Combine all context automatically
+4. No manual state management needed!
 
 ### 2. Conversation Continuity (Multi-Turn Support!)
 
@@ -49,7 +64,7 @@ display_results(result)
 
 ---
 
-### Scenario 2: Query with Clarification
+### Scenario 2: Query with Clarification (SIMPLIFIED!)
 
 ```python
 # Step 1: Ask vague query
@@ -63,21 +78,24 @@ if not state1['question_clear']:
     print(f"Clarification: {state1['clarification_needed']}")
     print(f"Options: {state1['clarification_options']}")
     
-    # Step 3: Provide clarification
-    state2 = respond_to_clarification(
+    # Step 3: Provide clarification - SIMPLIFIED!
+    # Just call invoke_super_agent_hybrid with same thread_id
+    state2 = invoke_super_agent_hybrid(
         "Show me patient count grouped by age",
-        previous_state=state1,
-        thread_id="session_001"
+        thread_id="session_001"  # Same thread - auto-detected!
     )
+    
+    # Or use the helper (it's now just a wrapper)
+    # state2 = respond_to_clarification("...", thread_id="session_001")
     
     display_results(state2)
 ```
 
-**What Happens:**
-- ✅ `original_query` = "Show me patient data" (preserved!)
-- ✅ `clarification_message` = Agent's question
-- ✅ `user_clarification_response` = "Show me patient count grouped by age"
-- ✅ `combined_query_context` = Structured combination of all three
+**What Happens (Auto-Detected):**
+- ✅ Agent reads messages array from thread
+- ✅ Detects last AI message was clarification
+- ✅ Extracts original query from first human message
+- ✅ Combines: original + clarification + user response
 - ✅ Planning agent receives full context
 
 ---
@@ -156,14 +174,16 @@ state4 = ask_follow_up_query(
 
 ---
 
-## Key Functions
+## Key Functions (SIMPLIFIED in v2!)
 
 | Function | Purpose | When to Use |
 |----------|---------|-------------|
-| `invoke_super_agent_hybrid()` | Start new conversation | First query in a session |
-| `respond_to_clarification()` | Answer clarification request | When `question_clear == False` |
-| `ask_follow_up_query()` | Continue conversation | Any follow-up or related query |
+| `invoke_super_agent_hybrid()` | **Send ANY message** | All scenarios - new query, clarification, follow-up |
+| `respond_to_clarification()` | DEPRECATED wrapper | (Optional) Still works but just calls invoke_super_agent_hybrid |
+| `ask_follow_up_query()` | DEPRECATED wrapper | (Optional) Still works but just calls invoke_super_agent_hybrid |
 | `display_results()` | Show results | After any query completes |
+
+**Recommendation:** Just use `invoke_super_agent_hybrid()` for everything!
 
 ---
 
@@ -321,16 +341,34 @@ state4 = ask_follow_up_query("In past 6 months", thread_id=session)
 
 ## Summary
 
-| What | Before | After |
-|------|--------|-------|
-| **Original Query** | Overwritten ❌ | Preserved ✅ |
-| **Clarification Context** | Lost ❌ | Stored separately ✅ |
-| **Follow-Up Queries** | Not supported ❌ | Full support ✅ |
-| **Conversation Context** | No continuity ❌ | Thread-based memory ✅ |
-| **Planning Agent Context** | Jumbled string ❌ | Structured combination ✅ |
+| What | v1 (Before) | v2 (After - SIMPLIFIED!) |
+|------|-------------|--------------------------|
+| **API Complexity** | Complex state passing ❌ | Just thread_id ✅ |
+| **Manual State** | Required ❌ | Auto-detected ✅ |
+| **Clarification Detection** | Manual flag ❌ | From message history ✅ |
+| **Follow-Up Queries** | Special handling ❌ | Unified with all queries ✅ |
+| **Conversation Context** | Manual preservation ❌ | CheckpointSaver automatic ✅ |
+| **Client Code** | ~50 lines ❌ | ~10 lines ✅ |
+
+### What Was Removed in v2
+
+- ❌ `is_clarification_response` flag
+- ❌ `original_query` passing in custom_inputs
+- ❌ `clarification_message` passing in custom_inputs
+- ❌ `user_clarification_response` state field
+- ❌ Special code paths for clarification handling
+
+### What You Get in v2
+
+- ✅ Simpler API (just messages + thread_id)
+- ✅ Auto-detection from message history
+- ✅ Single unified code path for all scenarios
+- ✅ Follows LangGraph best practices
+- ✅ Easier client implementation
+- ✅ Fewer errors from missing state fields
 
 ---
 
-**Status:** ✅ Production Ready  
-**Last Updated:** January 17, 2026  
+**Status:** ✅ Production Ready (v2 - SIMPLIFIED)  
+**Last Updated:** January 26, 2026  
 **File:** `Super_Agent_hybrid.py`

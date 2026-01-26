@@ -1,6 +1,6 @@
 # Model Serving API Guide: SuperAgentHybridResponsesAgent
 
-**Date:** January 17, 2026  
+**Date:** January 26, 2026 (Updated - SIMPLIFIED API v2)  
 **Deployed Agent:** `SuperAgentHybridResponsesAgent`  
 **Interface:** MLflow ResponsesAgent compatible with Databricks Model Serving
 
@@ -8,13 +8,22 @@
 
 ## Overview
 
-The deployed `SuperAgentHybridResponsesAgent` supports three conversation scenarios:
+**🎉 SIMPLIFIED API v2:** The deployed `SuperAgentHybridResponsesAgent` now uses a unified, simple API for all conversation types.
+
+### Key Simplification
+
+**All conversation turns use the same simple format:**
+- Send user message + thread_id
+- Agent auto-detects clarification responses and follow-ups from message history
+- No manual state management required
+
+### Conversation Scenarios
 
 1. **New Query**: Start a new conversation
-2. **Clarification Response**: Answer agent's clarification question
-3. **Follow-Up Query**: Continue conversation with context
+2. **Clarification Response**: Answer agent's clarification question (auto-detected!)
+3. **Follow-Up Query**: Continue conversation with context (auto-detected!)
 
-All scenarios use the same `/invocations` endpoint but with different `custom_inputs` parameters.
+**All scenarios use the same request format - just messages + thread_id!**
 
 ---
 
@@ -104,7 +113,7 @@ Start a new conversation or ask a standalone question.
 
 ---
 
-## Scenario 2: Clarification Response
+## Scenario 2: Clarification Response (SIMPLIFIED!)
 
 User answers the agent's clarification question from Scenario 1.
 
@@ -119,14 +128,12 @@ User answers the agent's clarification question from Scenario 1.
     }
   ],
   "custom_inputs": {
-    "thread_id": "user_123_session_20260117",
-    "is_clarification_response": true,
-    "original_query": "How many members?",
-    "clarification_message": "I need clarification: The query is ambiguous...",
-    "clarification_count": 1
+    "thread_id": "user_123_session_20260117"
   }
 }
 ```
+
+**🎉 That's it! No manual state passing needed.**
 
 ### Key Parameters
 
@@ -134,10 +141,12 @@ User answers the agent's clarification question from Scenario 1.
 |-----------|------|----------|-------------|
 | `messages[0].content` | String | Yes | User's answer to clarification question |
 | `custom_inputs.thread_id` | String | **Yes** | **Must match** thread_id from Scenario 1 |
-| `custom_inputs.is_clarification_response` | Boolean | **Yes** | **Must be `true`** to trigger clarification handling |
-| `custom_inputs.original_query` | String | **Yes** | Original query from previous response's `custom_outputs` |
-| `custom_inputs.clarification_message` | String | **Yes** | Clarification message from previous response's `custom_outputs` |
-| `custom_inputs.clarification_count` | Integer | **Yes** | Clarification count from previous response's `custom_outputs` |
+
+**Removed (auto-detected):**
+- ❌ `is_clarification_response` - Agent detects from message history
+- ❌ `original_query` - Extracted from message history
+- ❌ `clarification_message` - Extracted from message history  
+- ❌ `clarification_count` - Tracked internally
 
 ### Response
 
@@ -250,7 +259,7 @@ if result1["custom_outputs"].get("question_clear", True):
     print("Query completed successfully!")
 ```
 
-### Example 2: Query with Clarification
+### Example 2: Query with Clarification (SIMPLIFIED!)
 
 ```python
 # Step 1: Vague query triggers clarification
@@ -266,15 +275,12 @@ if not result1["custom_outputs"].get("question_clear", True):
     print("Clarification needed:")
     print(result1["output"][0]["text"])
     
-    # Step 2: Provide clarification
+    # Step 2: Provide clarification - SIMPLIFIED API!
+    # Just send the clarification with same thread_id
     response2 = requests.post(ENDPOINT, headers=HEADERS, json={
         "messages": [{"role": "user", "content": "Show patient count by age group"}],
         "custom_inputs": {
-            "thread_id": "user_alice_002",  # Same thread_id
-            "is_clarification_response": True,  # Critical flag
-            "original_query": result1["custom_outputs"]["original_query"],
-            "clarification_message": result1["custom_outputs"]["clarification_message"],
-            "clarification_count": result1["custom_outputs"]["clarification_count"]
+            "thread_id": "user_alice_002"  # Same thread_id - that's it!
         }
     })
     
@@ -310,7 +316,7 @@ response3 = requests.post(ENDPOINT, headers=HEADERS, json={
 print("Turn 3:", response3.json()["output"][0]["text"])
 ```
 
-### Example 4: Clarification + Follow-Up
+### Example 4: Clarification + Follow-Up (SIMPLIFIED!)
 
 ```python
 thread = "user_alice_004"
@@ -321,53 +327,50 @@ response1 = requests.post(ENDPOINT, headers=HEADERS, json={
     "custom_inputs": {"thread_id": thread}
 })
 
-# Turn 2: Clarification response
+# Turn 2: Clarification response - SIMPLIFIED!
+# Same format as any other message
 if not response1.json()["custom_outputs"].get("question_clear", True):
     response2 = requests.post(ENDPOINT, headers=HEADERS, json={
         "messages": [{"role": "user", "content": "Average claim costs by payer type"}],
-        "custom_inputs": {
-            "thread_id": thread,
-            "is_clarification_response": True,
-            **{k: v for k, v in response1.json()["custom_outputs"].items() 
-               if k in ["original_query", "clarification_message", "clarification_count"]}
-        }
+        "custom_inputs": {"thread_id": thread}  # Just thread_id!
     })
     print("Turn 2:", response2.json()["output"][0]["text"])
 
-# Turn 3: Follow-up
+# Turn 3: Follow-up - Same format!
 response3 = requests.post(ENDPOINT, headers=HEADERS, json={
     "messages": [{"role": "user", "content": "Medicare patients only"}],
-    "custom_inputs": {"thread_id": thread}
+    "custom_inputs": {"thread_id": thread}  # Same simple format!
 })
 print("Turn 3:", response3.json()["output"][0]["text"])
 ```
 
 ---
 
-## Client Implementation Checklist
+## Client Implementation Checklist (SIMPLIFIED!)
 
 When building a client to interact with the deployed agent:
 
-### ✅ For New Queries
+### ✅ For ALL Conversation Turns (Unified Checklist)
 - [ ] Generate unique `thread_id` for new conversations
+- [ ] Use **same `thread_id`** for all turns in same conversation
 - [ ] Send user message in `messages` array
 - [ ] Include `thread_id` in `custom_inputs`
-- [ ] Check response `custom_outputs.question_clear`
-- [ ] If `false`, save clarification state for next call
+- [ ] Check response `custom_outputs.question_clear` if needed
 
-### ✅ For Clarification Responses
-- [ ] Use **same `thread_id`** from previous call
-- [ ] Set `is_clarification_response: true` in `custom_inputs`
-- [ ] Pass `original_query` from previous response
-- [ ] Pass `clarification_message` from previous response
-- [ ] Pass `clarification_count` from previous response
-- [ ] Send user's clarification in `messages` array
+**That's it! No special handling for clarifications or follow-ups.**
 
-### ✅ For Follow-Up Queries
-- [ ] Use **same `thread_id`** from previous call(s)
-- [ ] Send new query in `messages` array
-- [ ] Include only `thread_id` in `custom_inputs` (no other fields needed)
-- [ ] Thread memory automatically restores context
+### What Changed in v2
+
+❌ **Removed (no longer needed):**
+- `is_clarification_response` flag
+- `original_query` passing
+- `clarification_message` passing
+- `clarification_count` passing
+- Special code paths for clarification vs follow-up
+
+✅ **Simplified to:**
+- Just send messages + thread_id
+- Agent auto-detects context from message history
 
 ---
 
@@ -377,17 +380,13 @@ When building a client to interact with the deployed agent:
 
 #### Issue 1: "Clarification response not processed correctly"
 
-**Cause:** Missing required fields in `custom_inputs`
+**SIMPLIFIED in v2:** This issue no longer occurs! Agent auto-detects clarification responses.
 
-**Solution:**
+**Just use:**
 ```json
 {
   "custom_inputs": {
-    "thread_id": "...",               // ✅ Required
-    "is_clarification_response": true, // ✅ Required
-    "original_query": "...",           // ✅ Required
-    "clarification_message": "...",    // ✅ Required
-    "clarification_count": 1           // ✅ Required
+    "thread_id": "..."  // ✅ Only this is required
   }
 }
 ```
@@ -445,79 +444,48 @@ thread_id = "default"
 thread_id = f"user_{user_id}"  # Same ID across all sessions!
 ```
 
-### Thread Lifecycle
+### Thread Lifecycle (SIMPLIFIED in v2!)
 
 ```python
 class ConversationManager:
+    """SIMPLIFIED conversation manager - no state tracking needed!"""
+    
     def __init__(self, user_id):
         self.user_id = user_id
         self.thread_id = None
-        self.pending_clarification = None
     
     def start_conversation(self):
         """Start a new conversation with fresh thread ID"""
         self.thread_id = f"user_{self.user_id}_session_{int(time.time())}"
-        self.pending_clarification = None
         return self.thread_id
     
-    def send_query(self, query):
-        """Send a new query or follow-up"""
+    def send_message(self, message):
+        """
+        Send ANY message - new query, clarification, or follow-up.
+        SIMPLIFIED: No need to distinguish between types!
+        """
         payload = {
-            "messages": [{"role": "user", "content": query}],
+            "messages": [{"role": "user", "content": message}],
             "custom_inputs": {"thread_id": self.thread_id}
         }
         
         response = requests.post(ENDPOINT, headers=HEADERS, json=payload)
-        result = response.json()
-        
-        # Check if clarification needed
-        if not result["custom_outputs"].get("question_clear", True):
-            # Save clarification state
-            self.pending_clarification = {
-                "original_query": result["custom_outputs"]["original_query"],
-                "clarification_message": result["custom_outputs"]["clarification_message"],
-                "clarification_count": result["custom_outputs"]["clarification_count"]
-            }
-        else:
-            self.pending_clarification = None
-        
-        return result
-    
-    def send_clarification(self, clarification):
-        """Respond to pending clarification"""
-        if not self.pending_clarification:
-            raise ValueError("No pending clarification")
-        
-        payload = {
-            "messages": [{"role": "user", "content": clarification}],
-            "custom_inputs": {
-                "thread_id": self.thread_id,
-                "is_clarification_response": True,
-                **self.pending_clarification
-            }
-        }
-        
-        response = requests.post(ENDPOINT, headers=HEADERS, json=payload)
-        result = response.json()
-        
-        # Clear pending clarification
-        self.pending_clarification = None
-        
-        return result
+        return response.json()
 
-# Usage
+# Usage - MUCH SIMPLER!
 manager = ConversationManager(user_id="alice")
 manager.start_conversation()
 
 # Query 1
-result1 = manager.send_query("Show patient data")
+result1 = manager.send_message("Show patient data")
 
-# If clarification needed
-if manager.pending_clarification:
-    result2 = manager.send_clarification("Patient count by age")
+# If clarification needed, just send the clarification
+if not result1["custom_outputs"].get("question_clear", True):
+    print("Clarification needed:", result1["output"][0]["text"])
+    result2 = manager.send_message("Patient count by age")
 
-# Query 2 (follow-up)
-result3 = manager.send_query("Show only 50+ age group")
+# Query 2 (follow-up) - same method!
+result3 = manager.send_message("Show only 50+ age group")
 ```
 
 ---
@@ -603,27 +571,55 @@ def test_thread_isolation():
 
 ## Summary
 
-### Key Takeaways
+### Key Takeaways (SIMPLIFIED API v2)
 
 1. **Thread ID is Critical**: Same `thread_id` = shared context, different `thread_id` = isolated conversation
 
-2. **Three Scenarios**:
-   - New Query: Fresh thread_id
-   - Clarification: Set `is_clarification_response: true` + pass state fields
-   - Follow-Up: Same thread_id as previous calls
+2. **Unified API for All Scenarios**:
+   - New Query: Fresh thread_id + message
+   - Clarification: Same thread_id + message (auto-detected!)
+   - Follow-Up: Same thread_id + message (auto-detected!)
 
-3. **Clarification Response Requirements**:
-   - `is_clarification_response: true`
-   - `original_query` from previous response
-   - `clarification_message` from previous response
-   - `clarification_count` from previous response
-   - Same `thread_id`
+3. **What You Need**:
+   - ✅ `thread_id` (same for conversation continuity)
+   - ✅ `messages` array with user content
+   - ❌ ~~`is_clarification_response`~~ (removed)
+   - ❌ ~~`original_query`~~ (auto-extracted)
+   - ❌ ~~`clarification_message`~~ (auto-extracted)
+   - ❌ ~~`clarification_count`~~ (tracked internally)
 
-4. **Context Preservation**:
-   - Original query never overwritten
-   - All components stored separately
-   - Combined context passed to planning
-   - Thread memory maintains history
+4. **How It Works**:
+   - Agent examines message history automatically
+   - Detects if last AI message was a clarification question
+   - Extracts original query from first human message
+   - Combines all context for planning
+   - No manual state management required
+
+### Migration from v1 to v2
+
+If you're using the old API with `is_clarification_response`:
+
+```python
+# OLD (v1) - Complex
+response = requests.post(ENDPOINT, json={
+    "messages": [{"role": "user", "content": "Patient count"}],
+    "custom_inputs": {
+        "thread_id": thread,
+        "is_clarification_response": True,  # Remove this
+        "original_query": "...",             # Remove this
+        "clarification_message": "...",      # Remove this
+        "clarification_count": 1             # Remove this
+    }
+})
+
+# NEW (v2) - Simple
+response = requests.post(ENDPOINT, json={
+    "messages": [{"role": "user", "content": "Patient count"}],
+    "custom_inputs": {
+        "thread_id": thread  # Just this!
+    }
+})
+```
 
 ---
 

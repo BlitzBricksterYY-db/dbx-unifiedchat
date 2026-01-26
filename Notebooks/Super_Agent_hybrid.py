@@ -520,18 +520,21 @@ print("="*80)
 # MAGIC     """
 # MAGIC     Explicit state that flows through the multi-agent system.
 # MAGIC     This provides full observability and makes debugging easier.
+# MAGIC     
+# MAGIC     SIMPLIFIED (v2): Redundant fields removed/deprecated.
+# MAGIC     Context is now primarily managed through the messages array.
 # MAGIC     """
 # MAGIC     # Input
-# MAGIC     original_query: str
+# MAGIC     original_query: str  # DEPRECATED: Kept for backward compatibility, use messages array
 # MAGIC     
 # MAGIC     # Clarification
 # MAGIC     question_clear: bool
 # MAGIC     clarification_needed: Optional[str]
 # MAGIC     clarification_options: Optional[List[str]]
 # MAGIC     clarification_count: Optional[int]  # Track clarification attempts (max 1)
-# MAGIC     user_clarification_response: Optional[str]  # User's response to clarification
-# MAGIC     clarification_message: Optional[str]  # The clarification question asked by agent
-# MAGIC     combined_query_context: Optional[str]  # Combined context: original + clarification + response
+# MAGIC     # REMOVED: user_clarification_response - auto-detected from messages array
+# MAGIC     # REMOVED: clarification_message - stored in messages array as AIMessage
+# MAGIC     combined_query_context: Optional[str]  # Combined context for planning agent
 # MAGIC     
 # MAGIC     # Planning
 # MAGIC     plan: Optional[Dict[str, Any]]
@@ -1557,11 +1560,8 @@ print("="*80)
 # MAGIC     Handles up to 1 clarification request. If user provides clarification,
 # MAGIC     incorporates it and proceeds to planning.
 # MAGIC     
-# MAGIC     IMPORTANT: This node COMBINES context instead of overwriting:
-# MAGIC     - Preserves original_query unchanged
-# MAGIC     - Stores clarification_message separately
-# MAGIC     - Stores user_clarification_response separately
-# MAGIC     - Creates combined_query_context for planning agent
+# MAGIC     SIMPLIFIED: Auto-detects clarification responses from messages array.
+# MAGIC     No need to manually pass state via custom_inputs.
 # MAGIC     
 # MAGIC     Returns: Dictionary with only the state updates (for clean MLflow traces)
 # MAGIC     """
@@ -1569,43 +1569,65 @@ print("="*80)
 # MAGIC     print("🔍 CLARIFICATION AGENT")
 # MAGIC     print("="*80)
 # MAGIC     
+# MAGIC     # Get messages array from state
+# MAGIC     messages = state.get("messages", [])
+# MAGIC     
 # MAGIC     # Initialize clarification count if not present
 # MAGIC     clarification_count = state.get("clarification_count", 0)
 # MAGIC     
-# MAGIC     # Check if this is a user response to a previous clarification request
-# MAGIC     user_response = state.get("user_clarification_response")
-# MAGIC     if user_response and clarification_count > 0:
-# MAGIC         print("✓ User provided clarification - incorporating feedback")
+# MAGIC     # AUTO-DETECT: Check if this is a user response to a previous clarification request
+# MAGIC     # Look for an AI message that asked for clarification in the message history
+# MAGIC     if len(messages) >= 2:
+# MAGIC         # Get the latest user message
+# MAGIC         latest_user_msg = messages[-1].content if messages else ""
 # MAGIC         
-# MAGIC         # IMPORTANT: Do NOT overwrite original_query - keep it unchanged
-# MAGIC         # Instead, create a combined context for planning agent
-# MAGIC         original = state["original_query"]
-# MAGIC         clarif_msg = state.get("clarification_message", "")
+# MAGIC         # Look backwards for the last AI message
+# MAGIC         last_ai_msg = None
+# MAGIC         for msg in reversed(messages[:-1]):
+# MAGIC             if isinstance(msg, AIMessage):
+# MAGIC                 last_ai_msg = msg
+# MAGIC                 break
 # MAGIC         
-# MAGIC         # Build combined query context with structured format
-# MAGIC         combined_context = f"""**Original Query**: {original}
+# MAGIC         # Check if the last AI message was asking for clarification
+# MAGIC         if last_ai_msg and ("clarification" in last_ai_msg.content.lower() or 
+# MAGIC                            "I need clarification" in last_ai_msg.content):
+# MAGIC             print("✓ Auto-detected clarification response from message history")
+# MAGIC             
+# MAGIC             # Extract the original query (first human message in thread)
+# MAGIC             original_query = ""
+# MAGIC             for msg in messages:
+# MAGIC                 if isinstance(msg, HumanMessage):
+# MAGIC                     original_query = msg.content
+# MAGIC                     break
+# MAGIC             
+# MAGIC             # Extract the clarification question from last AI message
+# MAGIC             clarification_question = last_ai_msg.content
+# MAGIC             
+# MAGIC             # Build combined query context with structured format
+# MAGIC             combined_context = f"""**Original Query**: {original_query}
 # MAGIC
-# MAGIC **Clarification Question**: {clarif_msg}
+# MAGIC **Clarification Question**: {clarification_question}
 # MAGIC
-# MAGIC **User's Answer**: {user_response}
+# MAGIC **User's Answer**: {latest_user_msg}
 # MAGIC
 # MAGIC **Context**: The user was asked for clarification and provided additional information. Use all three pieces of information together to understand the complete intent."""
-# MAGIC         
-# MAGIC         print(f"   Original Query (preserved): {original}")
-# MAGIC         print(f"   Clarification Message: {clarif_msg}")
-# MAGIC         print(f"   User Response: {user_response}")
-# MAGIC         print(f"   ✓ Combined context created for planning agent")
-# MAGIC         
-# MAGIC         # Return only updates (no in-place modifications)
-# MAGIC         return {
-# MAGIC             "combined_query_context": combined_context,
-# MAGIC             "question_clear": True,
-# MAGIC             "next_agent": "planning",
-# MAGIC             "messages": [
-# MAGIC                 SystemMessage(content=f"User clarification incorporated: {user_response}\nCombined context created with original query, clarification question, and user answer.")
-# MAGIC             ]
-# MAGIC         }
+# MAGIC             
+# MAGIC             print(f"   Original Query: {original_query}")
+# MAGIC             print(f"   Clarification Question: {clarification_question[:100]}...")
+# MAGIC             print(f"   User Response: {latest_user_msg}")
+# MAGIC             print(f"   ✓ Combined context created for planning agent")
+# MAGIC             
+# MAGIC             # Return only updates (no in-place modifications)
+# MAGIC             return {
+# MAGIC                 "combined_query_context": combined_context,
+# MAGIC                 "question_clear": True,
+# MAGIC                 "next_agent": "planning",
+# MAGIC                 "messages": [
+# MAGIC                     SystemMessage(content=f"User clarification incorporated: {latest_user_msg}\nCombined context created with original query, clarification question, and user answer.")
+# MAGIC                 ]
+# MAGIC             }
 # MAGIC     
+# MAGIC     # FIRST-TIME: No clarification response detected, check if query needs clarification
 # MAGIC     query = state["original_query"]
 # MAGIC     llm = ChatDatabricks(endpoint=LLM_ENDPOINT_CLARIFICATION)
 # MAGIC     
@@ -2378,10 +2400,8 @@ print("="*80)
 # MAGIC         """
 # MAGIC         Make a streaming prediction with both short-term and long-term memory.
 # MAGIC         
-# MAGIC         Handles three scenarios:
-# MAGIC         1. New query: Fresh start with new original_query
-# MAGIC         2. Clarification response: User answering agent's clarification question
-# MAGIC         3. Follow-up query: New query with access to previous conversation context
+# MAGIC         SIMPLIFIED API: All conversation turns use the same simple format.
+# MAGIC         The agent auto-detects clarification responses and follow-ups from message history.
 # MAGIC         
 # MAGIC         Memory Systems:
 # MAGIC         - Short-term (CheckpointSaver): Preserves conversation state across distributed instances
@@ -2395,16 +2415,12 @@ print("="*80)
 # MAGIC                 - custom_inputs: Dict with optional keys:
 # MAGIC                     - thread_id (str): Thread identifier override
 # MAGIC                     - user_id (str): User identifier override
-# MAGIC                     - is_clarification_response (bool): Set to True when user is answering clarification
-# MAGIC                     - clarification_count (int): Preserved from previous state
-# MAGIC                     - original_query (str): Preserved from previous state for clarification responses
-# MAGIC                     - clarification_message (str): Preserved from previous state for clarification responses
 # MAGIC             
 # MAGIC         Yields:
 # MAGIC             ResponsesAgentStreamEvent for each step in the workflow
 # MAGIC             
-# MAGIC         Usage in Model Serving:
-# MAGIC             # New query with memory
+# MAGIC         Usage in Model Serving (ALL scenarios use same format):
+# MAGIC             # First query in a conversation
 # MAGIC             POST /invocations
 # MAGIC             {
 # MAGIC                 "messages": [{"role": "user", "content": "Show me patient data"}],
@@ -2414,25 +2430,22 @@ print("="*80)
 # MAGIC                 }
 # MAGIC             }
 # MAGIC             
-# MAGIC             # Clarification response
+# MAGIC             # Clarification response (SIMPLIFIED - auto-detected!)
 # MAGIC             POST /invocations
 # MAGIC             {
 # MAGIC                 "messages": [{"role": "user", "content": "Patient count by age group"}],
-# MAGIC                 "custom_inputs": {
-# MAGIC                     "thread_id": "session_001",  # Must match previous call
-# MAGIC                     "is_clarification_response": true,
-# MAGIC                     "original_query": "Show me patient data",
-# MAGIC                     "clarification_message": "...",
-# MAGIC                     "clarification_count": 1
+# MAGIC                 "context": {
+# MAGIC                     "conversation_id": "session_001",  # Same thread_id
+# MAGIC                     "user_id": "user@example.com"
 # MAGIC                 }
 # MAGIC             }
 # MAGIC             
-# MAGIC             # Follow-up query (agent remembers context and user preferences)
+# MAGIC             # Follow-up query (agent remembers context automatically)
 # MAGIC             POST /invocations
 # MAGIC             {
 # MAGIC                 "messages": [{"role": "user", "content": "Now show by gender"}],
 # MAGIC                 "context": {
-# MAGIC                     "conversation_id": "session_001",
+# MAGIC                     "conversation_id": "session_001",  # Same thread_id
 # MAGIC                     "user_id": "user@example.com"
 # MAGIC                 }
 # MAGIC             }
@@ -2461,44 +2474,15 @@ print("="*80)
 # MAGIC         if user_id:
 # MAGIC             run_config["configurable"]["user_id"] = user_id
 # MAGIC         
-# MAGIC         # Check if this is a clarification response
-# MAGIC         is_clarification_response = ci.get("is_clarification_response", False)
-# MAGIC         
-# MAGIC         # Initialize state based on scenario
-# MAGIC         if is_clarification_response:
-# MAGIC             # Scenario 2: Clarification Response
-# MAGIC             # User is answering the agent's clarification question
-# MAGIC             # Preserve state from previous call and add user's response
-# MAGIC             
-# MAGIC             original_query = ci.get("original_query", latest_query)
-# MAGIC             clarification_message = ci.get("clarification_message", "")
-# MAGIC             clarification_count = ci.get("clarification_count", 1)
-# MAGIC             
-# MAGIC             initial_state = {
-# MAGIC                 # Preserve from previous state
-# MAGIC                 "original_query": original_query,
-# MAGIC                 "clarification_message": clarification_message,
-# MAGIC                 "clarification_count": clarification_count,
-# MAGIC                 
-# MAGIC                 # Add user's clarification response
-# MAGIC                 "user_clarification_response": latest_query,
-# MAGIC                 "question_clear": False,
-# MAGIC                 
-# MAGIC                 # Messages
-# MAGIC                 "messages": [HumanMessage(content=f"Clarification response: {latest_query}")],
-# MAGIC                 
-# MAGIC                 # Route back to clarification node
-# MAGIC                 "next_agent": "clarification"
-# MAGIC             }
-# MAGIC         else:
-# MAGIC             # Scenario 1 & 3: New Query or Follow-Up Query
-# MAGIC             # CheckpointSaver will restore context for follow-ups
-# MAGIC             
-# MAGIC             initial_state = {
-# MAGIC                 "original_query": latest_query,
-# MAGIC                 "question_clear": False,
-# MAGIC                 "messages": [
-# MAGIC                     SystemMessage(content="""You are a multi-agent Q&A analysis system.
+# MAGIC         # SIMPLIFIED: Unified state initialization for all scenarios
+# MAGIC         # CheckpointSaver will restore previous conversation context automatically
+# MAGIC         # The clarification_node will auto-detect if this is a clarification response
+# MAGIC         # by examining the message history
+# MAGIC         initial_state = {
+# MAGIC             "original_query": latest_query,
+# MAGIC             "question_clear": False,
+# MAGIC             "messages": [
+# MAGIC                 SystemMessage(content="""You are a multi-agent Q&A analysis system.
 # MAGIC Your role is to help users query and analyze cross-domain data.
 # MAGIC
 # MAGIC Guidelines:
@@ -2508,10 +2492,10 @@ print("="*80)
 # MAGIC - If information is missing, ask for clarification (max once)
 # MAGIC - Use UC functions and Genie agents to generate accurate SQL
 # MAGIC - Return results with proper context and explanations"""),
-# MAGIC                     HumanMessage(content=latest_query)
-# MAGIC                 ],
-# MAGIC                 "next_agent": "clarification"
-# MAGIC             }
+# MAGIC                 HumanMessage(content=latest_query)
+# MAGIC             ],
+# MAGIC             "next_agent": "clarification"
+# MAGIC         }
 # MAGIC         
 # MAGIC         # Add user_id to state for long-term memory access
 # MAGIC         if user_id:
@@ -3087,24 +3071,22 @@ Guidelines:
 
 # COMMAND ----------
 
-# DBTITLE 1,Helper Function: Respond to Clarification
+# DBTITLE 1,Helper Function: Respond to Clarification (DEPRECATED - Use invoke_super_agent_hybrid)
 def respond_to_clarification(
     clarification_response: str, 
-    previous_state: Dict[str, Any],
+    previous_state: Dict[str, Any] = None,  # No longer needed but kept for backward compatibility
     thread_id: str = "default"
 ) -> Dict[str, Any]:
     """
-    Respond to a clarification request and continue the workflow.
+    SIMPLIFIED: Respond to a clarification request and continue the workflow.
     
-    Use this function when the agent requests clarification. Provide your
-    clarification and the workflow will continue to planning and execution.
-    
-    IMPORTANT: This function preserves conversation history and state from
-    the previous turn, leveraging the thread-based memory system.
+    NOTE: This function is now just a wrapper around invoke_super_agent_hybrid().
+    The agent auto-detects clarification responses from message history.
+    You can call invoke_super_agent_hybrid() directly with the same thread_id.
     
     Args:
         clarification_response: Your clarification/answer to the agent's question
-        previous_state: The state returned from the previous invoke call
+        previous_state: DEPRECATED - No longer needed, kept for backward compatibility
         thread_id: Thread ID for conversation tracking (must match previous call)
     
     Returns:
@@ -3114,61 +3096,31 @@ def respond_to_clarification(
         # First call
         state1 = invoke_super_agent_hybrid("Show me the data", thread_id="session_001")
         
-        # If clarification needed
+        # If clarification needed - SIMPLIFIED API!
         if not state1['question_clear']:
             print("Clarification needed:", state1['clarification_needed'])
             print("Options:", state1['clarification_options'])
             
-            # Provide clarification
+            # Just call invoke again with same thread_id
             state2 = respond_to_clarification(
                 "Show me patient count by age group",
-                previous_state=state1,
-                thread_id="session_001"
+                thread_id="session_001"  # previous_state no longer needed!
             )
+            
+            # Or call invoke_super_agent_hybrid() directly:
+            # state2 = invoke_super_agent_hybrid("Show me patient count by age group", thread_id="session_001")
     """
     print("\n" + "="*80)
-    print("💬 RESPONDING TO CLARIFICATION")
+    print("💬 RESPONDING TO CLARIFICATION (SIMPLIFIED)")
     print("="*80)
     print(f"User Response: {clarification_response}")
     print(f"Thread ID: {thread_id}")
-    print(f"Original Query: {previous_state['original_query']}")
     print("="*80)
     
-    # Create new state that PRESERVES previous state and adds clarification response
-    # The thread memory will automatically restore previous conversation context
-    new_state = {
-        "original_query": previous_state["original_query"],  # Keep original unchanged
-        "question_clear": False,  # Will be set to True by clarification node
-        "clarification_count": previous_state.get("clarification_count", 1),
-        "clarification_message": previous_state.get("clarification_message", ""),  # Preserve clarification message
-        "user_clarification_response": clarification_response,  # Store user's answer
-        "messages": [
-            # Add user's clarification response as a new message
-            HumanMessage(content=f"Clarification response: {clarification_response}")
-        ],
-        "next_agent": "clarification"  # Re-enter clarification node to process response
-    }
-    
-    # Configure with thread (must match previous call)
-    # The thread memory system will restore previous conversation state
-    config = {"configurable": {"thread_id": thread_id}}
-    
-    # Enable MLflow tracing
-    mlflow.langchain.autolog()
-    
-    print("✓ State prepared with preserved context")
-    print(f"  - Original query preserved: {new_state['original_query']}")
-    print(f"  - Clarification message preserved: {new_state.get('clarification_message', 'N/A')[:50]}...")
-    print(f"  - User response added: {clarification_response}")
-    
-    # Continue the workflow - thread memory will merge with previous state
-    final_state = super_agent_hybrid.invoke(new_state, config)
-    
-    print("\n" + "="*80)
-    print("✅ WORKFLOW COMPLETE AFTER CLARIFICATION")
-    print("="*80)
-    
-    return final_state
+    # SIMPLIFIED: Just call invoke_super_agent_hybrid with the same thread_id
+    # The clarification_node will auto-detect this is a clarification response
+    # by examining the message history
+    return invoke_super_agent_hybrid(clarification_response, thread_id=thread_id)
 
 # COMMAND ----------
 
@@ -3178,15 +3130,10 @@ def ask_follow_up_query(
     thread_id: str = "default"
 ) -> Dict[str, Any]:
     """
-    Ask a follow-up query in the same conversation thread.
+    SIMPLIFIED: Ask a follow-up query in the same conversation thread.
     
-    This function enables conversation continuity - the agent will have access
-    to all previous queries, clarifications, and results in the same thread.
-    
-    Use this for:
-    - Asking a completely new question while maintaining context
-    - Asking a related question that builds on previous results
-    - Requesting different analysis of the same data
+    NOTE: This function is now just a wrapper around invoke_super_agent_hybrid().
+    You can call invoke_super_agent_hybrid() directly with the same thread_id.
     
     Args:
         new_query: The new question to ask
@@ -3200,55 +3147,30 @@ def ask_follow_up_query(
         state1 = invoke_super_agent_hybrid("Show me patient count", thread_id="session_001")
         display_results(state1)
         
-        # Follow-up query in same conversation
+        # Follow-up query - SIMPLIFIED API!
+        # Option 1: Use this helper (deprecated but still works)
         state2 = ask_follow_up_query(
             "Now show me the average age by gender",
             thread_id="session_001"
         )
-        display_results(state2)
         
-        # Another follow-up
-        state3 = ask_follow_up_query(
-            "What about diabetes patients only?",
+        # Option 2: Call invoke_super_agent_hybrid directly (recommended)
+        state2 = invoke_super_agent_hybrid(
+            "Now show me the average age by gender",
             thread_id="session_001"
         )
-        display_results(state3)
     """
     print("\n" + "="*80)
-    print("💬 FOLLOW-UP QUERY")
+    print("💬 FOLLOW-UP QUERY (SIMPLIFIED)")
     print("="*80)
     print(f"New Query: {new_query}")
     print(f"Thread ID: {thread_id}")
-    print(f"✓ This query will have access to previous conversation context")
+    print("✓ This query will have access to previous conversation context")
     print("="*80)
     
-    # Create state for new query
-    # The thread memory will automatically restore previous conversation context
-    new_state = {
-        "original_query": new_query,
-        "question_clear": False,
-        "messages": [
-            HumanMessage(content=new_query)
-        ],
-        "next_agent": "clarification"
-    }
-    
-    # Configure with thread ID to restore conversation context
-    config = {"configurable": {"thread_id": thread_id}}
-    
-    # Enable MLflow tracing
-    mlflow.langchain.autolog()
-    
-    print("✓ Invoking agent with conversation context from thread")
-    
-    # Invoke the workflow - thread memory will merge with previous states
-    final_state = super_agent_hybrid.invoke(new_state, config)
-    
-    print("\n" + "="*80)
-    print("✅ FOLLOW-UP QUERY COMPLETE")
-    print("="*80)
-    
-    return final_state
+    # SIMPLIFIED: Just call invoke_super_agent_hybrid with the same thread_id
+    # CheckpointSaver will automatically restore conversation context
+    return invoke_super_agent_hybrid(new_query, thread_id=thread_id)
 
 # COMMAND ----------
 
