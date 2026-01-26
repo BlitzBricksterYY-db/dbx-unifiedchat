@@ -2530,37 +2530,76 @@ print("="*80)
 # MAGIC             
 # MAGIC             logger.info(f"Executing workflow with checkpointer (thread: {thread_id})")
 # MAGIC             
-# MAGIC             # Stream the workflow execution
+# MAGIC             # Stream the workflow execution with both updates and messages modes
 # MAGIC             # CheckpointSaver will:
 # MAGIC             # 1. Restore previous state from thread_id (if exists) from Lakebase
 # MAGIC             # 2. Merge with initial_state (initial_state takes precedence)
 # MAGIC             # 3. Preserve conversation history across distributed instances
-# MAGIC             for _, events in app.stream(initial_state, run_config, stream_mode=["updates"]):
-# MAGIC                 new_msgs = [
-# MAGIC                     msg
-# MAGIC                     for v in events.values()
-# MAGIC                     for msg in v.get("messages", [])
-# MAGIC                     if hasattr(msg, 'id') and msg.id not in seen_ids
-# MAGIC                 ]
+# MAGIC             for event in app.stream(initial_state, run_config, stream_mode=["updates", "messages"]):
+# MAGIC                 event_type = event[0]
+# MAGIC                 event_data = event[1]
 # MAGIC                 
-# MAGIC                 if first_message:
-# MAGIC                     seen_ids.update(msg.id for msg in new_msgs[: len(cc_msgs)])
-# MAGIC                     new_msgs = new_msgs[len(cc_msgs) :]
-# MAGIC                     first_message = False
-# MAGIC                 else:
-# MAGIC                     seen_ids.update(msg.id for msg in new_msgs)
-# MAGIC                     # Get node name
-# MAGIC                     if events:
-# MAGIC                         node_name = tuple(events.keys())[0]
-# MAGIC                         yield ResponsesAgentStreamEvent(
-# MAGIC                             type="response.output_item.done",
-# MAGIC                             item=self.create_text_output_item(
-# MAGIC                                 text=f"<name>{node_name}</name>", id=str(uuid4())
-# MAGIC                             ),
-# MAGIC                         )
+# MAGIC                 # Handle streaming text deltas (messages mode)
+# MAGIC                 if event_type == "messages":
+# MAGIC                     try:
+# MAGIC                         # Extract the message chunk
+# MAGIC                         chunk = event_data[0] if isinstance(event_data, (list, tuple)) else event_data
+# MAGIC                         
+# MAGIC                         # Stream text content as deltas for real-time visibility in Playground
+# MAGIC                         if isinstance(chunk, AIMessageChunk) and (content := chunk.content):
+# MAGIC                             yield ResponsesAgentStreamEvent(
+# MAGIC                                 **self.create_text_delta(delta=content, item_id=chunk.id),
+# MAGIC                             )
+# MAGIC                     except Exception as e:
+# MAGIC                         logger.warning(f"Error processing message chunk: {e}")
 # MAGIC                 
-# MAGIC                 if len(new_msgs) > 0:
-# MAGIC                     yield from output_to_responses_items_stream(new_msgs)
+# MAGIC                 # Handle node updates (updates mode)
+# MAGIC                 elif event_type == "updates":
+# MAGIC                     events = event_data
+# MAGIC                     new_msgs = [
+# MAGIC                         msg
+# MAGIC                         for v in events.values()
+# MAGIC                         for msg in v.get("messages", [])
+# MAGIC                         if hasattr(msg, 'id') and msg.id not in seen_ids
+# MAGIC                     ]
+# MAGIC                     
+# MAGIC                     if first_message:
+# MAGIC                         seen_ids.update(msg.id for msg in new_msgs[: len(cc_msgs)])
+# MAGIC                         new_msgs = new_msgs[len(cc_msgs) :]
+# MAGIC                         first_message = False
+# MAGIC                     else:
+# MAGIC                         seen_ids.update(msg.id for msg in new_msgs)
+# MAGIC                         # Emit node name as a step indicator
+# MAGIC                         if events:
+# MAGIC                             node_name = tuple(events.keys())[0]
+# MAGIC                             yield ResponsesAgentStreamEvent(
+# MAGIC                                 type="response.output_item.done",
+# MAGIC                                 item=self.create_text_output_item(
+# MAGIC                                     text=f"🔹 Step: {node_name}", id=str(uuid4())
+# MAGIC                                 ),
+# MAGIC                             )
+# MAGIC                     
+# MAGIC                     # Process messages for tool calls and final text
+# MAGIC                     for msg in new_msgs:
+# MAGIC                         # Check if message has tool calls
+# MAGIC                         if hasattr(msg, 'tool_calls') and msg.tool_calls:
+# MAGIC                             # Emit function call items for tool invocations
+# MAGIC                             for tool_call in msg.tool_calls:
+# MAGIC                                 try:
+# MAGIC                                     yield ResponsesAgentStreamEvent(
+# MAGIC                                         type="response.output_item.done",
+# MAGIC                                         item=self.create_function_call_item(
+# MAGIC                                             id=str(uuid4()),
+# MAGIC                                             call_id=tool_call.get("id", str(uuid4())),
+# MAGIC                                             name=tool_call.get("name", "unknown"),
+# MAGIC                                             arguments=json.dumps(tool_call.get("args", {})),
+# MAGIC                                         ),
+# MAGIC                                     )
+# MAGIC                                 except Exception as e:
+# MAGIC                                     logger.warning(f"Error emitting tool call: {e}")
+# MAGIC                         else:
+# MAGIC                             # Emit regular message content
+# MAGIC                             yield from output_to_responses_items_stream([msg])
 # MAGIC         
 # MAGIC         logger.info(f"Workflow execution completed (thread: {thread_id})")
 # MAGIC
