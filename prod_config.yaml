@@ -30,8 +30,8 @@ genie_space_ids:
 sql_warehouse_id: 148ccb90800933a1
 
 # Table Metadata Enrichment
-sample_size: 100
-max_unique_values: 50
+sample_size: 20
+max_unique_values: 20
 genie_exports_volume: yyang.multi_agent_genie.volume
 enriched_docs_table: yyang.multi_agent_genie.enriched_genie_docs
 
