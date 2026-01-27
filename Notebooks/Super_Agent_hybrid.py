@@ -583,6 +583,50 @@ print("="*80)
 # MAGIC     messages: Annotated[List, operator.add]
 # MAGIC     
 # MAGIC print("✓ Agent State defined with explicit fields for observability")
+# MAGIC 
+# MAGIC # State Reset Template
+# MAGIC # All per-query execution fields that should be cleared for each new query.
+# MAGIC # This prevents stale data from persisting across queries when using CheckpointSaver.
+# MAGIC # Used by both Model Serving (run_agent) and local testing (invoke_super_agent_hybrid).
+# MAGIC RESET_STATE_TEMPLATE = {
+# MAGIC     # Clarification fields (per-query)
+# MAGIC     "clarification_needed": None,
+# MAGIC     "clarification_options": None,
+# MAGIC     "combined_query_context": None,
+# MAGIC     
+# MAGIC     # Planning fields (per-query)
+# MAGIC     "plan": None,
+# MAGIC     "sub_questions": None,
+# MAGIC     "requires_multiple_spaces": None,
+# MAGIC     "relevant_space_ids": None,
+# MAGIC     "relevant_spaces": None,
+# MAGIC     "vector_search_relevant_spaces_info": None,
+# MAGIC     "requires_join": None,
+# MAGIC     "join_strategy": None,
+# MAGIC     "execution_plan": None,
+# MAGIC     "genie_route_plan": None,
+# MAGIC     
+# MAGIC     # SQL fields (per-query)
+# MAGIC     "sql_query": None,
+# MAGIC     "sql_synthesis_explanation": None,
+# MAGIC     "synthesis_error": None,
+# MAGIC     
+# MAGIC     # Execution fields (per-query)
+# MAGIC     "execution_result": None,
+# MAGIC     "execution_error": None,
+# MAGIC     
+# MAGIC     # Summary (per-query)
+# MAGIC     "final_summary": None,
+# MAGIC }
+# MAGIC 
+# MAGIC # NOTE: Fields intentionally NOT in template (managed elsewhere):
+# MAGIC # - clarification_count: Reset by is_new_question() in clarification_node
+# MAGIC # - last_clarified_query: Used for intent detection, persists
+# MAGIC # - messages: Managed by operator.add in AgentState, persists
+# MAGIC # - user_id, thread_id, user_preferences: Identity/context, persists
+# MAGIC 
+# MAGIC print("✓ State reset template defined for per-query field clearing")
+# MAGIC 
 # MAGIC class ClarificationAgent:
 # MAGIC     """
 # MAGIC     Agent responsible for checking query clarity.
@@ -2567,6 +2611,7 @@ print("="*80)
 # MAGIC         # The clarification_node will auto-detect if this is a clarification response
 # MAGIC         # by examining the message history
 # MAGIC         initial_state = {
+# MAGIC             **RESET_STATE_TEMPLATE,  # Reset all per-query execution fields
 # MAGIC             "original_query": latest_query,
 # MAGIC             "question_clear": False,
 # MAGIC             "messages": [
@@ -3122,8 +3167,9 @@ def invoke_super_agent_hybrid(query: str, thread_id: str = "default") -> Dict[st
     print(f"Thread ID: {thread_id}")
     print("="*80)
     
-    # Initialize state
+    # Initialize state with reset template to clear per-query fields
     initial_state = {
+        **RESET_STATE_TEMPLATE,  # Reset all per-query execution fields
         "original_query": query,
         "question_clear": False,
         "messages": [
