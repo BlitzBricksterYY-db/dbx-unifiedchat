@@ -543,7 +543,8 @@ print("="*80)
 # MAGIC     question_clear: bool
 # MAGIC     clarification_needed: Optional[str]
 # MAGIC     clarification_options: Optional[List[str]]
-# MAGIC     clarification_count: Optional[int]  # Track clarification attempts (max 1)
+# MAGIC     clarification_count: Optional[int]  # Track clarification attempts per conversation branch
+# MAGIC     last_clarified_query: Optional[str]  # Track last query that received clarification (for intent detection)
 # MAGIC     # REMOVED: user_clarification_response - auto-detected from messages array
 # MAGIC     # REMOVED: clarification_message - stored in messages array as AIMessage
 # MAGIC     combined_query_context: Optional[str]  # Combined context for planning agent
@@ -1564,6 +1565,67 @@ print("="*80)
 # MAGIC         return self.generate_summary(state)
 # MAGIC
 # MAGIC print("✓ ResultSummarizeAgent class defined")
+# MAGIC 
+# MAGIC def is_new_question(current_query: str, messages: List, llm: Runnable) -> bool:
+# MAGIC     """
+# MAGIC     Detect if current query is a new question vs follow-up/refinement.
+# MAGIC     Uses LLM to make intelligent determination based on conversation context.
+# MAGIC     
+# MAGIC     Args:
+# MAGIC         current_query: The current user query
+# MAGIC         messages: Message history from state
+# MAGIC         llm: LLM instance for intent detection
+# MAGIC     
+# MAGIC     Returns:
+# MAGIC         True if new question (reset clarification), False if follow-up (keep count)
+# MAGIC     """
+# MAGIC     # Find the last query that received clarification
+# MAGIC     last_clarified_query = None
+# MAGIC     for i, msg in enumerate(messages):
+# MAGIC         if isinstance(msg, HumanMessage):
+# MAGIC             # Check if there's a clarification request after this human message
+# MAGIC             for subsequent_msg in messages[i+1:]:
+# MAGIC                 if isinstance(subsequent_msg, AIMessage) and (
+# MAGIC                     "clarification" in subsequent_msg.content.lower() or 
+# MAGIC                     "I need clarification" in subsequent_msg.content
+# MAGIC                 ):
+# MAGIC                     last_clarified_query = msg.content
+# MAGIC                     break
+# MAGIC             if last_clarified_query:
+# MAGIC                 break
+# MAGIC     
+# MAGIC     if not last_clarified_query:
+# MAGIC         return True  # No previous clarification found, treat as new question
+# MAGIC     
+# MAGIC     # Use LLM to detect intent change
+# MAGIC     prompt = f"""Compare these two user queries and determine if they represent different questions:
+# MAGIC
+# MAGIC Previous Query: {last_clarified_query}
+# MAGIC Current Query: {current_query}
+# MAGIC
+# MAGIC Is the current query:
+# MAGIC A) NEW QUESTION - A completely different topic, question, or intent
+# MAGIC B) FOLLOW-UP - A refinement, clarification, drill-down, or continuation of the previous query
+# MAGIC
+# MAGIC Examples:
+# MAGIC - "Show patient data" → "Show medication costs" = NEW QUESTION (different topics)
+# MAGIC - "Show patient data" → "Can you break that down by age?" = FOLLOW-UP (refining same topic)
+# MAGIC - "Show active members" → "What about inactive ones?" = FOLLOW-UP (related query)
+# MAGIC - "Show claims data" → "Show provider metrics" = NEW QUESTION (different data domain)
+# MAGIC
+# MAGIC Return ONLY "NEW" or "FOLLOWUP" with no other text."""
+# MAGIC     
+# MAGIC     try:
+# MAGIC         response = llm.invoke(prompt).content.strip().upper()
+# MAGIC         is_new = "NEW" in response
+# MAGIC         print(f"   Intent Detection: {'NEW QUESTION' if is_new else 'FOLLOW-UP'}")
+# MAGIC         return is_new
+# MAGIC     except Exception as e:
+# MAGIC         print(f"⚠ Intent detection failed: {e}, defaulting to NEW question")
+# MAGIC         return True  # Default to new question if detection fails
+# MAGIC
+# MAGIC print("✓ Intent detection function defined")
+# MAGIC 
 # MAGIC def clarification_node(state: AgentState) -> dict:
 # MAGIC     """
 # MAGIC     Clarification node wrapping ClarificationAgent class.
@@ -1586,6 +1648,19 @@ print("="*80)
 # MAGIC     
 # MAGIC     # Initialize clarification count if not present
 # MAGIC     clarification_count = state.get("clarification_count", 0)
+# MAGIC     
+# MAGIC     # INTENT DETECTION: Reset clarification count if this is a new question
+# MAGIC     # This allows each new question to receive clarification while preventing
+# MAGIC     # re-clarification for follow-ups or refinements
+# MAGIC     query = state["original_query"]
+# MAGIC     if clarification_count > 0 and len(messages) > 2:
+# MAGIC         print("🔄 Checking if query is new question or follow-up...")
+# MAGIC         llm = ChatDatabricks(endpoint=LLM_ENDPOINT_CLARIFICATION)
+# MAGIC         if is_new_question(query, messages, llm):
+# MAGIC             print("✓ New question detected - resetting clarification count to 0")
+# MAGIC             clarification_count = 0
+# MAGIC         else:
+# MAGIC             print(f"✓ Follow-up detected - keeping clarification count at {clarification_count}")
 # MAGIC     
 # MAGIC     # AUTO-DETECT: Check if this is a user response to a previous clarification request
 # MAGIC     # Look for an AI message that asked for clarification in the message history
@@ -1674,8 +1749,9 @@ print("="*80)
 # MAGIC             for i, opt in enumerate(clarification_options, 1):
 # MAGIC                 print(f"     {i}. {opt}")
 # MAGIC         
-# MAGIC         # Increment clarification count
+# MAGIC         # Increment clarification count and track this query
 # MAGIC         updates["clarification_count"] = clarification_count + 1
+# MAGIC         updates["last_clarified_query"] = query  # Track this query for intent detection
 # MAGIC         
 # MAGIC         # Route to END to show clarification request (routing controlled by route_after_clarification)
 # MAGIC         # The actual routing is handled by the conditional edge which checks question_clear flag
