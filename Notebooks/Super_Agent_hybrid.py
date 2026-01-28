@@ -621,8 +621,8 @@ print("="*80)
 # MAGIC # For reference, the template now includes:
 # MAGIC # RESET_STATE_TEMPLATE = {
 # MAGIC     # Clarification fields (per-query) - SIMPLIFIED from 7 fields to 2
-# MAGIC     "pending_clarification": None,
-# MAGIC     "question_clear": False,
+# MAGIC     # "pending_clarification": None,
+# MAGIC     # "question_clear": False,
 # MAGIC     
 # MAGIC     # Planning fields (per-query)
 # MAGIC     #"plan": None,
@@ -3250,8 +3250,8 @@ from agent import AGENT
 
 # COMMAND ----------
 
-# # or load the notebook with magic run
-# %run ./agent.py
+# or load the notebook with magic run
+%run ./agent.py
 
 # COMMAND ----------
 
