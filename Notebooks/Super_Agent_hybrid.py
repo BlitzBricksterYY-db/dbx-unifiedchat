@@ -1227,7 +1227,7 @@ Use your available UC function tools to gather metadata intelligently.
         # Extract SQL and explanation from response
         if result and "messages" in result:
             final_content = result["messages"][-1].content
-            original_content = final_content
+            original_content = final_content  # Preserve original with all SQL blocks
             
             sql_query = None
             has_sql = False
@@ -1257,8 +1257,9 @@ Use your available UC function tools to gather metadata intelligently.
                 explanation = original_content if not has_sql else "SQL query generated successfully."
             
             return {
-                "sql": sql_query,
-                "explanation": explanation,
+                "sql": sql_query,  # First SQL query (for backward compatibility)
+                "explanation": explanation,  # Text without SQL blocks
+                "original_content": original_content,  # NEW: Preserve full response with all SQL blocks
                 "has_sql": has_sql
             }
         else:
@@ -1485,6 +1486,7 @@ Generate a SQL query to answer the question according to the Query Plan:
             # Last message contains the final response
             final_message = result["messages"][-1]
             final_content = final_message.content.strip()
+            original_content = final_content  # Preserve original with all SQL blocks
             
             print(f"\n{'='*80}")
             print("✅ SQL Synthesis Agent completed")
@@ -1526,8 +1528,9 @@ Generate a SQL query to answer the question according to the Query Plan:
                 explanation = final_content if not has_sql else "SQL query generated successfully by Genie agent tools."
             
             return {
-                "sql": sql_query,
-                "explanation": explanation,
+                "sql": sql_query,  # First SQL query (for backward compatibility)
+                "explanation": explanation,  # Text without SQL blocks
+                "original_content": original_content,  # NEW: Preserve full response with all SQL blocks
                 "has_sql": has_sql
             }
             
@@ -2262,16 +2265,20 @@ def sql_synthesis_table_node(state: AgentState) -> AgentState:
         sql_query = result.get("sql")
         explanation = result.get("explanation", "")
         has_sql = result.get("has_sql", False)
+        original_content = result.get("original_content", "")  # NEW: Full response with all SQL blocks
         
         state["sql_synthesis_explanation"] = explanation
         
-        # NEW: Extract all SQL queries from the complete response
-        # Check both the extracted SQL and the full explanation for SQL blocks
-        full_content = explanation
-        if sql_query:
-            full_content = f"{explanation}\n\n```sql\n{sql_query}\n```"
-        
-        sql_queries = extract_all_sql_queries(full_content)
+        # NEW: Extract all SQL queries from the original response (which has all SQL blocks intact)
+        # Use original_content if available, otherwise fallback to reconstructing
+        if original_content:
+            sql_queries = extract_all_sql_queries(original_content)
+        else:
+            # Fallback for backward compatibility
+            full_content = explanation
+            if sql_query:
+                full_content = f"{explanation}\n\n```sql\n{sql_query}\n```"
+            sql_queries = extract_all_sql_queries(full_content)
         
         if sql_queries:
             # Multi-query support
@@ -2356,16 +2363,20 @@ def sql_synthesis_genie_node(state: AgentState) -> AgentState:
         sql_query = result.get("sql")
         explanation = result.get("explanation", "")
         has_sql = result.get("has_sql", False)
+        original_content = result.get("original_content", "")  # NEW: Full response with all SQL blocks
         
         state["sql_synthesis_explanation"] = explanation
         
-        # NEW: Extract all SQL queries from the complete response
-        # Check both the extracted SQL and the full explanation for SQL blocks
-        full_content = explanation
-        if sql_query:
-            full_content = f"{explanation}\n\n```sql\n{sql_query}\n```"
-        
-        sql_queries = extract_all_sql_queries(full_content)
+        # NEW: Extract all SQL queries from the original response (which has all SQL blocks intact)
+        # Use original_content if available, otherwise fallback to reconstructing
+        if original_content:
+            sql_queries = extract_all_sql_queries(original_content)
+        else:
+            # Fallback for backward compatibility
+            full_content = explanation
+            if sql_query:
+                full_content = f"{explanation}\n\n```sql\n{sql_query}\n```"
+            sql_queries = extract_all_sql_queries(full_content)
         
         if sql_queries:
             # Multi-query support
