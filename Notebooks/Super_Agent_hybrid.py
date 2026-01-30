@@ -370,7 +370,7 @@ def load_space_context(table_name: str) -> Dict[str, str]:
 
 # COMMAND ----------
 
-# DBTITLE 1,Meta-Question Detection Agent Class (OOP)
+# DBTITLE 1,Agent Class 0a: Meta-Question Detection Agent Class (OOP)
 class MetaQuestionDetector:
     """
     Lightweight detector for meta-questions using pattern matching and optional LLM fallback.
@@ -573,7 +573,7 @@ print("✓ MetaQuestionDetector class defined")
 
 # COMMAND ----------
 
-# DBTITLE 1,Meta-Question Handler Agent Class (OOP)
+# DBTITLE 1,Agent Class 0b: Meta-Question Handler Agent Class (OOP)
 class MetaQuestionHandler:
     """
     Handles meta-questions that can be answered from context alone (no SQL needed).
@@ -3170,6 +3170,54 @@ final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_001")
 
 # COMMAND ----------
 
+# DBTITLE 1,meta 1
+# Example meta query 1
+test_query = "What I can do here"
+# Invoke Hybrid Super Agent
+final_state = invoke_super_agent_hybrid(test_query, thread_id="test_meta_001")
+
+# COMMAND ----------
+
+# DBTITLE 1,meta 2
+# Example meta query 1
+test_query = "What datasets are available"
+# Invoke Hybrid Super Agent
+final_state = invoke_super_agent_hybrid(test_query, thread_id="test_meta_002")
+
+# COMMAND ----------
+
+# DBTITLE 1,meta 3
+# Example meta query 1
+test_query = "What questions can I ask?"
+# Invoke Hybrid Super Agent
+final_state = invoke_super_agent_hybrid(test_query, thread_id="test_meta_003")
+
+# COMMAND ----------
+
+# DBTITLE 1,meta 4
+# Example meta query 1
+test_query = "Can you offer me a list of cross-space questions I can ask"
+# Invoke Hybrid Super Agent
+final_state = invoke_super_agent_hybrid(test_query, thread_id="test_meta_004")
+
+# COMMAND ----------
+
+# DBTITLE 1,meta 5
+# Example meta query 1
+test_query = "How many total claims? How many total members?"
+# Invoke Hybrid Super Agent
+final_state = invoke_super_agent_hybrid(test_query, thread_id="test_meta_005")
+
+# COMMAND ----------
+
+# DBTITLE 1,meta 6
+# Example meta query 1
+test_query = "How many total claims group by payer type and report average medical cost? How many total members by age group? what are top 5 frequent diagnosis codes and top 5 procedure codes for members between 30-45?"
+# Invoke Hybrid Super Agent
+final_state = invoke_super_agent_hybrid(test_query, thread_id="test_meta_006")
+
+# COMMAND ----------
+
 # DBTITLE 1,same query for genie route
 # Example test query
 test_query = "What is the average cost of medical claims per claim in 2024? Use genie route"
@@ -3194,7 +3242,7 @@ final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_003_t
 #-------
 follow_up = """
  1. E10-E14
-  2. both line charges and allowed
+  2. both line charges and allowed, aggregate at claim level
   3. any claim where a diabetes diagnosis appears
 
 """
@@ -3208,7 +3256,7 @@ final_state = respond_to_clarification(
 # COMMAND ----------
 
 # Example test query
-test_query = "What is the average cost of medical claims for patients diagnosed with diabetes, broken down by insurance payer type and patient age group? Use genie route"
+test_query = "What is the average cost of medical claims for patients diagnosed with diabetes, broken down by insurance payer type and patient age group? Use genie route. Dont clarify anything, go with your call."
 # Invoke Hybrid Super Agent
 final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_003_genie")
 
@@ -3221,12 +3269,16 @@ final_state = invoke_super_agent_hybrid(test_query, thread_id="test_hybrid_003_g
 # COMMAND ----------
 
 #-------
-follow_up = """
-  1. both line charges and allowed
-  2. you decide
-  3. E10-E14
+# follow_up = """
+#   1. both line charges and allowed
+#   2. you decide
+#   3. E10-E14
+# """
 
+follow_up = """
+you decide anything
 """
+
 # User provides clarification
 final_state = respond_to_clarification(
     follow_up,
