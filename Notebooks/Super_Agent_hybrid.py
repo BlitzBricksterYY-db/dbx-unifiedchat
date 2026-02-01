@@ -1286,9 +1286,6 @@ class SQLSynthesisGenieAgent:
         
         Uses LangChain preferred syntax with Pydantic BaseModel and StructuredTool.
         """
-        from pydantic import BaseModel, Field
-        from langchain.tools import StructuredTool
-        
         def enforce_limit(messages, n=5):
             last = messages[-1] if messages else {"content": ""}
             content = last.get("content", "") if isinstance(last, dict) else last.content
