@@ -719,11 +719,26 @@ Prerequisites:
 # MAGIC - A brief explanation of what's critically unclear
 # MAGIC - 2-3 specific clarification options the user can choose from
 # MAGIC
+# MAGIC Additionally, always provide:
+# MAGIC - ambiguity_score: A score from 0.0 to 1.0 indicating query ambiguity
+# MAGIC   * 0.0-0.3: Clear, all key information present
+# MAGIC   * 0.3-0.5: Minor ambiguity, can reasonably infer meaning
+# MAGIC   * 0.5-0.7: Moderate ambiguity, multiple possible interpretations
+# MAGIC   * 0.7-1.0: High ambiguity, critical information missing
+# MAGIC - best_guess: Your best interpretation of the query (state specific assumptions being made)
+# MAGIC - best_guess_confidence: Confidence in your interpretation from 0.0 to 1.0
+# MAGIC   * 0.0-0.3: Low confidence, many assumptions required
+# MAGIC   * 0.3-0.7: Moderate confidence, some assumptions required
+# MAGIC   * 0.7-1.0: High confidence, minimal assumptions required
+# MAGIC
 # MAGIC Return your analysis as JSON:
 # MAGIC {{
 # MAGIC     "question_clear": true/false,
 # MAGIC     "clarification_needed": "explanation if unclear (null if clear)",
-# MAGIC     "clarification_options": ["option 1", "option 2", "option 3"] or null
+# MAGIC     "clarification_options": ["option 1", "option 2", "option 3"] or null,
+# MAGIC     "ambiguity_score": 0.0-1.0,
+# MAGIC     "best_guess": "interpretation with specific assumptions stated",
+# MAGIC     "best_guess_confidence": 0.0-1.0
 # MAGIC }}
 # MAGIC
 # MAGIC Only return valid JSON, no explanations.
@@ -1937,17 +1952,17 @@ Prerequisites:
 # MAGIC     intent_metadata = state.get("intent_metadata", {})
 # MAGIC     turn_history = state.get("turn_history", [])
 # MAGIC     
-# MAGIC     # Add ambiguity_score and best_guess to clarity_result for adaptive strategy
-# MAGIC     # (These should ideally come from ClarificationAgent, but we'll estimate for now)
-# MAGIC     clarity_result_enhanced = {
+# MAGIC     # Add backward compatibility defaults if ClarificationAgent didn't return these fields
+# MAGIC     # (older versions or LLM failures may not include them)
+# MAGIC     clarity_result_safe = {
 # MAGIC         **clarity_result,
-# MAGIC         "ambiguity_score": 0.8 if not question_clear else 0.2,  # Estimate based on clarity
-# MAGIC         "best_guess": f"Interpreting as: {query}",  # Simple best guess
-# MAGIC         "best_guess_confidence": 0.4  # Low confidence if unclear
+# MAGIC         "ambiguity_score": clarity_result.get("ambiguity_score", 0.8 if not question_clear else 0.2),
+# MAGIC         "best_guess": clarity_result.get("best_guess", f"Interpreting as: {query}"),
+# MAGIC         "best_guess_confidence": clarity_result.get("best_guess_confidence", 0.5)
 # MAGIC     }
 # MAGIC     
 # MAGIC     should_clarify = adaptive_clarification_strategy(
-# MAGIC         clarity_result=clarity_result_enhanced,
+# MAGIC         clarity_result=clarity_result_safe,
 # MAGIC         intent_metadata=intent_metadata,
 # MAGIC         turn_history=turn_history
 # MAGIC     )
@@ -1962,7 +1977,7 @@ Prerequisites:
 # MAGIC             "next_agent": "planning",
 # MAGIC             "pending_clarification": None,
 # MAGIC             "messages": [
-# MAGIC                 SystemMessage(content=f"Query has some ambiguity but proceeding with best-effort interpretation: {clarity_result_enhanced['best_guess']}")
+# MAGIC                 SystemMessage(content=f"Query has some ambiguity but proceeding with best-effort interpretation: {clarity_result_safe['best_guess']}")
 # MAGIC             ]
 # MAGIC         }
 # MAGIC     
@@ -1979,8 +1994,8 @@ Prerequisites:
 # MAGIC         reason=clarification_needed or "Query needs more specificity",
 # MAGIC         options=clarification_options,
 # MAGIC         turn_id=current_turn["turn_id"],
-# MAGIC         best_guess=clarity_result_enhanced.get("best_guess"),
-# MAGIC         best_guess_confidence=clarity_result_enhanced.get("best_guess_confidence")
+# MAGIC         best_guess=clarity_result_safe.get("best_guess"),
+# MAGIC         best_guess_confidence=clarity_result_safe.get("best_guess_confidence")
 # MAGIC     )
 # MAGIC     
 # MAGIC     # Format clarification message for user
