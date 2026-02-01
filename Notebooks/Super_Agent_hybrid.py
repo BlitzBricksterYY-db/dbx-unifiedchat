@@ -676,7 +676,7 @@ Prerequisites:
 # MAGIC         context = load_space_context(table_name)
 # MAGIC         return cls(llm, context)
 # MAGIC     
-# MAGIC     def check_clarity(self, query: str) -> Dict[str, Any]:
+# MAGIC     def check_clarity(self, query: str, context_summary: str = None) -> Dict[str, Any]:
 # MAGIC         """
 # MAGIC         Check if the user query is clear and answerable.
 # MAGIC         
@@ -684,11 +684,15 @@ Prerequisites:
 # MAGIC         in the clarification_node, not here. This agent only assesses clarity.
 # MAGIC         
 # MAGIC         Args:
-# MAGIC             query: User's question
+# MAGIC             query: User's current question
+# MAGIC             context_summary: Optional context summary from intent detection (includes conversation history)
 # MAGIC             
 # MAGIC         Returns:
 # MAGIC             Dictionary with clarity analysis
 # MAGIC         """
+# MAGIC         
+# MAGIC         # Use context_summary if available (includes conversation history), otherwise use raw query
+# MAGIC         analysis_query = context_summary or query
 # MAGIC         
 # MAGIC         clarity_prompt = f"""
 # MAGIC Analyze the following question for clarity and specificity based on the context.
@@ -696,15 +700,19 @@ Prerequisites:
 # MAGIC IMPORTANT: Only mark as unclear if the question is TRULY VAGUE or IMPOSSIBLE to answer.
 # MAGIC Be lenient - if the question can reasonably be answered with the available data, mark it as clear.
 # MAGIC
-# MAGIC Question: {query}
+# MAGIC Current User Query: {query}
 # MAGIC
-# MAGIC Context (Available Data Sources):
+# MAGIC Full Context (includes conversation history if available):
+# MAGIC {analysis_query}
+# MAGIC
+# MAGIC Available Data Sources:
 # MAGIC {json.dumps(self.context, indent=2)}
 # MAGIC
 # MAGIC Determine if:
 # MAGIC 1. The question is clear and answerable as-is (BE LENIENT - default to TRUE)
 # MAGIC 2. The question is TRULY VAGUE and needs critical clarification (ONLY if essential information is missing)
 # MAGIC 3. If the question mentions any metrics/dimensions/filters that can be mapped to available data with certain confidence, mark it as CLEAR; otherwise, mark it as UNCLEAR and ask for clarification.
+# MAGIC 4. Consider the conversation context - if this is a refinement or follow-up with adequate context, mark it as CLEAR.
 # MAGIC
 # MAGIC
 # MAGIC If clarification is truly needed, provide:
@@ -744,9 +752,9 @@ Prerequisites:
 # MAGIC             print(f"Defaulting to question_clear=True")
 # MAGIC             return {"question_clear": True}
 # MAGIC     
-# MAGIC     def __call__(self, query: str) -> Dict[str, Any]:
+# MAGIC     def __call__(self, query: str, context_summary: str = None) -> Dict[str, Any]:
 # MAGIC         """Make agent callable for easy invocation."""
-# MAGIC         return self.check_clarity(query)
+# MAGIC         return self.check_clarity(query, context_summary)
 # MAGIC
 # MAGIC print("✓ ClarificationAgent class defined")
 # MAGIC class PlanningAgent:
@@ -1858,8 +1866,11 @@ Prerequisites:
 # MAGIC     writer({"type": "agent_thinking", "agent": "clarification", "content": "Analyzing query clarity..."})
 # MAGIC     clarification_agent = ClarificationAgent.from_table(llm, TABLE_NAME)
 # MAGIC     
-# MAGIC     # Call clarity check (clarification limiting handled by adaptive strategy)
-# MAGIC     clarity_result = clarification_agent.check_clarity(query)
+# MAGIC     # Call clarity check with context_summary (includes conversation history)
+# MAGIC     # This provides full context to help evaluate clarity
+# MAGIC     if context_summary:
+# MAGIC         print(f"  Using context_summary for clarity analysis")
+# MAGIC     clarity_result = clarification_agent.check_clarity(query, context_summary)
 # MAGIC     
 # MAGIC     # Prepare state updates (don't modify state in-place)
 # MAGIC     question_clear = clarity_result.get("question_clear", True)
