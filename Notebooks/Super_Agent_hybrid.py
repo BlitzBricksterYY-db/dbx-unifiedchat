@@ -2236,7 +2236,7 @@ def unified_intent_context_clarification_node(state: AgentState) -> dict:
     Unified node that combines intent detection, context generation, and clarity check.
     
     Single LLM call for:
-    1. Intent classification (new_question, refinement, continuation)
+    1. Intent classification (new_question, refinement, continuation, clarification_response)
     2. Context summary generation
     3. Clarity assessment with rate limiting (max 1 per 5 turns)
     
@@ -2293,6 +2293,7 @@ Classify the query into ONE of these categories:
 1. **new_question**: A completely different topic/domain from previous queries
 2. **refinement**: Narrowing/filtering/modifying the previous query on same topic
 3. **continuation**: Follow-up exploring same topic from different angle
+4. **clarification_response**: User is providing the clarification response to the clarification request
 
 ## Task 2: Generate Context Summary
 Create a 2-3 sentence summary that:
@@ -2305,10 +2306,11 @@ Determine if the query is clear enough to generate SQL:
 - Is the question clear and answerable as-is? (BE LENIENT - default to TRUE)
 - ONLY mark as unclear if CRITICAL information is missing
 - If unclear, provide 2-3 specific clarification options
+- Never mark as unclear if the question is a clarification response to a previous clarification request
 
 Return ONLY valid JSON:
 {{
-  "intent_type": "new_question" | "refinement" | "continuation",
+  "intent_type": "new_question" | "refinement" | "continuation" | "clarification_response",
   "confidence": 0.95,
   "context_summary": "2-3 sentence summary for planning agent",
   "question_clear": true/false,
