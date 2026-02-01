@@ -376,7 +376,7 @@ Prerequisites:
 # MAGIC from databricks_langchain.genie import GenieAgent
 # MAGIC from langchain.agents import create_agent
 # MAGIC from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, AIMessageChunk
-# MAGIC from langchain_core.runnables import Runnable, RunnableLambda, RunnableConfig
+# MAGIC from langchain_core.runnables import Runnable, RunnableLambda, RunnableParallel, RunnableConfig
 # MAGIC from langchain_core.tools import tool
 # MAGIC import mlflow
 # MAGIC import logging
@@ -1223,11 +1223,26 @@ Prerequisites:
 # MAGIC     """
 # MAGIC     Agent responsible for Genie Route SQL synthesis using Genie agents as tools.
 # MAGIC     
-# MAGIC     Uses LangChain agent pattern where Genie agents are wrapped as tools.
-# MAGIC     The agent orchestrates tool calling, retries, and SQL synthesis autonomously.
+# MAGIC     EXECUTION MODES:
+# MAGIC     ---------------
+# MAGIC     1. LangGraph Agent Mode (default via synthesize_sql()):
+# MAGIC        - Uses LangGraph agent with tool calling
+# MAGIC        - Supports retries, disaster recovery, and adaptive routing
+# MAGIC        - Agent decides which tools to call and when
+# MAGIC        - Best for complex queries requiring orchestration
 # MAGIC     
-# MAGIC     OOP design with Genie agent-as-tools integration.
-# MAGIC     Optimized to only create Genie agents for relevant spaces (not all spaces).
+# MAGIC     2. RunnableParallel Mode (via invoke_genie_agents_parallel()):
+# MAGIC        - Uses RunnableParallel for direct parallel execution
+# MAGIC        - Faster for simple parallel queries
+# MAGIC        - No retry logic or adaptive routing
+# MAGIC        - Best for straightforward parallel execution
+# MAGIC     
+# MAGIC     ARCHITECTURE:
+# MAGIC     ------------
+# MAGIC     - Upgraded from RunnableLambda to RunnableParallel pattern
+# MAGIC     - Each Genie agent is wrapped as both a tool and a parallel executor
+# MAGIC     - Supports efficient parallel invocation using LangChain's RunnableParallel
+# MAGIC     - Optimized to only create Genie agents for relevant spaces (not all spaces)
 # MAGIC     """
 # MAGIC     
 # MAGIC     def __init__(self, llm: Runnable, relevant_spaces: List[Dict[str, Any]]):
@@ -1254,9 +1269,12 @@ Prerequisites:
 # MAGIC     def _create_genie_agent_tools(self):
 # MAGIC         """
 # MAGIC         Create Genie agents as tools only for relevant spaces.
-# MAGIC         Uses RunnableLambda wrapper pattern to avoid closure issues.
 # MAGIC         
-# MAGIC         Pattern copied from test_uc_functions.py lines 1283-1318
+# MAGIC         Creates both:
+# MAGIC         1. Individual tool wrappers for LangGraph agent tool calling
+# MAGIC         2. A parallel executor mapping for efficient batch invocation
+# MAGIC         
+# MAGIC         Upgraded to use RunnableParallel pattern for better parallel execution.
 # MAGIC         """
 # MAGIC         def enforce_limit(messages, n=5):
 # MAGIC             last = messages[-1] if messages else {"content": ""}
@@ -1264,6 +1282,9 @@ Prerequisites:
 # MAGIC             return f"{content}\n\nPlease limit the result to at most {n} rows."
 # MAGIC         
 # MAGIC         print(f"  Creating Genie agent tools for {len(self.relevant_spaces)} relevant spaces...")
+# MAGIC         
+# MAGIC         # Dictionary to hold parallel executors: space_id -> runnable
+# MAGIC         parallel_executors = {}
 # MAGIC         
 # MAGIC         for space in self.relevant_spaces:
 # MAGIC             space_id = space.get("space_id")
@@ -1287,19 +1308,27 @@ Prerequisites:
 # MAGIC             )
 # MAGIC             self.genie_agents.append(genie_agent)
 # MAGIC             
-# MAGIC             # Wrap the agent call in a function that only takes a string argument
-# MAGIC             # This function also returns a function to avoid closure issues
+# MAGIC             # Create agent invoker function using factory pattern to avoid closure issues
 # MAGIC             def make_agent_invoker(agent):
-# MAGIC                 return lambda question: agent.invoke(
-# MAGIC                     {"messages": [{"role": "user", "content": question}]}
-# MAGIC                 )
+# MAGIC                 """Factory function to capture agent in closure properly"""
+# MAGIC                 def invoke_agent(question: str):
+# MAGIC                     """Invoke agent with question and return response"""
+# MAGIC                     return agent.invoke(
+# MAGIC                         {"messages": [{"role": "user", "content": question}]}
+# MAGIC                     )
+# MAGIC                 return invoke_agent
 # MAGIC             
-# MAGIC             runnable = RunnableLambda(make_agent_invoker(genie_agent))
-# MAGIC             runnable.name = genie_agent_name
-# MAGIC             runnable.description = description
+# MAGIC             # Create a RunnableLambda for this agent
+# MAGIC             agent_runnable = RunnableLambda(make_agent_invoker(genie_agent))
+# MAGIC             agent_runnable.name = genie_agent_name
+# MAGIC             agent_runnable.description = description
 # MAGIC             
+# MAGIC             # Store in parallel executors dict
+# MAGIC             parallel_executors[space_id] = agent_runnable
+# MAGIC             
+# MAGIC             # Create tool wrapper for LangGraph agent
 # MAGIC             self.genie_agent_tools.append(
-# MAGIC                 runnable.as_tool(
+# MAGIC                 agent_runnable.as_tool(
 # MAGIC                     name=genie_agent_name,
 # MAGIC                     description=description,
 # MAGIC                     arg_types={"question": str}
@@ -1307,6 +1336,9 @@ Prerequisites:
 # MAGIC             )
 # MAGIC             
 # MAGIC             print(f"  ✓ Created Genie agent tool: {genie_agent_name} ({space_id})")
+# MAGIC         
+# MAGIC         # Store parallel executors for batch invocation
+# MAGIC         self.parallel_executors = parallel_executors
 # MAGIC     
 # MAGIC     def _create_sql_synthesis_agent(self):
 # MAGIC         """
@@ -1372,6 +1404,64 @@ Prerequisites:
 # MAGIC         )
 # MAGIC         
 # MAGIC         return sql_synthesis_agent
+# MAGIC     
+# MAGIC     def invoke_genie_agents_parallel(self, genie_route_plan: Dict[str, str]) -> Dict[str, Any]:
+# MAGIC         """
+# MAGIC         Invoke multiple Genie agents in parallel using RunnableParallel.
+# MAGIC         
+# MAGIC         This method demonstrates the proper use of RunnableParallel for efficient
+# MAGIC         parallel execution of multiple Genie agents simultaneously.
+# MAGIC         
+# MAGIC         Args:
+# MAGIC             genie_route_plan: Dictionary mapping space_id to partial_question
+# MAGIC                 Example: {
+# MAGIC                     "space_01j9t0jhx009k25rvp67y1k7j0": "Get member demographics",
+# MAGIC                     "space_01j9t0jhx009k25rvp67y1k7j1": "Get benefit costs"
+# MAGIC                 }
+# MAGIC         
+# MAGIC         Returns:
+# MAGIC             Dictionary mapping space_id to agent response
+# MAGIC             Example: {
+# MAGIC                 "space_01j9t0jhx009k25rvp67y1k7j0": {...response...},
+# MAGIC                 "space_01j9t0jhx009k25rvp67y1k7j1": {...response...}
+# MAGIC             }
+# MAGIC         """
+# MAGIC         if not genie_route_plan:
+# MAGIC             return {}
+# MAGIC         
+# MAGIC         # Build RunnableParallel dynamically based on genie_route_plan
+# MAGIC         # Filter to only include spaces we have executors for
+# MAGIC         parallel_tasks = {}
+# MAGIC         for space_id, question in genie_route_plan.items():
+# MAGIC             if space_id in self.parallel_executors:
+# MAGIC                 # Each executor is a RunnableLambda that takes a question string
+# MAGIC                 # We need to bind the question to the runnable
+# MAGIC                 parallel_tasks[space_id] = RunnableLambda(
+# MAGIC                     lambda q=question, sid=space_id: self.parallel_executors[sid].invoke(q)
+# MAGIC                 )
+# MAGIC             else:
+# MAGIC                 print(f"  ⚠ Warning: No executor found for space_id: {space_id}")
+# MAGIC         
+# MAGIC         if not parallel_tasks:
+# MAGIC             print("  ⚠ Warning: No valid parallel tasks to execute")
+# MAGIC             return {}
+# MAGIC         
+# MAGIC         # Create RunnableParallel with all tasks
+# MAGIC         parallel_runner = RunnableParallel(**parallel_tasks)
+# MAGIC         
+# MAGIC         print(f"  🚀 Invoking {len(parallel_tasks)} Genie agents in parallel using RunnableParallel...")
+# MAGIC         
+# MAGIC         try:
+# MAGIC             # Invoke all agents in parallel
+# MAGIC             # RunnableParallel.invoke() with empty dict as input since questions are pre-bound
+# MAGIC             results = parallel_runner.invoke({})
+# MAGIC             
+# MAGIC             print(f"  ✅ Parallel invocation completed for {len(results)} agents")
+# MAGIC             return results
+# MAGIC             
+# MAGIC         except Exception as e:
+# MAGIC             print(f"  ❌ Parallel invocation failed: {str(e)}")
+# MAGIC             return {}
 # MAGIC     
 # MAGIC     def synthesize_sql(
 # MAGIC         self, 

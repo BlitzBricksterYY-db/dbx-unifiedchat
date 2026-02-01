@@ -97,7 +97,7 @@ from databricks_langchain import (
 from databricks_langchain.genie import GenieAgent
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, AIMessageChunk
-from langchain_core.runnables import Runnable, RunnableLambda, RunnableConfig
+from langchain_core.runnables import Runnable, RunnableLambda, RunnableParallel, RunnableConfig
 from langchain_core.tools import tool
 import mlflow
 import logging
@@ -929,11 +929,26 @@ class SQLSynthesisGenieAgent:
     """
     Agent responsible for Genie Route SQL synthesis using Genie agents as tools.
     
-    Uses LangChain agent pattern where Genie agents are wrapped as tools.
-    The agent orchestrates tool calling, retries, and SQL synthesis autonomously.
+    EXECUTION MODES:
+    ---------------
+    1. LangGraph Agent Mode (default via synthesize_sql()):
+       - Uses LangGraph agent with tool calling
+       - Supports retries, disaster recovery, and adaptive routing
+       - Agent decides which tools to call and when
+       - Best for complex queries requiring orchestration
     
-    OOP design with Genie agent-as-tools integration.
-    Optimized to only create Genie agents for relevant spaces (not all spaces).
+    2. RunnableParallel Mode (via invoke_genie_agents_parallel()):
+       - Uses RunnableParallel for direct parallel execution
+       - Faster for simple parallel queries
+       - No retry logic or adaptive routing
+       - Best for straightforward parallel execution
+    
+    ARCHITECTURE:
+    ------------
+    - Upgraded from RunnableLambda to RunnableParallel pattern
+    - Each Genie agent is wrapped as both a tool and a parallel executor
+    - Supports efficient parallel invocation using LangChain's RunnableParallel
+    - Optimized to only create Genie agents for relevant spaces (not all spaces)
     """
     
     def __init__(self, llm: Runnable, relevant_spaces: List[Dict[str, Any]]):
@@ -960,9 +975,12 @@ class SQLSynthesisGenieAgent:
     def _create_genie_agent_tools(self):
         """
         Create Genie agents as tools only for relevant spaces.
-        Uses RunnableLambda wrapper pattern to avoid closure issues.
         
-        Pattern copied from test_uc_functions.py lines 1283-1318
+        Creates both:
+        1. Individual tool wrappers for LangGraph agent tool calling
+        2. A parallel executor mapping for efficient batch invocation
+        
+        Upgraded to use RunnableParallel pattern for better parallel execution.
         """
         def enforce_limit(messages, n=5):
             last = messages[-1] if messages else {"content": ""}
@@ -970,6 +988,9 @@ class SQLSynthesisGenieAgent:
             return f"{content}\n\nPlease limit the result to at most {n} rows."
         
         print(f"  Creating Genie agent tools for {len(self.relevant_spaces)} relevant spaces...")
+        
+        # Dictionary to hold parallel executors: space_id -> runnable
+        parallel_executors = {}
         
         for space in self.relevant_spaces:
             space_id = space.get("space_id")
@@ -993,19 +1014,27 @@ class SQLSynthesisGenieAgent:
             )
             self.genie_agents.append(genie_agent)
             
-            # Wrap the agent call in a function that only takes a string argument
-            # This function also returns a function to avoid closure issues
+            # Create agent invoker function using factory pattern to avoid closure issues
             def make_agent_invoker(agent):
-                return lambda question: agent.invoke(
-                    {"messages": [{"role": "user", "content": question}]}
-                )
+                """Factory function to capture agent in closure properly"""
+                def invoke_agent(question: str):
+                    """Invoke agent with question and return response"""
+                    return agent.invoke(
+                        {"messages": [{"role": "user", "content": question}]}
+                    )
+                return invoke_agent
             
-            runnable = RunnableLambda(make_agent_invoker(genie_agent))
-            runnable.name = genie_agent_name
-            runnable.description = description
+            # Create a RunnableLambda for this agent
+            agent_runnable = RunnableLambda(make_agent_invoker(genie_agent))
+            agent_runnable.name = genie_agent_name
+            agent_runnable.description = description
             
+            # Store in parallel executors dict
+            parallel_executors[space_id] = agent_runnable
+            
+            # Create tool wrapper for LangGraph agent
             self.genie_agent_tools.append(
-                runnable.as_tool(
+                agent_runnable.as_tool(
                     name=genie_agent_name,
                     description=description,
                     arg_types={"question": str}
@@ -1013,6 +1042,9 @@ class SQLSynthesisGenieAgent:
             )
             
             print(f"  ✓ Created Genie agent tool: {genie_agent_name} ({space_id})")
+        
+        # Store parallel executors for batch invocation
+        self.parallel_executors = parallel_executors
     
     def _create_sql_synthesis_agent(self):
         """
@@ -1078,6 +1110,64 @@ OUTPUT REQUIREMENTS:
         )
         
         return sql_synthesis_agent
+    
+    def invoke_genie_agents_parallel(self, genie_route_plan: Dict[str, str]) -> Dict[str, Any]:
+        """
+        Invoke multiple Genie agents in parallel using RunnableParallel.
+        
+        This method demonstrates the proper use of RunnableParallel for efficient
+        parallel execution of multiple Genie agents simultaneously.
+        
+        Args:
+            genie_route_plan: Dictionary mapping space_id to partial_question
+                Example: {
+                    "space_01j9t0jhx009k25rvp67y1k7j0": "Get member demographics",
+                    "space_01j9t0jhx009k25rvp67y1k7j1": "Get benefit costs"
+                }
+        
+        Returns:
+            Dictionary mapping space_id to agent response
+            Example: {
+                "space_01j9t0jhx009k25rvp67y1k7j0": {...response...},
+                "space_01j9t0jhx009k25rvp67y1k7j1": {...response...}
+            }
+        """
+        if not genie_route_plan:
+            return {}
+        
+        # Build RunnableParallel dynamically based on genie_route_plan
+        # Filter to only include spaces we have executors for
+        parallel_tasks = {}
+        for space_id, question in genie_route_plan.items():
+            if space_id in self.parallel_executors:
+                # Each executor is a RunnableLambda that takes a question string
+                # We need to bind the question to the runnable
+                parallel_tasks[space_id] = RunnableLambda(
+                    lambda q=question, sid=space_id: self.parallel_executors[sid].invoke(q)
+                )
+            else:
+                print(f"  ⚠ Warning: No executor found for space_id: {space_id}")
+        
+        if not parallel_tasks:
+            print("  ⚠ Warning: No valid parallel tasks to execute")
+            return {}
+        
+        # Create RunnableParallel with all tasks
+        parallel_runner = RunnableParallel(**parallel_tasks)
+        
+        print(f"  🚀 Invoking {len(parallel_tasks)} Genie agents in parallel using RunnableParallel...")
+        
+        try:
+            # Invoke all agents in parallel
+            # RunnableParallel.invoke() with empty dict as input since questions are pre-bound
+            results = parallel_runner.invoke({})
+            
+            print(f"  ✅ Parallel invocation completed for {len(results)} agents")
+            return results
+            
+        except Exception as e:
+            print(f"  ❌ Parallel invocation failed: {str(e)}")
+            return {}
     
     def synthesize_sql(
         self, 
