@@ -216,6 +216,10 @@ class IntentDetectionAgent:
         This is a fast-path detection using pattern matching before
         invoking the full LLM classification.
         
+        IMPORTANT: Only detects unanswered clarification requests.
+        If a clarification has already been answered by a HumanMessage,
+        subsequent queries are NOT clarification responses.
+        
         Args:
             current_query: Current user query
             messages: Message history
@@ -226,9 +230,14 @@ class IntentDetectionAgent:
         if len(messages) < 2:
             return {"is_clarification_response": False}
         
-        # Look for recent AI clarification message
-        for i in range(len(messages) - 1, max(0, len(messages) - 5), -1):
+        # Look for recent AI clarification message (tightened to last 3 messages for recency)
+        # Reduced from 5 to 3 to avoid stale clarification requests
+        search_window = min(3, len(messages) - 1)
+        
+        for i in range(len(messages) - 1, max(0, len(messages) - search_window - 1), -1):
             msg = messages[i]
+            
+            # ONLY check AIMessages (not SystemMessages which may contain "clarification" in best-effort traces)
             if isinstance(msg, AIMessage):
                 content_lower = msg.content.lower()
                 clarification_keywords = [
@@ -242,13 +251,29 @@ class IntentDetectionAgent:
                 ]
                 
                 if any(keyword in content_lower for keyword in clarification_keywords):
-                    # Found clarification message, get original query
+                    # Found potential clarification message
+                    # CHECK: Has this clarification already been answered?
+                    # Look for HumanMessage AFTER this AIMessage
+                    has_human_response_after = False
+                    for k in range(i + 1, len(messages)):
+                        if isinstance(messages[k], HumanMessage):
+                            has_human_response_after = True
+                            break
+                    
+                    if has_human_response_after:
+                        # Clarification was already answered - keep searching for more recent clarification
+                        print(f"  ⚠ Found clarification at index {i} but it was already answered - skipping")
+                        continue
+                    
+                    # This is an UNANSWERED clarification request
+                    # Get original query that triggered the clarification
                     original_query = None
                     for j in range(i - 1, -1, -1):
                         if isinstance(messages[j], HumanMessage):
                             original_query = messages[j].content
                             break
                     
+                    print(f"  ✓ Found unanswered clarification at index {i}")
                     return {
                         "is_clarification_response": True,
                         "clarification_question": msg.content,
