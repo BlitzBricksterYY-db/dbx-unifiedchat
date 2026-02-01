@@ -155,23 +155,32 @@ class IntentDetectionAgent:
         """
         Format conversation context for the intent detection prompt.
         
+        Uses topic-scoped context to ensure strict isolation between different
+        topics in the same thread (e.g., Question 1 and Question 2 don't mix).
+        
         Args:
             turn_history: List of previous conversation turns
             messages: Raw message history
-            max_turns: Maximum number of turns to include
+            max_turns: Maximum number of recent turns from current topic to include
         
         Returns:
-            Formatted context string
+            Formatted context string with topic-scoped turns only
         """
         if not turn_history:
             return "No previous conversation history (this is the first query)."
         
-        # Get recent turns
-        recent_turns = turn_history[-max_turns:]
+        # Get topic-scoped turns (strict isolation)
+        # Import here to avoid circular dependency
+        from .conversation_models import get_current_topic_turns
         
-        context = "Recent Conversation History:\n\n"
+        # For the PREVIOUS turn (we're analyzing the current query, not in turn_history yet)
+        last_turn = turn_history[-1]
+        topic_turns = get_current_topic_turns(turn_history, last_turn, max_recent=max_turns)
         
-        for i, turn in enumerate(recent_turns, 1):
+        # Format only topic-scoped turns
+        context = "Current Topic Context (Topic-Isolated):\n\n"
+        
+        for i, turn in enumerate(topic_turns, 1):
             intent_label = turn['intent_type'].replace('_', ' ').title()
             context += f"Turn {i} [{intent_label}]:\n"
             context += f"  Query: {turn['query']}\n"
@@ -186,6 +195,7 @@ class IntentDetectionAgent:
             context += "\n"
         
         # Add recent AI messages (especially clarification requests)
+        # Still use recent messages for clarification detection
         ai_messages = [msg for msg in messages[-5:] if isinstance(msg, AIMessage)]
         if ai_messages:
             context += "Recent Agent Responses:\n"

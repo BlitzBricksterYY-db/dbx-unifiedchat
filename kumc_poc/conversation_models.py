@@ -374,3 +374,138 @@ def get_recent_turn_summary(turn_history: List[ConversationTurn], max_turns: int
         summary += f"{i}. [{intent}] {turn['query']}\n"
     
     return summary
+
+
+def get_topic_root(turn_history: List[ConversationTurn], turn: ConversationTurn) -> ConversationTurn:
+    """
+    Find the root new_question for a given turn by traversing parent_turn_id.
+    
+    This enables topic isolation by identifying where a conversation topic started.
+    
+    Logic:
+    - new_question: Returns itself (it is the root)
+    - refinement/continuation: Traverses up parent_turn_id chain to find new_question
+    - clarification_response: Traverses to find the parent that triggered clarification
+    
+    Args:
+        turn_history: List of all conversation turns
+        turn: The turn to find the root for
+    
+    Returns:
+        The root ConversationTurn (always a new_question)
+    
+    Example:
+        Turn 1: "Show patients" [new_question]
+        Turn 2: "Age 50+" [refinement, parent=Turn1]
+        Turn 3: "By state" [refinement, parent=Turn1]
+        
+        get_topic_root(history, Turn3) -> Turn1
+    """
+    # If this is a new_question, it is the root
+    if turn['intent_type'] == 'new_question':
+        return turn
+    
+    # Traverse up the parent chain to find the root new_question
+    current = turn
+    visited = set()  # Prevent infinite loops
+    
+    while current.get('parent_turn_id'):
+        # Prevent infinite loops
+        if current['turn_id'] in visited:
+            print(f"⚠ Circular parent reference detected for turn {current['turn_id']}")
+            break
+        visited.add(current['turn_id'])
+        
+        # Find parent turn
+        parent = find_turn_by_id(turn_history, current['parent_turn_id'])
+        
+        if not parent:
+            # Parent not found, return current as root
+            print(f"⚠ Parent turn {current['parent_turn_id']} not found, using current as root")
+            break
+        
+        # If parent is new_question, we found the root
+        if parent['intent_type'] == 'new_question':
+            return parent
+        
+        # Continue traversing up
+        current = parent
+    
+    # Fallback: return the current turn if no root found
+    return current
+
+
+def get_current_topic_turns(
+    turn_history: List[ConversationTurn],
+    current_turn: ConversationTurn,
+    max_recent: int = 3
+) -> List[ConversationTurn]:
+    """
+    Get turns from current topic only (strict topic isolation).
+    
+    Strategy: Root question + last N recent turns from same topic
+    - Find root new_question via parent_turn_id traversal
+    - Collect all descendant turns (refinements, clarifications, continuations)
+    - Return: [root] + recent_descendants[-max_recent:]
+    
+    This ensures strict isolation: Question 1 and Question 2 contexts never mix.
+    
+    Args:
+        turn_history: List of all conversation turns
+        current_turn: The current turn to get context for
+        max_recent: Maximum number of recent descendant turns to include (default: 3)
+    
+    Returns:
+        List of turns scoped to current topic [root, ...recent_descendants]
+    
+    Example with max_recent=3:
+        Turn 1: "Show patients" [new_question]
+        Turn 2: "Age 50+" [refinement, parent=Turn1]
+        Turn 3: "By state" [refinement, parent=Turn1]
+        Turn 4: "Show medications" [new_question] ← NEW TOPIC
+        Turn 5: "Diabetes filter" [refinement, parent=Turn4]
+        
+        get_current_topic_turns(history, Turn5, max_recent=3)
+        Returns: [Turn 4 (root), Turn 5 (current)]
+        
+        Turn 1-3 are from Question 1 → EXCLUDED (strict isolation)
+    """
+    if not turn_history:
+        return []
+    
+    # Find the root new_question for this turn
+    root_turn = get_topic_root(turn_history, current_turn)
+    root_turn_id = root_turn['turn_id']
+    
+    # Collect all turns that belong to this topic
+    # (turns with parent chain leading back to this root)
+    topic_turns = []
+    
+    for turn in turn_history:
+        # Check if this turn belongs to the current topic
+        if turn['turn_id'] == root_turn_id:
+            # This is the root itself
+            topic_turns.append(turn)
+        elif turn['intent_type'] == 'new_question':
+            # This is a different topic root, skip
+            continue
+        else:
+            # Check if this turn's root matches our root
+            turn_root = get_topic_root(turn_history, turn)
+            if turn_root['turn_id'] == root_turn_id:
+                topic_turns.append(turn)
+    
+    # Strategy: Root + last N recent descendants
+    if len(topic_turns) <= 1:
+        # Only root or empty
+        return topic_turns
+    
+    # Split into root and descendants
+    root = [topic_turns[0]]  # First turn is always root
+    descendants = topic_turns[1:]
+    
+    # Take last max_recent descendants
+    recent_descendants = descendants[-max_recent:] if len(descendants) > max_recent else descendants
+    
+    # Return root + recent descendants
+    return root + recent_descendants
