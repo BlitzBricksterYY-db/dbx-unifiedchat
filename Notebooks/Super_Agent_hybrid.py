@@ -587,7 +587,7 @@ class ConversationTurn(TypedDict):
     """
     turn_id: str
     query: str
-    intent_type: Literal["new_question", "refinement", "continuation"]
+    intent_type: Literal["new_question", "refinement", "continuation", "clarification_response"]
     parent_turn_id: Optional[str]
     context_summary: Optional[str]
     timestamp: str  # ISO format datetime string
@@ -605,7 +605,7 @@ class ClarificationRequest(TypedDict):
 
 class IntentMetadata(TypedDict):
     """Intent metadata for business logic."""
-    intent_type: Literal["new_question", "refinement", "continuation"]
+    intent_type: Literal["new_question", "refinement", "continuation", "clarification_response"]
     confidence: float
     reasoning: str
     topic_change_score: float
@@ -664,13 +664,37 @@ class AgentState(TypedDict):
 # Helper functions
 def create_conversation_turn(
     query: str,
-    intent_type: Literal["new_question", "refinement", "continuation"],
+    intent_type: Literal["new_question", "refinement", "continuation", "clarification_response"],
     parent_turn_id: Optional[str] = None,
     context_summary: Optional[str] = None,
     triggered_clarification: bool = False,
     metadata: Optional[Dict[str, Any]] = None
 ) -> ConversationTurn:
-    """Factory function to create a ConversationTurn."""
+    """
+    Factory function to create a ConversationTurn with runtime validation.
+    
+    Args:
+        query: User's query string
+        intent_type: Must be one of: "new_question", "refinement", "continuation", "clarification_response"
+        parent_turn_id: Optional parent turn ID for context
+        context_summary: Optional summary of conversation context
+        triggered_clarification: Whether this turn triggered clarification
+        metadata: Optional additional metadata
+        
+    Returns:
+        ConversationTurn with validated intent_type
+        
+    Raises:
+        ValueError: If intent_type is not one of the allowed values
+    """
+    # Runtime validation to enforce type contract
+    valid_intent_types = {"new_question", "refinement", "continuation", "clarification_response"}
+    if intent_type not in valid_intent_types:
+        raise ValueError(
+            f"Invalid intent_type: '{intent_type}'. "
+            f"Must be one of: {valid_intent_types}."
+        )
+    
     return ConversationTurn(
         turn_id=str(uuid_module.uuid4()),
         query=query,
