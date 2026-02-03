@@ -1246,93 +1246,27 @@ Prerequisites:
 # MAGIC             # Create tool function using factory pattern to capture agent
 # MAGIC             def make_genie_tool_call(agent):
 # MAGIC                 """Factory function to capture agent in closure properly"""
-# MAGIC                 def _genie_tool_call(question: str, conversation_id: Optional[str] = None, config: RunnableConfig = None):
+# MAGIC                 def _genie_tool_call(question: str, conversation_id: Optional[str] = None):
 # MAGIC                     """
 # MAGIC                     StructuredTool with args_schema expects individual field arguments,
 # MAGIC                     not a single Pydantic object.
-# MAGIC                     
-# MAGIC                     Streams progress events via get_stream_writer() for real-time visibility.
 # MAGIC                     """
-# MAGIC                     from langgraph.config import get_stream_writer
-# MAGIC                     
-# MAGIC                     # Get stream writer for progress updates
-# MAGIC                     try:
-# MAGIC                         writer = get_stream_writer()
-# MAGIC                     except Exception:
-# MAGIC                         # If get_stream_writer fails (e.g., not in LangGraph context), continue without streaming
-# MAGIC                         writer = None
-# MAGIC                     
-# MAGIC                     # Emit start event
-# MAGIC                     if writer:
-# MAGIC                         writer({
-# MAGIC                             "type": "genie_progress",
-# MAGIC                             "agent": agent.space_id if hasattr(agent, 'space_id') else "genie_agent",
-# MAGIC                             "status": "invoked",
-# MAGIC                             "question": question[:100]
-# MAGIC                         })
-# MAGIC                     
-# MAGIC                     try:
-# MAGIC                         # GenieAgent expects a LangChain-style message list
-# MAGIC                         result = agent.invoke({
-# MAGIC                             "messages": [{"role": "user", "content": question}],
-# MAGIC                             "conversation_id": conversation_id,
-# MAGIC                         }, config=config if config else {})
-# MAGIC                         
-# MAGIC                         # Extract final output + optional context
-# MAGIC                         out = {"conversation_id": result.get("conversation_id")}
-# MAGIC                         msgs = result["messages"]
-# MAGIC                         def _get(name): 
-# MAGIC                             return next((getattr(m, "content", "") for m in msgs if getattr(m, "name", None) == name), None)
-# MAGIC                         
-# MAGIC                         # Stream SQL as soon as generated
-# MAGIC                         sql = _get("query_sql")
-# MAGIC                         if sql:
-# MAGIC                             if writer:
-# MAGIC                                 writer({
-# MAGIC                                     "type": "genie_progress",
-# MAGIC                                     "agent": agent.space_id if hasattr(agent, 'space_id') else "genie_agent",
-# MAGIC                                     "status": "sql_generated",
-# MAGIC                                     "sql_preview": sql[:300]
-# MAGIC                                 })
-# MAGIC                             out["sql"] = sql
-# MAGIC                         
-# MAGIC                         # Stream reasoning
-# MAGIC                         reasoning = _get("query_reasoning")
-# MAGIC                         if reasoning:
-# MAGIC                             if writer:
-# MAGIC                                 writer({
-# MAGIC                                     "type": "genie_progress",
-# MAGIC                                     "agent": agent.space_id if hasattr(agent, 'space_id') else "genie_agent",
-# MAGIC                                     "status": "reasoning_complete"
-# MAGIC                                 })
-# MAGIC                             out["reasoning"] = reasoning
-# MAGIC                         
-# MAGIC                         # Extract answer
-# MAGIC                         answer = _get("query_result") or ""
-# MAGIC                         out["answer"] = answer
-# MAGIC                         
-# MAGIC                         # Emit completion event
-# MAGIC                         if writer:
-# MAGIC                             writer({
-# MAGIC                                 "type": "genie_progress",
-# MAGIC                                 "agent": agent.space_id if hasattr(agent, 'space_id') else "genie_agent",
-# MAGIC                                 "status": "completed",
-# MAGIC                                 "result_size": len(answer)
-# MAGIC                             })
-# MAGIC                         
-# MAGIC                         return out
-# MAGIC                         
-# MAGIC                     except Exception as e:
-# MAGIC                         # Emit failure event
-# MAGIC                         if writer:
-# MAGIC                             writer({
-# MAGIC                                 "type": "genie_progress",
-# MAGIC                                 "agent": agent.space_id if hasattr(agent, 'space_id') else "genie_agent",
-# MAGIC                                 "status": "failed",
-# MAGIC                                 "error": str(e)
-# MAGIC                             })
-# MAGIC                         raise
-# MAGIC                 
+# MAGIC                     # GenieAgent expects a LangChain-style message list
+# MAGIC                     result = agent.invoke({
+# MAGIC                         "messages": [{"role": "user", "content": question}],
+# MAGIC                         "conversation_id": conversation_id,
+# MAGIC                     })
+# MAGIC                     # Extract final output + optional context
+# MAGIC                     out = {"conversation_id": result.get("conversation_id")}
+# MAGIC                     msgs = result["messages"]
+# MAGIC                     def _get(name): 
+# MAGIC                         return next((getattr(m, "content", "") for m in msgs if getattr(m, "name", None) == name), None)
+# MAGIC                     out["answer"] = _get("query_result") or ""
+# MAGIC                     reasoning = _get("query_reasoning")
+# MAGIC                     sql = _get("query_sql")
+# MAGIC                     if reasoning: out["reasoning"] = reasoning
+# MAGIC                     if sql: out["sql"] = sql
+# MAGIC                     return out
 # MAGIC                 return _genie_tool_call
 # MAGIC             
 # MAGIC             # Create StructuredTool
@@ -1444,52 +1378,26 @@ Prerequisites:
 # MAGIC                         break
 # MAGIC         
 # MAGIC         # Tool function that builds and invokes dynamic parallel execution
-# MAGIC         def invoke_parallel_genie_agents(genie_route_plan: Dict[str, str], config: RunnableConfig = None) -> Dict[str, Any]:
+# MAGIC         def invoke_parallel_genie_agents(genie_route_plan: Dict[str, str]) -> Dict[str, Any]:
 # MAGIC             """
 # MAGIC             Invoke multiple Genie agents in parallel for efficient SQL generation.
 # MAGIC             
 # MAGIC             StructuredTool with args_schema expects individual field arguments,
 # MAGIC             not a single Pydantic object.
 # MAGIC             
-# MAGIC             Streams progress events via get_stream_writer() for real-time visibility.
-# MAGIC             
 # MAGIC             Args:
 # MAGIC                 genie_route_plan: Dictionary mapping space_id to question
-# MAGIC                 config: Optional RunnableConfig for streaming context
 # MAGIC             
 # MAGIC             Returns:
 # MAGIC                 Dictionary with results from each Genie agent, keyed by space_id.
 # MAGIC                 Each result contains the SQL query, reasoning, and answer from that agent.
 # MAGIC             """
-# MAGIC             from langgraph.config import get_stream_writer
-# MAGIC             
-# MAGIC             # Get stream writer for progress updates
-# MAGIC             try:
-# MAGIC                 writer = get_stream_writer()
-# MAGIC             except Exception:
-# MAGIC                 # If get_stream_writer fails (e.g., not in LangGraph context), continue without streaming
-# MAGIC                 writer = None
-# MAGIC             
 # MAGIC             try:
 # MAGIC                 route_plan = genie_route_plan
-# MAGIC                 
-# MAGIC                 # Emit start event
-# MAGIC                 if writer:
-# MAGIC                     writer({
-# MAGIC                         "type": "parallel_execution",
-# MAGIC                         "status": "started",
-# MAGIC                         "agent_count": len(route_plan)
-# MAGIC                     })
 # MAGIC                 
 # MAGIC                 # Validate all requested space_ids exist
 # MAGIC                 for space_id in route_plan.keys():
 # MAGIC                     if space_id not in space_id_to_tool:
-# MAGIC                         if writer:
-# MAGIC                             writer({
-# MAGIC                                 "type": "parallel_execution",
-# MAGIC                                 "status": "validation_failed",
-# MAGIC                                 "error": f"No tool found for space_id: {space_id}"
-# MAGIC                             })
 # MAGIC                         return {
 # MAGIC                             "error": f"No tool found for space_id: {space_id}",
 # MAGIC                             "available_space_ids": list(space_id_to_tool.keys())
@@ -1503,20 +1411,11 @@ Prerequisites:
 # MAGIC                 parallel_tasks = {}
 # MAGIC                 for space_id, question in route_plan.items():
 # MAGIC                     tool = space_id_to_tool[space_id]
-# MAGIC                     
-# MAGIC                     # Emit invoking event for each agent
-# MAGIC                     if writer:
-# MAGIC                         writer({
-# MAGIC                             "type": "parallel_execution",
-# MAGIC                             "status": "invoking",
-# MAGIC                             "space_id": space_id[-8:] if len(space_id) > 8 else space_id
-# MAGIC                         })
-# MAGIC                     
 # MAGIC                     # Create a lambda that calls the tool's func with individual kwargs
 # MAGIC                     # Use default argument to capture values properly in closure
 # MAGIC                     parallel_tasks[space_id] = RunnableLambda(
 # MAGIC                         lambda inp, sid=space_id, t=tool: t.func(
-# MAGIC                             question=inp[sid], conversation_id=None, config=config
+# MAGIC                             question=inp[sid], conversation_id=None
 # MAGIC                         )
 # MAGIC                     )
 # MAGIC                 
@@ -1525,26 +1424,11 @@ Prerequisites:
 # MAGIC                 composed = parallel | RunnableLambda(merge_genie_outputs)
 # MAGIC                 
 # MAGIC                 # Invoke the composed chain
-# MAGIC                 results = composed.invoke(route_plan, config=config if config else {})
-# MAGIC                 
-# MAGIC                 # Emit completion event
-# MAGIC                 if writer:
-# MAGIC                     writer({
-# MAGIC                         "type": "parallel_execution",
-# MAGIC                         "status": "completed",
-# MAGIC                         "results_count": len(results.get("agents", []))
-# MAGIC                     })
+# MAGIC                 results = composed.invoke(route_plan)
 # MAGIC                 
 # MAGIC                 return results
 # MAGIC                 
 # MAGIC             except Exception as e:
-# MAGIC                 # Emit failure event
-# MAGIC                 if writer:
-# MAGIC                     writer({
-# MAGIC                         "type": "parallel_execution",
-# MAGIC                         "status": "failed",
-# MAGIC                         "error": str(e)
-# MAGIC                     })
 # MAGIC                 return {"error": f"Parallel execution failed: {str(e)}"}
 # MAGIC         
 # MAGIC         # Create StructuredTool with proper schema
@@ -3734,50 +3618,6 @@ Prerequisites:
 # MAGIC         """
 # MAGIC         event_type = custom_data.get("type", "unknown")
 # MAGIC         
-# MAGIC         # Helper function to format genie_progress events
-# MAGIC         def format_genie_progress(d):
-# MAGIC             agent = d.get("agent", "unknown")
-# MAGIC             status = d.get("status", "")
-# MAGIC             
-# MAGIC             if status == "invoked":
-# MAGIC                 question = d.get("question", "")
-# MAGIC                 return f"🔧 Invoking Genie agent: {agent}\n   Question: {question}"
-# MAGIC             elif status == "sql_generated":
-# MAGIC                 sql_preview = d.get("sql_preview", "")
-# MAGIC                 return f"📝 SQL generated by {agent}:\n```sql\n{sql_preview}\n```"
-# MAGIC             elif status == "reasoning_complete":
-# MAGIC                 return f"💭 Reasoning complete for {agent}"
-# MAGIC             elif status == "completed":
-# MAGIC                 result_size = d.get("result_size", 0)
-# MAGIC                 return f"✅ {agent} completed ({result_size} chars)"
-# MAGIC             elif status == "failed":
-# MAGIC                 error = d.get("error", "Unknown error")
-# MAGIC                 return f"❌ {agent} failed: {error}"
-# MAGIC             else:
-# MAGIC                 return f"🔧 Genie agent {agent}: {status}"
-# MAGIC         
-# MAGIC         # Helper function to format parallel_execution events
-# MAGIC         def format_parallel_execution(d):
-# MAGIC             status = d.get("status", "")
-# MAGIC             
-# MAGIC             if status == "started":
-# MAGIC                 count = d.get("agent_count", 0)
-# MAGIC                 return f"⚡ Starting parallel execution of {count} agents"
-# MAGIC             elif status == "invoking":
-# MAGIC                 space_id = d.get("space_id", "")
-# MAGIC                 return f"⚡ Invoking agent: {space_id}"
-# MAGIC             elif status == "completed":
-# MAGIC                 count = d.get("results_count", 0)
-# MAGIC                 return f"✅ Parallel execution complete ({count} results)"
-# MAGIC             elif status == "failed":
-# MAGIC                 error = d.get("error", "Unknown error")
-# MAGIC                 return f"❌ Parallel execution failed: {error}"
-# MAGIC             elif status == "validation_failed":
-# MAGIC                 error = d.get("error", "Unknown error")
-# MAGIC                 return f"⚠️ Validation failed: {error}"
-# MAGIC             else:
-# MAGIC                 return f"⚡ Parallel execution: {status}"
-# MAGIC         
 # MAGIC         formatters = {
 # MAGIC             "agent_thinking": lambda d: f"💭 {d['agent'].upper()}: {d['content']}",
 # MAGIC             "agent_start": lambda d: f"🚀 Starting {d['agent']} agent for: {d.get('query', '')[:50]}...",
@@ -3793,8 +3633,6 @@ Prerequisites:
 # MAGIC             "sql_execution_complete": lambda d: f"✓ Query complete: {d.get('rows', 0)} rows, {len(d.get('columns', []))} columns",
 # MAGIC             "summary_start": lambda d: f"📄 Generating summary...",
 # MAGIC             "genie_agent_call": lambda d: f"🤖 Calling Genie agent for space: {d.get('space_id', 'unknown')}",
-# MAGIC             "genie_progress": format_genie_progress,
-# MAGIC             "parallel_execution": format_parallel_execution,
 # MAGIC         }
 # MAGIC         
 # MAGIC         # Bulletproof JSON fallback handler
