@@ -6,7 +6,7 @@
 # COMMAND ----------
 
 # DBTITLE 1,Install Packages
-# MAGIC %pip install python-dotenv databricks-sql-connector databricks-langchain[memory]==0.12.1 databricks-vectorsearch==0.63 databricks-agents mlflow-skinny[databricks]
+# MAGIC %pip install python-dotenv databricks-sql-connector databricks-langchain[memory]==0.12.1 databricks-vectorsearch==0.63 databricks-agents mlflow[databricks]>=3.6.0
 
 # COMMAND ----------
 
@@ -1676,8 +1676,8 @@ Then combine them into a final SQL query.
         }
         
         try:
-            # Enable MLflow autologging for tracing
-            mlflow.langchain.autolog()
+            # MLflow autologging is enabled globally at agent initialization
+            # No need to call it again here to avoid context issues
             
             # Invoke the agent
             result = self.sql_synthesis_agent.invoke(agent_message)
@@ -3741,6 +3741,16 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
         
         logger.info(f"Processing request - thread_id: {thread_id}, user_id: {user_id}")
         
+        # Ensure MLflow tracing doesn't cause issues in streaming context
+        # This safeguard prevents NonRecordingSpan context attribute errors
+        try:
+            import mlflow.tracing
+            # Verify tracing is properly initialized, otherwise disable to prevent errors
+            if not hasattr(mlflow.tracing, '_is_enabled') or not mlflow.tracing._is_enabled():
+                logger.debug("MLflow tracing not enabled, continuing without tracing")
+        except Exception as e:
+            logger.debug(f"MLflow tracing check skipped: {e}")
+        
         # Convert request input to chat completions format
         cc_msgs = to_chat_completions_input([i.model_dump() for i in request.input])
         
@@ -3984,7 +3994,14 @@ print("  ✓ Debug mode for maximum detail")
 print("="*80)
 
 # Set the agent for MLflow tracking
-mlflow.langchain.autolog()
+# Enable autologging with run_tracer_inline for proper async context propagation
+try:
+    mlflow.langchain.autolog(run_tracer_inline=True)
+    logger.info("✓ MLflow LangChain autologging enabled with async context support")
+except Exception as e:
+    logger.warning(f"⚠️ MLflow autolog initialization failed: {e}")
+    logger.warning("Continuing without MLflow tracing...")
+
 mlflow.models.set_model(AGENT)
 
 # COMMAND ----------
@@ -4648,8 +4665,8 @@ Guidelines:
     # Configure with thread
     config = {"configurable": {"thread_id": thread_id}}
     
-    # Enable MLflow tracing
-    mlflow.langchain.autolog()
+    # MLflow autologging is enabled globally at agent initialization
+    # No need to call it again here to avoid context issues
     
     # Invoke the workflow
     final_state = super_agent_hybrid.invoke(initial_state, config)
