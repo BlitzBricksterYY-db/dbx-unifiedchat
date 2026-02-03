@@ -389,10 +389,10 @@ from databricks_langchain import (
 # Import conversation management modules
 import sys
 from pathlib import Path
-# Add kumc_poc to path if not already present
-kumc_poc_path = str(Path(__file__).parent.parent / "kumc_poc") if '__file__' in globals() else "../kumc_poc"
-if kumc_poc_path not in sys.path:
-    sys.path.insert(0, kumc_poc_path)
+# # (obsolete) Add kumc_poc to path if not already present
+# kumc_poc_path = str(Path(__file__).parent.parent / "kumc_poc") if '__file__' in globals() else "../kumc_poc"
+# if kumc_poc_path not in sys.path:
+#     sys.path.insert(0, kumc_poc_path)
 
 # NOTE: No imports from kumc_poc - all TypedDicts and logic are inline
 # This simplifies the agent and makes it self-contained
@@ -4653,7 +4653,7 @@ result1 = AGENT.predict(ResponsesAgentRequest(
 # COMMAND ----------
 
 # DBTITLE 1,switch to new topic
-follow_up_msg =  "What is the average cost of medical claims for patients diagnosed with diabetes, broken down by insurance payer type and patient age group? use genie route"
+follow_up_msg =  "What is the average cost of medical claims for patients diagnosed with diabetes, broken down by insurance payer type and patient age group? use Genie route"
 # thread_id = f"test-streaming-{str(uuid4())[:8]}"
 print("thread_id in use:", thread_id)
 # follow up of thread from above, update here
