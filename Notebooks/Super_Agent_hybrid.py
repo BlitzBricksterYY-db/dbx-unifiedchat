@@ -639,6 +639,10 @@ Prerequisites:
 # MAGIC     pending_clarification: Optional[ClarificationRequest]
 # MAGIC     question_clear: bool
 # MAGIC     
+# MAGIC     # Meta-question handling (NEW)
+# MAGIC     is_meta_question: Optional[bool]
+# MAGIC     meta_answer: Optional[str]
+# MAGIC     
 # MAGIC     # Deprecated
 # MAGIC     original_query: Optional[str]
 # MAGIC     
@@ -750,6 +754,8 @@ Prerequisites:
 # MAGIC     return {
 # MAGIC         "pending_clarification": None,
 # MAGIC         "question_clear": False,
+# MAGIC         "is_meta_question": False,
+# MAGIC         "meta_answer": None,
 # MAGIC         "plan": None,
 # MAGIC         "sub_questions": None,
 # MAGIC         "requires_multiple_spaces": None,
@@ -2452,7 +2458,7 @@ Prerequisites:
 # MAGIC     # Load space context for clarity check
 # MAGIC     space_context = load_space_context(TABLE_NAME)
 # MAGIC     
-# MAGIC     # Single unified prompt for intent + context + clarity
+# MAGIC     # Single unified prompt for intent + context + clarity + meta-question detection
 # MAGIC     unified_prompt = f"""Analyze the user's query in the context of the conversation history.
 # MAGIC
 # MAGIC Current Query: {current_query}
@@ -2463,28 +2469,42 @@ Prerequisites:
 # MAGIC Available Data Sources:
 # MAGIC {json.dumps(space_context, indent=2)}
 # MAGIC
-# MAGIC ## Task 1: Classify Intent
+# MAGIC ## Task 1: Detect Meta-Questions (NEW)
+# MAGIC First, determine if this is a META-QUESTION about the system itself:
+# MAGIC - Questions about available tables, data sources, spaces, schemas
+# MAGIC - Questions about system capabilities, what data is available
+# MAGIC - Questions about the structure or organization of data
+# MAGIC 
+# MAGIC If it's a meta-question, you MUST:
+# MAGIC 1. Set "is_meta_question": true
+# MAGIC 2. Generate a direct answer using the Available Data Sources above
+# MAGIC 3. Provide a clear, informative response about what's available
+# MAGIC
+# MAGIC ## Task 2: Classify Intent
 # MAGIC Classify the query into ONE of these categories:
 # MAGIC 1. **new_question**: A completely different topic/domain from previous queries
 # MAGIC 2. **refinement**: Narrowing/filtering/modifying the previous query on same topic
 # MAGIC 3. **continuation**: Follow-up exploring same topic from different angle
 # MAGIC 4. **clarification_response**: User is providing the clarification response to the clarification request
 # MAGIC
-# MAGIC ## Task 2: Generate Context Summary
+# MAGIC ## Task 3: Generate Context Summary
 # MAGIC Create a 2-3 sentence summary that:
 # MAGIC - Synthesizes the conversation history
 # MAGIC - States clearly what the user wants
 # MAGIC - Is actionable for SQL query planning
 # MAGIC
-# MAGIC ## Task 3: Check Clarity
+# MAGIC ## Task 4: Check Clarity
 # MAGIC Determine if the query is clear enough to generate SQL:
 # MAGIC - Is the question clear and answerable as-is? (BE LENIENT - default to TRUE)
 # MAGIC - ONLY mark as unclear if CRITICAL information is missing
 # MAGIC - If unclear, provide 2-3 specific clarification options
 # MAGIC - Never mark as unclear if the question is a clarification response to a previous clarification request
+# MAGIC - Meta-questions should always be marked as clear
 # MAGIC
 # MAGIC Return ONLY valid JSON:
 # MAGIC {{
+# MAGIC   "is_meta_question": true/false,
+# MAGIC   "meta_answer": "Direct answer to meta-question (if is_meta_question=true)" or null,
 # MAGIC   "intent_type": "new_question" | "refinement" | "continuation" | "clarification_response",
 # MAGIC   "confidence": 0.95,
 # MAGIC   "context_summary": "2-3 sentence summary for planning agent",
@@ -2516,6 +2536,8 @@ Prerequisites:
 # MAGIC         result = json.loads(content)
 # MAGIC         
 # MAGIC         # Extract results
+# MAGIC         is_meta_question = result.get("is_meta_question", False)
+# MAGIC         meta_answer = result.get("meta_answer")
 # MAGIC         intent_type = result["intent_type"].lower()
 # MAGIC         confidence = result["confidence"]
 # MAGIC         context_summary = result["context_summary"]
@@ -2527,6 +2549,7 @@ Prerequisites:
 # MAGIC         print(f"✓ Intent: {intent_type} (confidence: {confidence:.2f})")
 # MAGIC         print(f"  Context: {context_summary[:100]}...")
 # MAGIC         print(f"  Question clear: {question_clear}")
+# MAGIC         print(f"  Meta-question: {is_meta_question}")
 # MAGIC         
 # MAGIC         # Create conversation turn
 # MAGIC         turn = create_conversation_turn(
@@ -2557,6 +2580,43 @@ Prerequisites:
 # MAGIC             "confidence": confidence,
 # MAGIC             "complexity": metadata.get("complexity", "moderate")
 # MAGIC         })
+# MAGIC         
+# MAGIC         # NEW: Check if this is a meta-question - handle immediately
+# MAGIC         if is_meta_question and meta_answer:
+# MAGIC             print("🔍 Meta-question detected - answering directly without SQL")
+# MAGIC             print(f"   Answer: {meta_answer[:200]}...")
+# MAGIC             
+# MAGIC             # Create turn for meta-question
+# MAGIC             turn["metadata"]["is_meta_question"] = True
+# MAGIC             
+# MAGIC             writer({
+# MAGIC                 "type": "meta_question_detected",
+# MAGIC                 "answer_preview": meta_answer[:100]
+# MAGIC             })
+# MAGIC             
+# MAGIC             # Return with meta-answer and flag to skip SQL generation
+# MAGIC             return {
+# MAGIC                 "current_turn": turn,
+# MAGIC                 "turn_history": [turn],
+# MAGIC                 "intent_metadata": IntentMetadata(
+# MAGIC                     intent_type=intent_type,
+# MAGIC                     confidence=confidence,
+# MAGIC                     reasoning=f"Meta-question: {intent_type}",
+# MAGIC                     topic_change_score=metadata.get("topic_change_score", 0.5),
+# MAGIC                     domain=metadata.get("domain"),
+# MAGIC                     operation=None,
+# MAGIC                     complexity=metadata.get("complexity", "simple"),
+# MAGIC                     parent_turn_id=None
+# MAGIC                 ),
+# MAGIC                 "question_clear": True,
+# MAGIC                 "is_meta_question": True,  # Flag for routing
+# MAGIC                 "meta_answer": meta_answer,  # Direct answer
+# MAGIC                 "pending_clarification": None,
+# MAGIC                 "messages": [
+# MAGIC                     AIMessage(content=meta_answer),
+# MAGIC                     SystemMessage(content="Meta-question answered directly, skipping SQL generation")
+# MAGIC                 ]
+# MAGIC             }
 # MAGIC         
 # MAGIC         # Check if clarification needed
 # MAGIC         if not question_clear:
@@ -3288,10 +3348,17 @@ Prerequisites:
 # MAGIC     
 # MAGIC     # Define routing logic based on explicit state
 # MAGIC     def route_after_unified(state: AgentState) -> str:
-# MAGIC         """Route after unified node: planning or END (clarification)"""
+# MAGIC         """Route after unified node: planning or END (clarification/meta-question)"""
+# MAGIC         # Check if meta-question - go directly to END with answer
+# MAGIC         if state.get("is_meta_question", False):
+# MAGIC             return END
+# MAGIC         
+# MAGIC         # Check if question is clear - proceed to planning
 # MAGIC         if state.get("question_clear", False):
 # MAGIC             return "planning"
-# MAGIC         return END  # End if clarification needed
+# MAGIC         
+# MAGIC         # Otherwise, end for clarification
+# MAGIC         return END
 # MAGIC     
 # MAGIC     def route_after_planning(state: AgentState) -> str:
 # MAGIC         next_agent = state.get("next_agent", "summarize")
