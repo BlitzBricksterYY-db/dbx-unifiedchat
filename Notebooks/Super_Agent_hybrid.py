@@ -494,6 +494,9 @@ EMBEDDING_DIMS = model_config.get("lakebase_embedding_dims")
 # Genie space IDs
 GENIE_SPACE_IDS = model_config.get("genie_space_ids")
 
+# SQL Warehouse ID (required for SQLExecutionAgent)
+SQL_WAREHOUSE_ID = model_config.get("sql_warehouse_id")
+
 # UC Functions
 UC_FUNCTION_NAMES = [
     f"{CATALOG}.{SCHEMA}.get_space_summary",
@@ -505,6 +508,17 @@ UC_FUNCTION_NAMES = [
 logger.info(f"Catalog: {CATALOG}, Schema: {SCHEMA}")
 logger.info(f"Lakebase: {LAKEBASE_INSTANCE_NAME}")
 logger.info(f"Genie Spaces: {len(GENIE_SPACE_IDS)} spaces configured")
+logger.info(f"SQL Warehouse ID: {SQL_WAREHOUSE_ID}")
+
+# Validate SQL_WAREHOUSE_ID is configured
+if not SQL_WAREHOUSE_ID:
+    error_msg = (
+        "SQL_WAREHOUSE_ID is not configured! "
+        "Ensure 'sql_warehouse_id' is set in prod_config.yaml or development_config."
+    )
+    logger.error(error_msg)
+    raise ValueError(error_msg)
+
 logger.info("="*80)
 
 # Initialize UC Function Client
