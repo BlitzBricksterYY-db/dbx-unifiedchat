@@ -34,7 +34,7 @@ todos:
     status: pending
   - id: p1-parallel-uc-calls
     content: Implement parallel UC function calls in SQL synthesis using ThreadPoolExecutor (-1 to -2s)
-    status: pending
+    status: cancelled
   - id: p2-optimize-spark-ops
     content: Use df.count() instead of len(collect()) and implement result streaming (-200 to -500ms)
     status: pending
@@ -43,7 +43,7 @@ todos:
     status: pending
   - id: p3-clarification-fastpath
     content: Add fast-path for adaptive clarification strategy (-100 to -200ms)
-    status: pending
+    status: cancelled
   - id: p3-performance-monitoring
     content: Add instrumentation to measure TTFT, TTCL, cache hit rates, and per-node timing
     status: pending

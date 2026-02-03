@@ -528,6 +528,152 @@ Prerequisites:
 # MAGIC logger.info(f"Configuration loaded: Catalog={CATALOG}, Schema={SCHEMA}, Lakebase={LAKEBASE_INSTANCE_NAME}")
 # MAGIC
 # MAGIC print("✓ All dependencies imported successfully (including memory support)")
+# MAGIC
+# MAGIC # ==============================================================================
+# MAGIC # PHASE 1 OPTIMIZATION: Caching Infrastructure
+# MAGIC # ==============================================================================
+# MAGIC
+# MAGIC from datetime import timedelta
+# MAGIC
+# MAGIC # Space context cache with TTL (30 minutes)
+# MAGIC _space_context_cache = {"data": None, "timestamp": None, "table_name": None}
+# MAGIC _SPACE_CONTEXT_CACHE_TTL = timedelta(minutes=30)
+# MAGIC
+# MAGIC # Agent instance caches (persistent across requests)
+# MAGIC _agent_cache = {}
+# MAGIC
+# MAGIC # Genie agent pool (lazy initialization)
+# MAGIC _genie_agent_pool = {}
+# MAGIC
+# MAGIC def clear_space_context_cache():
+# MAGIC     """Manually clear space context cache (useful for testing or refresh)."""
+# MAGIC     global _space_context_cache
+# MAGIC     _space_context_cache = {"data": None, "timestamp": None, "table_name": None}
+# MAGIC     print("✓ Space context cache cleared")
+# MAGIC
+# MAGIC def clear_agent_caches():
+# MAGIC     """Clear all agent caches (useful for configuration changes)."""
+# MAGIC     global _agent_cache, _genie_agent_pool
+# MAGIC     _agent_cache = {}
+# MAGIC     _genie_agent_pool = {}
+# MAGIC     print("✓ Agent caches cleared")
+# MAGIC
+# MAGIC def get_cache_stats():
+# MAGIC     """Get cache statistics for monitoring."""
+# MAGIC     stats = {
+# MAGIC         "space_context_cached": _space_context_cache["data"] is not None,
+# MAGIC         "space_context_timestamp": _space_context_cache["timestamp"],
+# MAGIC         "agent_cache_size": len(_agent_cache),
+# MAGIC         "genie_pool_size": len(_genie_agent_pool),
+# MAGIC         "cached_agents": list(_agent_cache.keys()),
+# MAGIC         "pooled_genie_spaces": list(_genie_agent_pool.keys())
+# MAGIC     }
+# MAGIC     return stats
+# MAGIC
+# MAGIC print("✓ Phase 1 caching infrastructure initialized")
+# MAGIC
+# MAGIC # ==============================================================================
+# MAGIC # PHASE 1 OPTIMIZATION: Cached Agent Getters (Module-Level Singletons)
+# MAGIC # ==============================================================================
+# MAGIC
+# MAGIC def get_cached_planning_agent():
+# MAGIC     """
+# MAGIC     Get or create cached PlanningAgent instance.
+# MAGIC     Expected gain: -500ms to -1s per request
+# MAGIC     """
+# MAGIC     if "planning" not in _agent_cache:
+# MAGIC         from langchain_databricks import ChatDatabricks
+# MAGIC         print("⚡ Creating PlanningAgent (first use)...")
+# MAGIC         llm = ChatDatabricks(endpoint=LLM_ENDPOINT_PLANNING)
+# MAGIC         # Note: Agent class will be defined later in notebook
+# MAGIC         # This is a forward reference that works because Python resolves at runtime
+# MAGIC         _agent_cache["planning"] = PlanningAgent(llm, VECTOR_SEARCH_INDEX)
+# MAGIC         print("✓ PlanningAgent cached")
+# MAGIC     else:
+# MAGIC         print("✓ Using cached PlanningAgent")
+# MAGIC     return _agent_cache["planning"]
+# MAGIC
+# MAGIC def get_cached_sql_table_agent():
+# MAGIC     """
+# MAGIC     Get or create cached SQLSynthesisTableAgent instance.
+# MAGIC     Expected gain: -500ms to -1s per request
+# MAGIC     """
+# MAGIC     if "sql_table" not in _agent_cache:
+# MAGIC         from langchain_databricks import ChatDatabricks
+# MAGIC         print("⚡ Creating SQLSynthesisTableAgent (first use)...")
+# MAGIC         llm = ChatDatabricks(endpoint=LLM_ENDPOINT_SQL_SYNTHESIS)
+# MAGIC         _agent_cache["sql_table"] = SQLSynthesisTableAgent(llm, CATALOG, SCHEMA)
+# MAGIC         print("✓ SQLSynthesisTableAgent cached")
+# MAGIC     else:
+# MAGIC         print("✓ Using cached SQLSynthesisTableAgent")
+# MAGIC     return _agent_cache["sql_table"]
+# MAGIC
+# MAGIC def get_cached_summarize_agent():
+# MAGIC     """
+# MAGIC     Get or create cached ResultSummarizeAgent instance.
+# MAGIC     Expected gain: -100ms to -300ms per request
+# MAGIC     """
+# MAGIC     if "summarize" not in _agent_cache:
+# MAGIC         from langchain_databricks import ChatDatabricks
+# MAGIC         print("⚡ Creating ResultSummarizeAgent (first use)...")
+# MAGIC         llm = ChatDatabricks(endpoint=LLM_ENDPOINT_SUMMARIZE, temperature=0.1, max_tokens=2000)
+# MAGIC         _agent_cache["summarize"] = ResultSummarizeAgent(llm)
+# MAGIC         print("✓ ResultSummarizeAgent cached")
+# MAGIC     else:
+# MAGIC         print("✓ Using cached ResultSummarizeAgent")
+# MAGIC     return _agent_cache["summarize"]
+# MAGIC
+# MAGIC print("✓ Agent cache getters defined")
+# MAGIC
+# MAGIC # ==============================================================================
+# MAGIC # PHASE 1 OPTIMIZATION: Genie Agent Pool (Lazy Initialization)
+# MAGIC # ==============================================================================
+# MAGIC
+# MAGIC def get_or_create_genie_agent(space_id: str, space_title: str, description: str):
+# MAGIC     """
+# MAGIC     Get existing Genie agent from pool or create new one if not cached.
+# MAGIC     
+# MAGIC     OPTIMIZATION: Reuses Genie agents across requests to avoid expensive initialization.
+# MAGIC     Expected gain: -1 to -3s on genie route (creating 3-5 agents)
+# MAGIC     
+# MAGIC     Args:
+# MAGIC         space_id: Genie space ID
+# MAGIC         space_title: Space title for agent name
+# MAGIC         description: Space description
+# MAGIC     
+# MAGIC     Returns:
+# MAGIC         Cached or newly created GenieAgent instance
+# MAGIC     """
+# MAGIC     global _genie_agent_pool
+# MAGIC     
+# MAGIC     if space_id not in _genie_agent_pool:
+# MAGIC         from databricks_langchain import GenieAgent
+# MAGIC         
+# MAGIC         print(f"⚡ Creating Genie agent for space: {space_title} (first use)")
+# MAGIC         
+# MAGIC         def enforce_limit(messages, n=5):
+# MAGIC             """Enforce result limit in Genie queries."""
+# MAGIC             last = messages[-1] if messages else {"content": ""}
+# MAGIC             content = last.get("content", "") if isinstance(last, dict) else last.content
+# MAGIC             return f"{content}\n\nPlease limit the result to at most {n} rows."
+# MAGIC         
+# MAGIC         genie_agent = GenieAgent(
+# MAGIC             genie_space_id=space_id,
+# MAGIC             genie_agent_name=f"Genie_{space_title}",
+# MAGIC             description=description,
+# MAGIC             include_context=True,
+# MAGIC             message_processor=lambda msgs: enforce_limit(msgs, n=5)
+# MAGIC         )
+# MAGIC         
+# MAGIC         _genie_agent_pool[space_id] = genie_agent
+# MAGIC         print(f"✓ Genie agent cached for {space_title}")
+# MAGIC     else:
+# MAGIC         print(f"✓ Using cached Genie agent for {space_title}")
+# MAGIC     
+# MAGIC     return _genie_agent_pool[space_id]
+# MAGIC
+# MAGIC print("✓ Genie agent pool initialized")
+# MAGIC
 # MAGIC def query_delta_table(table_name: str, filter_field: str, filter_value: str, select_fields: List[str] = None) -> Any:
 # MAGIC     """
 # MAGIC     Query a delta table with a filter condition.
@@ -557,10 +703,9 @@ Prerequisites:
 # MAGIC     
 # MAGIC     return df
 # MAGIC
-# MAGIC def load_space_context(table_name: str) -> Dict[str, str]:
+# MAGIC def _load_space_context_uncached(table_name: str) -> Dict[str, str]:
 # MAGIC     """
-# MAGIC     Load space context from Delta table.
-# MAGIC     Called fresh on each request - no caching for dynamic refresh.
+# MAGIC     Internal function: Load space context from Delta table without caching.
 # MAGIC     
 # MAGIC     Args:
 # MAGIC         table_name: Full table name (catalog.schema.table)
@@ -580,8 +725,49 @@ Prerequisites:
 # MAGIC     context = {row["space_id"]: row["searchable_content"] 
 # MAGIC                for row in df.collect()}
 # MAGIC     
-# MAGIC     print(f"✓ Loaded {len(context)} Genie spaces for context")
 # MAGIC     return context
+# MAGIC
+# MAGIC def load_space_context(table_name: str) -> Dict[str, str]:
+# MAGIC     """
+# MAGIC     Load space context from Delta table with TTL-based caching.
+# MAGIC     
+# MAGIC     OPTIMIZATION: Caches results for 30 minutes to avoid repeated Spark queries.
+# MAGIC     Expected gain: -1 to -2s per request (when cache is hot)
+# MAGIC     
+# MAGIC     Args:
+# MAGIC         table_name: Full table name (catalog.schema.table)
+# MAGIC         
+# MAGIC     Returns:
+# MAGIC         Dictionary mapping space_id to searchable_content
+# MAGIC     """
+# MAGIC     global _space_context_cache
+# MAGIC     
+# MAGIC     now = datetime.now()
+# MAGIC     
+# MAGIC     # Check if cache is valid
+# MAGIC     cache_valid = (
+# MAGIC         _space_context_cache["data"] is not None and
+# MAGIC         _space_context_cache["timestamp"] is not None and
+# MAGIC         _space_context_cache["table_name"] == table_name and
+# MAGIC         now - _space_context_cache["timestamp"] < _SPACE_CONTEXT_CACHE_TTL
+# MAGIC     )
+# MAGIC     
+# MAGIC     if cache_valid:
+# MAGIC         cache_age_seconds = (now - _space_context_cache["timestamp"]).total_seconds()
+# MAGIC         print(f"✓ Using cached space context ({len(_space_context_cache['data'])} spaces, age: {cache_age_seconds:.1f}s)")
+# MAGIC         return _space_context_cache["data"]
+# MAGIC     else:
+# MAGIC         # Cache miss - load from database
+# MAGIC         print(f"⚡ Loading space context from database (cache {'expired' if _space_context_cache['data'] else 'empty'})...")
+# MAGIC         context = _load_space_context_uncached(table_name)
+# MAGIC         
+# MAGIC         # Update cache
+# MAGIC         _space_context_cache["data"] = context
+# MAGIC         _space_context_cache["timestamp"] = now
+# MAGIC         _space_context_cache["table_name"] = table_name
+# MAGIC         
+# MAGIC         print(f"✓ Loaded {len(context)} Genie spaces and cached for {_SPACE_CONTEXT_CACHE_TTL.total_seconds()/60:.0f} minutes")
+# MAGIC         return context
 # MAGIC
 # MAGIC # Note: Context is now loaded dynamically in clarification_node
 # MAGIC # This allows refresh without model redeployment
@@ -1209,17 +1395,15 @@ Prerequisites:
 # MAGIC         """
 # MAGIC         Create Genie agents as tools only for relevant spaces.
 # MAGIC         
+# MAGIC         OPTIMIZED: Uses cached Genie agents from pool to avoid expensive initialization.
+# MAGIC         Expected gain: -1 to -3s on genie route (when agents are already cached)
+# MAGIC         
 # MAGIC         Creates both:
 # MAGIC         1. Individual tool wrappers for LangGraph agent tool calling
 # MAGIC         2. A parallel executor mapping for efficient batch invocation
 # MAGIC         
 # MAGIC         Uses LangChain preferred syntax with Pydantic BaseModel and StructuredTool.
 # MAGIC         """
-# MAGIC         def enforce_limit(messages, n=5):
-# MAGIC             last = messages[-1] if messages else {"content": ""}
-# MAGIC             content = last.get("content", "") if isinstance(last, dict) else last.content
-# MAGIC             return f"{content}\n\nPlease limit the result to at most {n} rows."
-# MAGIC         
 # MAGIC         print(f"  Creating Genie agent tools for {len(self.relevant_spaces)} relevant spaces...")
 # MAGIC         
 # MAGIC         for space in self.relevant_spaces:
@@ -1234,14 +1418,8 @@ Prerequisites:
 # MAGIC             genie_agent_name = f"Genie_{space_title}"
 # MAGIC             description = searchable_content
 # MAGIC             
-# MAGIC             # Create Genie agent with message_processor
-# MAGIC             genie_agent = GenieAgent(
-# MAGIC                 genie_space_id=space_id,
-# MAGIC                 genie_agent_name=genie_agent_name,
-# MAGIC                 description=description,
-# MAGIC                 include_context=True,
-# MAGIC                 message_processor=lambda msgs: enforce_limit(msgs, n=5)
-# MAGIC             )
+# MAGIC             # OPTIMIZATION: Get Genie agent from pool (cached or newly created)
+# MAGIC             genie_agent = get_or_create_genie_agent(space_id, space_title, description)
 # MAGIC             self.genie_agents.append(genie_agent)
 # MAGIC             
 # MAGIC             # Define tool input schema using Pydantic
@@ -2782,10 +2960,8 @@ Prerequisites:
 # MAGIC     else:
 # MAGIC         print(f"✓ Using query directly (no context needed)")
 # MAGIC     
-# MAGIC     llm = ChatDatabricks(endpoint=LLM_ENDPOINT_PLANNING)
-# MAGIC     
-# MAGIC     # Use OOP agent
-# MAGIC     planning_agent = PlanningAgent(llm, VECTOR_SEARCH_INDEX)
+# MAGIC     # OPTIMIZATION: Use cached agent instance
+# MAGIC     planning_agent = get_cached_planning_agent()
 # MAGIC     
 # MAGIC     # Emit vector search start event
 # MAGIC     writer({"type": "vector_search_start", "index": VECTOR_SEARCH_INDEX})
@@ -2865,10 +3041,8 @@ Prerequisites:
 # MAGIC     # Emit synthesis start event
 # MAGIC     writer({"type": "sql_synthesis_start", "route": "table", "spaces": relevant_space_ids})
 # MAGIC     
-# MAGIC     llm = ChatDatabricks(endpoint=LLM_ENDPOINT_SQL_SYNTHESIS, temperature=0.1)
-# MAGIC     
-# MAGIC     # Use OOP agent
-# MAGIC     sql_agent = SQLSynthesisTableAgent(llm, CATALOG, SCHEMA)
+# MAGIC     # OPTIMIZATION: Use cached agent instance
+# MAGIC     sql_agent = get_cached_sql_table_agent()
 # MAGIC     
 # MAGIC     print("plan loaded from state is:", plan)
 # MAGIC     print(json.dumps(plan, indent=2))
@@ -3181,11 +3355,8 @@ Prerequisites:
 # MAGIC     # Emit summary start event
 # MAGIC     writer({"type": "summary_start", "content": "Generating comprehensive summary..."})
 # MAGIC     
-# MAGIC     # Create LLM for summarization (no max_tokens limit for comprehensive output)
-# MAGIC     llm = ChatDatabricks(endpoint=LLM_ENDPOINT_SUMMARIZE, temperature=0.1, max_tokens=2000)
-# MAGIC     
-# MAGIC     # Use OOP agent to generate summary (pass minimal context instead of full state)
-# MAGIC     summarize_agent = ResultSummarizeAgent(llm)
+# MAGIC     # OPTIMIZATION: Use cached agent instance
+# MAGIC     summarize_agent = get_cached_summarize_agent()
 # MAGIC     summary = summarize_agent(context)
 # MAGIC     
 # MAGIC     # Display what's being returned
