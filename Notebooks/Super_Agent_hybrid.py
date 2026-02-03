@@ -6,7 +6,7 @@
 # COMMAND ----------
 
 # DBTITLE 1,Install Packages
-# MAGIC %pip install python-dotenv databricks-sql-connector databricks-langchain[memory]==0.12.1 databricks-vectorsearch==0.63 databricks-agents mlflow[databricks]>=3.6.0
+# MAGIC %pip install python-dotenv databricks-sdk databricks-sql-connector databricks-langchain[memory]==0.12.1 databricks-vectorsearch==0.63 databricks-agents mlflow[databricks]>=3.6.0
 
 # COMMAND ----------
 
@@ -1759,35 +1759,33 @@ class SQLExecutionAgent:
     Agent responsible for executing SQL queries using Databricks SQL Warehouse.
     
     PRODUCTION-READY DESIGN:
-    - Uses databricks-sql-connector for Model Serving compatibility
-    - Follows official Databricks authentication patterns
+    - Uses databricks-sql-connector with unified authentication (Config + credentials_provider)
+    - Automatically handles OAuth credentials when deployed with registered resources
     - Supports both development (notebook) and production (Model Serving) environments
     
-    MODEL SERVING DEPLOYMENT CONFIGURATION:
-    When deploying to Model Serving, configure these environment variables:
+    AUTHENTICATION WITH AUTOMATIC PASSTHROUGH:
+    When you register resources during agent deployment:
     
-    1. DATABRICKS_HOST (plain text):
-       - Via Serving UI: Advanced configurations → Add environment variable
-       - Name: DATABRICKS_HOST
-       - Value: your-workspace.cloud.databricks.com (without https://)
+        resources = [
+            DatabricksSQLWarehouse(warehouse_id=SQL_WAREHOUSE_ID),
+            # ... other resources
+        ]
+        mlflow.langchain.log_model(..., resources=resources)
     
-    2. DATABRICKS_TOKEN (secrets-based):
-       - Step 1: Store token in Databricks secrets:
-         databricks secrets create-scope my_scope
-         databricks secrets put-secret my_scope sql_token
-       - Step 2: Configure via Serving UI:
-         Name: DATABRICKS_TOKEN
-         Value: {{secrets/my_scope/sql_token}}
+    Databricks automatically:
+    1. Creates a service principal for your agent
+    2. Manages OAuth token generation and rotation
+    3. Injects credentials into the Model Serving environment
     
-    3. SQL_WAREHOUSE_ID (passed to __init__):
-       - Configured in your config.py or .env file
-       - Passed when creating the agent instance
+    The Config() class automatically reads workspace host and injected OAuth credentials,
+    eliminating the need for manual DATABRICKS_HOST/DATABRICKS_TOKEN configuration.
     
-    Reference: https://docs.databricks.com/machine-learning/model-serving/store-env-variable-model-serving.html
+    Reference: https://docs.databricks.com/generative-ai/agent-framework/agent-authentication
     
-    AUTHENTICATION PRECEDENCE:
-    1. Environment variables (DATABRICKS_HOST, DATABRICKS_TOKEN) - Production
-    2. Notebook context (spark.conf, dbutils) - Development only
+    LEGACY MANUAL AUTHENTICATION (if not using automatic passthrough):
+    If you're not using resource registration, you can still manually configure:
+    - DATABRICKS_HOST and DATABRICKS_TOKEN via Model Serving environment variables
+    - Config() will still read them from the environment
     """
     
     def __init__(self, warehouse_id: str):
@@ -1799,9 +1797,6 @@ class SQLExecutionAgent:
         """
         self.name = "SQLExecution"
         self.warehouse_id = warehouse_id
-        # Will be set lazily during first execution
-        self.workspace_url = None
-        self.access_token = None
     
     def execute_sql(
         self, 
@@ -1843,6 +1838,7 @@ class SQLExecutionAgent:
             - error_hint: str - Suggested resolution (only on failure)
         """
         from databricks import sql
+        from databricks.sdk.core import Config
         import json
         
         # Step 1: Extract SQL from agent result or markdown code blocks if present
@@ -1867,54 +1863,12 @@ class SQLExecutionAgent:
             extracted_sql = f"{extracted_sql.rstrip(';')} LIMIT {max_rows}"
         
         try:
-            # Step 3: Get workspace URL and access token (lazily initialized)
-            # PRODUCTION PATTERN: Use environment variables for Model Serving compatibility
-            # These are configured via Model Serving endpoint configuration
-            if self.workspace_url is None or self.access_token is None:
-                import os
-                
-                # Try multiple authentication sources in order of production readiness
-                # 1. Environment variables (Model Serving standard pattern)
-                self.workspace_url = os.environ.get("DATABRICKS_HOST")
-                self.access_token = os.environ.get("DATABRICKS_TOKEN")
-                
-                # 2. If not in environment, try notebook context (development only)
-                if not self.workspace_url or not self.access_token:
-                    try:
-                        # Try notebook context (only available in notebook environment)
-                        from pyspark.sql import SparkSession
-                        spark = SparkSession.builder.getOrCreate()
-                        
-                        if not self.workspace_url:
-                            self.workspace_url = spark.conf.get("spark.databricks.workspaceUrl")
-                        
-                        if not self.access_token:
-                            # Try dbutils (only available in notebook environment)
-                            try:
-                                self.access_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
-                            except:
-                                pass  # dbutils not available, will handle below
-                    except:
-                        pass  # Spark not available, will handle below
-                
-                # 3. Validate that we have credentials
-                if not self.workspace_url:
-                    raise ValueError(
-                        "DATABRICKS_HOST not found. "
-                        "For Model Serving deployment, configure environment variable via: "
-                        "Serving UI → Advanced configurations → Add environment variable → "
-                        "Name: DATABRICKS_HOST, Value: your-workspace.cloud.databricks.com"
-                    )
-                
-                if not self.access_token:
-                    raise ValueError(
-                        "DATABRICKS_TOKEN not found. "
-                        "For Model Serving deployment, store token in Databricks secrets and configure: "
-                        "1. Create secret: databricks secrets put-secret <scope> <key> "
-                        "2. Add environment variable via Serving UI: "
-                        "   Name: DATABRICKS_TOKEN, Value: {{secrets/<scope>/<key>}} "
-                        "See: https://docs.databricks.com/machine-learning/model-serving/store-env-variable-model-serving.html"
-                    )
+            # Step 3: Initialize Databricks Config for unified authentication
+            # BEST PRACTICE: Config() automatically reads workspace host and OAuth credentials
+            # - In Model Serving with automatic passthrough: reads injected service principal credentials
+            # - In notebooks: reads from notebook context or environment variables
+            # - With manual config: reads DATABRICKS_HOST and DATABRICKS_TOKEN from environment
+            cfg = Config()
             
             # Step 4: Execute the SQL query using SQL Warehouse
             print(f"\n{'='*80}")
@@ -1926,10 +1880,11 @@ class SQLExecutionAgent:
             
             # Connect to SQL Warehouse using context manager (production best practice)
             # Context managers ensure proper cleanup even if exceptions occur
+            # credentials_provider=cfg lets the connector fetch OAuth tokens transparently
             with sql.connect(
-                server_hostname=self.workspace_url,
+                server_hostname=cfg.host,
                 http_path=f"/sql/1.0/warehouses/{self.warehouse_id}",
-                access_token=self.access_token,
+                credentials_provider=cfg,  # Unified authentication - handles OAuth automatically
                 # Production settings for resilience
                 session_configuration={
                     "ansi_mode": "true"  # Enable ANSI SQL compliance for consistent behavior
@@ -5569,9 +5524,39 @@ print("="*80)
 # MAGIC # (you will be prompted to enter the token)
 # MAGIC ```
 # MAGIC
-# MAGIC #### Step 2: Configure Environment Variables for Model Serving
+# MAGIC #### Step 2: Register Agent with Resources (Recommended - Automatic Authentication)
 # MAGIC
-# MAGIC When creating/updating your Model Serving endpoint, configure these environment variables:
+# MAGIC **Best Practice: Use automatic authentication passthrough by registering resources**
+# MAGIC
+# MAGIC When you register resources during agent deployment, Databricks automatically handles authentication:
+# MAGIC
+# MAGIC ```python
+# MAGIC from mlflow.models.resources import DatabricksSQLWarehouse
+# MAGIC
+# MAGIC resources = [
+# MAGIC     DatabricksSQLWarehouse(warehouse_id=SQL_WAREHOUSE_ID),
+# MAGIC     # ... other resources (Vector Search, Genie Spaces, etc.)
+# MAGIC ]
+# MAGIC
+# MAGIC mlflow.langchain.log_model(
+# MAGIC     lc_model=agent,
+# MAGIC     artifact_path="agent",
+# MAGIC     resources=resources,  # Enables automatic authentication
+# MAGIC     # ... other parameters
+# MAGIC )
+# MAGIC ```
+# MAGIC
+# MAGIC **What happens automatically:**
+# MAGIC - Databricks creates a service principal for your agent
+# MAGIC - OAuth credentials are injected into the Model Serving environment
+# MAGIC - Credentials are automatically rotated (no manual management needed)
+# MAGIC - Agent code uses `Config()` to read credentials transparently
+# MAGIC
+# MAGIC **No manual environment variable configuration needed!**
+# MAGIC
+# MAGIC #### Step 2 (Alternative): Manual Authentication Configuration (Legacy)
+# MAGIC
+# MAGIC If you're NOT using resource registration, manually configure environment variables:
 # MAGIC
 # MAGIC **Via Serving UI:**
 # MAGIC 1. Navigate to: Serving → Your Endpoint → Configuration → Advanced configurations
@@ -5580,16 +5565,14 @@ print("="*80)
 # MAGIC
 # MAGIC | Variable Name | Value | Type | Required |
 # MAGIC |---------------|-------|------|----------|
-# MAGIC | `DATABRICKS_HOST` | `your-workspace.cloud.databricks.com` | Plain text | Yes |
-# MAGIC | `DATABRICKS_TOKEN` | `{{secrets/sql_warehouse_scope/warehouse_token}}` | Secret | Yes |
-# MAGIC | `SQL_WAREHOUSE_ID` | `your-production-warehouse-id` | Plain text | Yes* |
+# MAGIC | `DATABRICKS_HOST` | `your-workspace.cloud.databricks.com` | Plain text | Yes* |
+# MAGIC | `DATABRICKS_TOKEN` | `{{secrets/sql_warehouse_scope/warehouse_token}}` | Secret | Yes* |
+# MAGIC | `SQL_WAREHOUSE_ID` | `your-production-warehouse-id` | Plain text | Optional** |
 # MAGIC
-# MAGIC \* **SQL_WAREHOUSE_ID**: 
-# MAGIC - If your production warehouse differs from development, set it here
-# MAGIC - If same warehouse for dev/prod, can be omitted (will use from .env/model code)
-# MAGIC - Get warehouse ID from: SQL Warehouses UI → Click warehouse → Copy ID from URL or Details
+# MAGIC \* Not required if using automatic authentication with registered resources
+# MAGIC \** Only needed if production warehouse differs from development warehouse
 # MAGIC
-# MAGIC **Via REST API:**
+# MAGIC **Via REST API (manual auth):**
 # MAGIC ```python
 # MAGIC {
 # MAGIC   "name": "super-agent-endpoint",
@@ -5602,37 +5585,11 @@ print("="*80)
 # MAGIC       "environment_vars": {
 # MAGIC         "DATABRICKS_HOST": "your-workspace.cloud.databricks.com",
 # MAGIC         "DATABRICKS_TOKEN": "{{secrets/sql_warehouse_scope/warehouse_token}}",
-# MAGIC         "SQL_WAREHOUSE_ID": "your-production-warehouse-id"
+# MAGIC         "SQL_WAREHOUSE_ID": "your-production-warehouse-id"  # Optional
 # MAGIC       }
 # MAGIC     }]
 # MAGIC   }
 # MAGIC }
-# MAGIC ```
-# MAGIC
-# MAGIC **Via Python SDK:**
-# MAGIC ```python
-# MAGIC from databricks.sdk import WorkspaceClient
-# MAGIC from databricks.sdk.service.serving import ServedEntityInput, EndpointCoreConfigInput
-# MAGIC
-# MAGIC w = WorkspaceClient()
-# MAGIC w.serving_endpoints.create_and_wait(
-# MAGIC     name="super-agent-endpoint",
-# MAGIC     config=EndpointCoreConfigInput(
-# MAGIC         served_entities=[
-# MAGIC             ServedEntityInput(
-# MAGIC                 entity_name="catalog.schema.super_agent_model",
-# MAGIC                 entity_version="1",
-# MAGIC                 workload_size="Small",
-# MAGIC                 scale_to_zero_enabled=True,
-# MAGIC                 environment_vars={
-# MAGIC                     "DATABRICKS_HOST": "your-workspace.cloud.databricks.com",
-# MAGIC                     "DATABRICKS_TOKEN": "{{secrets/sql_warehouse_scope/warehouse_token}}",
-# MAGIC                     "SQL_WAREHOUSE_ID": "your-production-warehouse-id"
-# MAGIC                 }
-# MAGIC             )
-# MAGIC         ]
-# MAGIC     )
-# MAGIC )
 # MAGIC ```
 # MAGIC
 # MAGIC #### Step 3: Package Model with MLflow
@@ -5645,21 +5602,20 @@ print("="*80)
 # MAGIC class SuperAgentModel(mlflow.pyfunc.PythonModel):
 # MAGIC     def load_context(self, context):
 # MAGIC         # Initialize SQL Execution Agent with warehouse ID
-# MAGIC         # Warehouse ID can come from:
-# MAGIC         # 1. Environment variable SQL_WAREHOUSE_ID (Model Serving) - recommended
-# MAGIC         # 2. Hardcoded value - fallback for development
 # MAGIC         import os
 # MAGIC         warehouse_id = os.getenv("SQL_WAREHOUSE_ID") or "your-default-warehouse-id"
 # MAGIC         self.sql_agent = SQLExecutionAgent(warehouse_id=warehouse_id)
-# MAGIC         # Credentials (DATABRICKS_HOST, DATABRICKS_TOKEN) loaded from environment variables at runtime
+# MAGIC         # Authentication handled automatically via Config() - reads injected credentials
 # MAGIC     
 # MAGIC     def predict(self, context, model_input):
-# MAGIC         # Use the agent
+# MAGIC         # Use the agent - Config() transparently handles OAuth
 # MAGIC         result = self.sql_agent.execute_sql(query)
 # MAGIC         return result
 # MAGIC
-# MAGIC # Log model
-# MAGIC mlflow.pyfunc.log_model("model", python_model=SuperAgentModel())
+# MAGIC # Log model with resources for automatic authentication
+# MAGIC from mlflow.models.resources import DatabricksSQLWarehouse
+# MAGIC resources = [DatabricksSQLWarehouse(warehouse_id=warehouse_id)]
+# MAGIC mlflow.pyfunc.log_model("model", python_model=SuperAgentModel(), resources=resources)
 # MAGIC ```
 # MAGIC
 # MAGIC #### Step 4: Verify Deployment
@@ -5680,25 +5636,33 @@ print("="*80)
 # MAGIC #### Security Best Practices
 # MAGIC
 # MAGIC ✅ **DO:**
-# MAGIC - Store sensitive credentials in Databricks secrets
-# MAGIC - Use secrets-based environment variables for tokens
-# MAGIC - Use service principal authentication for production
-# MAGIC - Implement least-privilege access controls
-# MAGIC - Rotate tokens regularly
+# MAGIC - **Use automatic authentication passthrough with resource registration (recommended)**
+# MAGIC - Implement least-privilege access controls on SQL Warehouse
+# MAGIC - Use service principals (automatic with resource registration)
+# MAGIC - Let Databricks handle credential rotation automatically
+# MAGIC - Store sensitive credentials in Databricks secrets (if using manual auth)
 # MAGIC
 # MAGIC ❌ **DON'T:**
 # MAGIC - Hard-code tokens in your model code
 # MAGIC - Use plain text environment variables for sensitive data
 # MAGIC - Share tokens across multiple applications
-# MAGIC - Use personal access tokens in production (use service principals)
+# MAGIC - Use personal access tokens in production
+# MAGIC - Manually manage token rotation (use automatic passthrough instead)
 # MAGIC
 # MAGIC #### Troubleshooting
 # MAGIC
-# MAGIC **Error: "DATABRICKS_HOST not found"**
-# MAGIC - Verify environment variable is set in endpoint configuration
-# MAGIC - Check variable name is exactly `DATABRICKS_HOST` (case-sensitive)
+# MAGIC **With Automatic Authentication (Resource Registration):**
 # MAGIC
-# MAGIC **Error: "DATABRICKS_TOKEN not found"**
+# MAGIC **Error: "Authentication failed" or "Access denied"**
+# MAGIC - Verify SQL Warehouse was registered as a resource during model logging
+# MAGIC - Check that the deploying user has access to the SQL Warehouse
+# MAGIC - Ensure the agent's service principal has been granted necessary permissions
+# MAGIC - Verify resources list includes: `DatabricksSQLWarehouse(warehouse_id=...)`
+# MAGIC
+# MAGIC **With Manual Authentication (Legacy):**
+# MAGIC
+# MAGIC **Error: Config() cannot find credentials**
+# MAGIC - Set DATABRICKS_HOST and DATABRICKS_TOKEN environment variables
 # MAGIC - Verify secret exists: `databricks secrets list-secrets sql_warehouse_scope`
 # MAGIC - Verify environment variable uses correct syntax: `{{secrets/scope/key}}`
 # MAGIC - Ensure endpoint creator has READ access to the secret
@@ -5709,6 +5673,7 @@ print("="*80)
 # MAGIC - Verify workspace URL is correct (without https://)
 # MAGIC
 # MAGIC #### References
+# MAGIC - [Agent Authentication (Automatic Passthrough)](https://docs.databricks.com/generative-ai/agent-framework/agent-authentication)
 # MAGIC - [Configure access to resources from model serving endpoints](https://docs.databricks.com/machine-learning/model-serving/store-env-variable-model-serving.html)
 # MAGIC - [Databricks unified authentication](https://docs.databricks.com/dev-tools/auth/unified-auth.html)
 # MAGIC - [Model Serving endpoints API](https://docs.databricks.com/api/workspace/servingendpoints)
