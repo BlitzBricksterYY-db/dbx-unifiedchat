@@ -2445,7 +2445,7 @@ Prerequisites:
 # MAGIC             intent_label = turn['intent_type'].replace('_', ' ').title()
 # MAGIC             conversation_context += f"{i}. [{intent_label}] {turn['query']}\n"
 # MAGIC             if turn.get('context_summary'):
-# MAGIC                 conversation_context += f"   Context: {turn['context_summary'][:100]}...\n"
+# MAGIC                 conversation_context += f"   Context: {turn['context_summary'][:1000]}...\n"
 # MAGIC     else:
 # MAGIC         conversation_context = "No previous conversation (first query)."
 # MAGIC     
