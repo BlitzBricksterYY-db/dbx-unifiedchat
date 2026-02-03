@@ -3173,9 +3173,6 @@ Prerequisites:
 # MAGIC     summarize_agent = ResultSummarizeAgent(llm)
 # MAGIC     summary = summarize_agent(context)
 # MAGIC     
-# MAGIC     print(f"\n✅ Summary Generated:")
-# MAGIC     print(f"{summary}")
-# MAGIC     
 # MAGIC     # Display what's being returned
 # MAGIC     print(f"\n📦 State Fields Being Returned:")
 # MAGIC     print(f"  ✓ final_summary: {len(summary)} chars")
