@@ -2992,7 +2992,11 @@ def unified_intent_context_clarification_node(state: AgentState) -> dict:
     writer = get_stream_writer()
     
     def stream_markdown_response(content: str, label: str = "Response"):
-        """Display markdown content immediately (no streaming delay)."""
+        """
+        DEPRECATED: For local/notebook testing only.
+        In production, use writer() events instead for UI display.
+        This function only prints to console/logs, not to model serving UI.
+        """
         print(f"\n✨ {label}:")
         print("-" * 80)
         
@@ -3280,8 +3284,11 @@ IMPORTANT Markdown Formatting Guidelines:
             # Ensure meta-answer is formatted as markdown
             formatted_meta_answer = format_meta_answer_markdown(meta_answer)
             
-            # Stream the markdown answer for user
-            stream_markdown_response(formatted_meta_answer, label="Meta Question Answer")
+            # Emit markdown content as custom event for UI display
+            writer({
+                "type": "meta_answer_content",
+                "content": formatted_meta_answer
+            })
             
             # Return with meta-answer and flag to skip SQL generation
             return {
@@ -3355,8 +3362,11 @@ IMPORTANT Markdown Formatting Guidelines:
                     options=clarification_options
                 )
                 
-                # Stream the formatted clarification
-                stream_markdown_response(formatted_clarification, label="Clarification Needed")
+                # Emit markdown content as custom event for UI display
+                writer({
+                    "type": "clarification_content",
+                    "content": formatted_clarification
+                })
                 
                 return {
                     "current_turn": turn,
@@ -4454,6 +4464,10 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
             "sql_synthesis_start": lambda d: f"\n🔧 Starting SQL synthesis via {d.get('route', 'unknown')} route for {len(d.get('spaces', []))} space(s)",
             "tools_available": lambda d: f"\n🛠️ Tools ready: {', '.join(d.get('tools', []))}",
             "summary_complete": lambda d: f"\n✅ Summary complete",
+            
+            # Markdown content formatters - return content directly for UI display
+            "meta_answer_content": lambda d: f"\n\n{d.get('content', '')}",
+            "clarification_content": lambda d: f"\n\n{d.get('content', '')}",
         }
         
         # Bulletproof JSON fallback handler
