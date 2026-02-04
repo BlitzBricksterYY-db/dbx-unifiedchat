@@ -2988,8 +2988,21 @@ def unified_intent_context_clarification_node(state: AgentState) -> dict:
     Returns: Dictionary with state updates
     """
     from langgraph.config import get_stream_writer
+    import time
     
     writer = get_stream_writer()
+    
+    def stream_markdown_response(content: str, label: str = "Response"):
+        """Stream markdown content token-by-token for smooth display."""
+        print(f"\n✨ {label}:")
+        print("-" * 80)
+        
+        # Stream character by character for smooth effect
+        for char in content:
+            print(char, end='', flush=True)
+            time.sleep(0.01)  # Small delay for readability
+        
+        print("\n" + "-" * 80)
     
     print("\n" + "="*80)
     print("🎯 UNIFIED INTENT, CONTEXT & CLARIFICATION AGENT")
@@ -3127,19 +3140,25 @@ Determine if the query is clear enough to generate SQL:
 Return ONLY valid JSON:
 {{
   "is_meta_question": true/false,
-  "meta_answer": "Direct answer to meta-question (if is_meta_question=true)" or null,
+  "meta_answer": "Direct answer formatted as professional markdown (if is_meta_question=true)" or null,
   "intent_type": "new_question" | "refinement" | "continuation" | "clarification_response",
   "confidence": 0.95,
   "context_summary": "2-3 sentence summary for planning agent",
   "question_clear": true/false,
-  "clarification_reason": "Why unclear (if question_clear=false)",
-  "clarification_options": ["Option 1", "Option 2", "Option 3"] or null,
+  "clarification_reason": "Why unclear formatted as markdown with headings, bullets, bold keywords (if question_clear=false)" or null,
+  "clarification_options": ["Option 1 with description", "Option 2 with description", "Option 3 with description"] or null,
   "metadata": {{
     "domain": "patients | claims | providers | medications | ...",
     "complexity": "simple | moderate | complex",
     "topic_change_score": 0.8
   }}
 }}
+
+IMPORTANT Markdown Formatting Guidelines:
+- When is_meta_question=true: Format meta_answer with ## heading, **bold** keywords, bullet lists, proper spacing
+- When question_clear=false: Format clarification_reason with ### heading, explain issue clearly, incorporate clarification_options as numbered list with descriptions, use **bold** for key terms
+- Use professional but friendly tone appropriate for healthcare analytics
+- Ensure the markdown is ready to display directly to end users
 """
     
     # Call LLM with invoke for clean output (using pooled connection)
@@ -3212,7 +3231,6 @@ Return ONLY valid JSON:
         # NEW: Check if this is a meta-question - handle immediately
         if is_meta_question and meta_answer:
             print("🔍 Meta-question detected - answering directly without SQL")
-            print(f"   Answer: {meta_answer[:200]}...")
             
             # Create turn for meta-question
             turn["metadata"]["is_meta_question"] = True
@@ -3221,6 +3239,9 @@ Return ONLY valid JSON:
                 "type": "meta_question_detected",
                 "answer_preview": meta_answer[:100]
             })
+            
+            # Stream the markdown answer for user
+            stream_markdown_response(meta_answer, label="Meta Question Answer")
             
             # Return with meta-answer and flag to skip SQL generation
             return {
@@ -3286,10 +3307,11 @@ Return ONLY valid JSON:
                 # Mark turn as triggering clarification
                 turn["triggered_clarification"] = True
                 
-                # Format message
-                clarification_message = format_clarification_message(clarification_request)
-                
                 writer({"type": "clarification_requested", "reason": clarification_reason})
+                
+                # Stream the markdown-formatted clarification (already formatted by LLM in unified prompt)
+                # The LLM has incorporated clarification_options into clarification_reason as a formatted list
+                stream_markdown_response(clarification_reason, label="Clarification Needed")
                 
                 return {
                     "current_turn": turn,
@@ -3298,7 +3320,7 @@ Return ONLY valid JSON:
                     "question_clear": False,
                     "pending_clarification": clarification_request,
                     "messages": [
-                        AIMessage(content=clarification_message),
+                        AIMessage(content=clarification_reason),
                         SystemMessage(content=f"Clarification requested for turn {turn['turn_id']}")
                     ]
                 }
