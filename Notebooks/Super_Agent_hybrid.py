@@ -3080,7 +3080,7 @@ Prerequisites:
 # MAGIC         context_summary = f"{current_query}"
 # MAGIC         if turn_history:
 # MAGIC             last_query = turn_history[-1]['query']
-# MAGIC             context_summary = f"Building on previous query '{last_query[:50]}...', user asks: {current_query}"
+# MAGIC             context_summary = f"Building on previous query '{last_query}', user asks: {current_query}"
 # MAGIC         
 # MAGIC         # Create conversation turn with fast-path results
 # MAGIC         turn = create_conversation_turn(
