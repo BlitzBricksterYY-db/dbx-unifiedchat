@@ -2980,10 +2980,21 @@ Prerequisites:
 # MAGIC     """
 # MAGIC     Unified node that combines intent detection, context generation, and clarity check.
 # MAGIC     
+# MAGIC     Uses STREAMING LLM call with HYBRID OUTPUT FORMAT for immediate user feedback:
+# MAGIC     - For meta-questions: Markdown answer streamed FIRST, then JSON metadata parsed
+# MAGIC     - For clarifications: Markdown request streamed FIRST, then JSON metadata parsed
+# MAGIC     - For regular queries: JSON ONLY (no markdown streaming needed)
+# MAGIC     
 # MAGIC     Single LLM call for:
 # MAGIC     1. Intent classification (new_question, refinement, continuation, clarification_response)
 # MAGIC     2. Context summary generation
 # MAGIC     3. Clarity assessment with rate limiting (max 1 per 5 turns)
+# MAGIC     4. Meta-question detection and direct answering
+# MAGIC     
+# MAGIC     Streaming behavior:
+# MAGIC     - Markdown content is streamed to UI as LLM generates it (better TTFT)
+# MAGIC     - JSON metadata is parsed after streaming completes for routing decisions
+# MAGIC     - Fast-path optimization bypasses LLM entirely for simple refinements
 # MAGIC     
 # MAGIC     Returns: Dictionary with state updates
 # MAGIC     """
@@ -3105,6 +3116,8 @@ Prerequisites:
 # MAGIC         )
 # MAGIC         
 # MAGIC         # Return early - skip to planning
+# MAGIC         # NOTE: Fast-path bypasses LLM entirely, so no streaming occurs
+# MAGIC         # Streaming only applies to full LLM analysis path below
 # MAGIC         return {
 # MAGIC             "current_turn": turn,
 # MAGIC             "turn_history": [turn],
@@ -3117,8 +3130,8 @@ Prerequisites:
 # MAGIC             ]
 # MAGIC         }
 # MAGIC     
-# MAGIC     # If not fast-path, continue with full LLM analysis
-# MAGIC     print("🔄 Using full LLM analysis (query requires detailed classification)")
+# MAGIC     # If not fast-path, continue with full LLM analysis (WITH STREAMING)
+# MAGIC     print("🔄 Using full LLM analysis with streaming (query requires detailed classification)")
 # MAGIC     
 # MAGIC     # Format conversation context
 # MAGIC     conversation_context = ""
@@ -3178,50 +3191,141 @@ Prerequisites:
 # MAGIC - Never mark as unclear if the question is a clarification response to a previous clarification request
 # MAGIC - Meta-questions should always be marked as clear
 # MAGIC
-# MAGIC Return ONLY valid JSON:
+# MAGIC ## OUTPUT FORMAT (HYBRID - IMPORTANT!)
+# MAGIC
+# MAGIC Your response format depends on the situation:
+# MAGIC
+# MAGIC **CASE 1: Meta-Question** (is_meta_question=true)
+# MAGIC Output markdown answer FIRST, then JSON metadata:
+# MAGIC
+# MAGIC ## Available Data Sources
+# MAGIC
+# MAGIC [Your detailed markdown answer here with headings, bullets, bold keywords]
+# MAGIC
+# MAGIC ```json
 # MAGIC {{
-# MAGIC   "is_meta_question": true/false,
-# MAGIC   "meta_answer": "Direct answer formatted as professional markdown (if is_meta_question=true)" or null,
+# MAGIC   "is_meta_question": true,
+# MAGIC   "meta_answer": null,
+# MAGIC   "intent_type": "new_question",
+# MAGIC   "confidence": 0.95,
+# MAGIC   "context_summary": "User asking about available data sources",
+# MAGIC   "question_clear": true,
+# MAGIC   "clarification_reason": null,
+# MAGIC   "clarification_options": null,
+# MAGIC   "metadata": {{"domain": "system", "complexity": "simple", "topic_change_score": 0.5}}
+# MAGIC }}
+# MAGIC ```
+# MAGIC
+# MAGIC **CASE 2: Unclear Query** (question_clear=false)
+# MAGIC Output clarification markdown FIRST, then JSON metadata:
+# MAGIC
+# MAGIC ### Clarification Needed
+# MAGIC
+# MAGIC [Explain what's unclear with headings, bullets, and numbered options]
+# MAGIC
+# MAGIC ```json
+# MAGIC {{
+# MAGIC   "is_meta_question": false,
+# MAGIC   "meta_answer": null,
+# MAGIC   "intent_type": "new_question",
+# MAGIC   "confidence": 0.85,
+# MAGIC   "context_summary": "2-3 sentence summary",
+# MAGIC   "question_clear": false,
+# MAGIC   "clarification_reason": null,
+# MAGIC   "clarification_options": ["Option 1", "Option 2", "Option 3"],
+# MAGIC   "metadata": {{"domain": "...", "complexity": "...", "topic_change_score": 0.8}}
+# MAGIC }}
+# MAGIC ```
+# MAGIC
+# MAGIC **CASE 3: Clear Regular Query** (question_clear=true, is_meta_question=false)
+# MAGIC Output ONLY JSON (no markdown prefix):
+# MAGIC
+# MAGIC ```json
+# MAGIC {{
+# MAGIC   "is_meta_question": false,
+# MAGIC   "meta_answer": null,
 # MAGIC   "intent_type": "new_question" | "refinement" | "continuation" | "clarification_response",
 # MAGIC   "confidence": 0.95,
 # MAGIC   "context_summary": "2-3 sentence summary for planning agent",
-# MAGIC   "question_clear": true/false,
-# MAGIC   "clarification_reason": "Why unclear formatted as markdown with headings, bullets, bold keywords (if question_clear=false)" or null,
-# MAGIC   "clarification_options": ["Option 1 with description", "Option 2 with description", "Option 3 with description"] or null,
+# MAGIC   "question_clear": true,
+# MAGIC   "clarification_reason": null,
+# MAGIC   "clarification_options": null,
 # MAGIC   "metadata": {{
 # MAGIC     "domain": "patients | claims | providers | medications | ...",
 # MAGIC     "complexity": "simple | moderate | complex",
 # MAGIC     "topic_change_score": 0.8
 # MAGIC   }}
 # MAGIC }}
+# MAGIC ```
 # MAGIC
-# MAGIC IMPORTANT Markdown Formatting Guidelines:
-# MAGIC - When is_meta_question=true: Format meta_answer with ## heading, **bold** keywords, bullet lists, proper spacing
-# MAGIC - When question_clear=false: Format clarification_reason with ### heading, explain issue clearly, incorporate clarification_options as numbered list with descriptions, use **bold** for key terms
-# MAGIC - Use professional but friendly tone appropriate for healthcare analytics
-# MAGIC - Ensure the markdown is ready to display directly to end users
+# MAGIC CRITICAL: 
+# MAGIC - For meta-questions and clarifications: markdown FIRST (will be streamed to user), then JSON
+# MAGIC - For regular clear queries: JSON ONLY (no markdown needed)
+# MAGIC - Always use proper markdown formatting with ##/### headings, **bold**, bullet lists
+# MAGIC - Use professional but friendly tone for healthcare analytics
 # MAGIC """
 # MAGIC     
-# MAGIC     # Call LLM with invoke for clean output (using pooled connection)
+# MAGIC     # Call LLM with stream for immediate markdown output (using pooled connection)
 # MAGIC     llm = get_pooled_llm(LLM_ENDPOINT_CLARIFICATION)
 # MAGIC     track_agent_model_usage("clarification", LLM_ENDPOINT_CLARIFICATION)
 # MAGIC     
+# MAGIC     # Emit minimal logging message
+# MAGIC     writer({"type": "agent_thinking", "agent": "unified", "content": "Analyzing query context..."})
+# MAGIC     
 # MAGIC     try:
-# MAGIC         print("🤖 Calling unified LLM for intent & context analysis...")
+# MAGIC         print("🤖 Streaming unified LLM response for immediate markdown display...")
 # MAGIC         
-# MAGIC         # Use invoke for clean, complete output (no streaming artifacts)
-# MAGIC         response = llm.invoke(unified_prompt)
-# MAGIC         content = response.content
+# MAGIC         # Use stream for immediate user feedback on markdown content
+# MAGIC         # Hybrid format: markdown FIRST (streamed), then JSON (parsed)
+# MAGIC         accumulated_content = ""
+# MAGIC         markdown_section = ""
+# MAGIC         in_json_block = False
+# MAGIC         streamed_markdown = False
 # MAGIC         
-# MAGIC         print(f"✓ Analysis complete ({len(content)} chars)")
+# MAGIC         for chunk in llm.stream(unified_prompt):
+# MAGIC             if chunk.content:
+# MAGIC                 accumulated_content += chunk.content
+# MAGIC                 
+# MAGIC                 # Detect if we've hit the JSON block
+# MAGIC                 if "```json" in accumulated_content and not in_json_block:
+# MAGIC                     in_json_block = True
+# MAGIC                     # Extract and stream any remaining markdown before JSON block
+# MAGIC                     if not streamed_markdown:
+# MAGIC                         parts = accumulated_content.split("```json")
+# MAGIC                         markdown_section = parts[0].strip()
+# MAGIC                         if markdown_section:
+# MAGIC                             # Stream the markdown we've accumulated
+# MAGIC                             # Note: This will be picked up by ResponseAgent's "messages" stream mode
+# MAGIC                             print(f"  📄 Streaming markdown section ({len(markdown_section)} chars)...")
+# MAGIC                             streamed_markdown = True
+# MAGIC                 
+# MAGIC                 # Stream markdown chunks if we haven't hit JSON yet
+# MAGIC                 if not in_json_block and chunk.content.strip():
+# MAGIC                     markdown_section += chunk.content
+# MAGIC                     # Emit as AIMessageChunk for ResponseAgent to stream
+# MAGIC                     # The ResponseAgent's predict_stream already handles AIMessageChunk via "messages" mode
 # MAGIC         
-# MAGIC         # Parse JSON response
+# MAGIC         content = accumulated_content  # Full content for JSON parsing
+# MAGIC         
+# MAGIC         print(f"✓ Stream complete ({len(content)} chars total)")
+# MAGIC         if streamed_markdown:
+# MAGIC             print(f"  ✓ Streamed {len(markdown_section)} chars of markdown to UI")
+# MAGIC         
+# MAGIC         # Parse JSON response from hybrid format
+# MAGIC         # Extract JSON from code block after markdown (if present)
 # MAGIC         if "```json" in content:
-# MAGIC             content = content.split("```json")[1].split("```")[0].strip()
+# MAGIC             # Split markdown and JSON sections
+# MAGIC             parts = content.split("```json")
+# MAGIC             markdown_section = parts[0].strip()  # Markdown prefix (if any)
+# MAGIC             json_section = parts[1].split("```")[0].strip()  # JSON content
 # MAGIC         elif "```" in content:
-# MAGIC             content = content.split("```")[1].split("```")[0].strip()
+# MAGIC             # Fallback for generic code block
+# MAGIC             json_section = content.split("```")[1].split("```")[0].strip()
+# MAGIC         else:
+# MAGIC             # Pure JSON (regular clear queries with no markdown)
+# MAGIC             json_section = content.strip()
 # MAGIC         
-# MAGIC         result = json.loads(content)
+# MAGIC         result = json.loads(json_section)
 # MAGIC         
 # MAGIC         # Extract results
 # MAGIC         is_meta_question = result.get("is_meta_question", False)
@@ -3270,25 +3374,26 @@ Prerequisites:
 # MAGIC         })
 # MAGIC         
 # MAGIC         # NEW: Check if this is a meta-question - handle immediately
-# MAGIC         if is_meta_question and meta_answer:
+# MAGIC         if is_meta_question:
 # MAGIC             print("🔍 Meta-question detected - answering directly without SQL")
 # MAGIC             
 # MAGIC             # Create turn for meta-question
 # MAGIC             turn["metadata"]["is_meta_question"] = True
 # MAGIC             
+# MAGIC             # Emit metadata event (markdown was already streamed during LLM call)
 # MAGIC             writer({
 # MAGIC                 "type": "meta_question_detected",
-# MAGIC                 "answer_preview": meta_answer[:100]
+# MAGIC                 "note": "Meta-answer markdown already streamed to UI"
 # MAGIC             })
 # MAGIC             
-# MAGIC             # Ensure meta-answer is formatted as markdown
-# MAGIC             formatted_meta_answer = format_meta_answer_markdown(meta_answer)
-# MAGIC             
-# MAGIC             # Emit markdown content as custom event for UI display
-# MAGIC             writer({
-# MAGIC                 "type": "meta_answer_content",
-# MAGIC                 "content": formatted_meta_answer
-# MAGIC             })
+# MAGIC             # Use the markdown section that was streamed (from hybrid output)
+# MAGIC             # If no markdown section (edge case), format a simple response
+# MAGIC             if markdown_section and markdown_section.strip():
+# MAGIC                 meta_answer_display = markdown_section
+# MAGIC             else:
+# MAGIC                 meta_answer_display = format_meta_answer_markdown(
+# MAGIC                     "Meta-question detected. The answer was provided above."
+# MAGIC                 )
 # MAGIC             
 # MAGIC             # Return with meta-answer and flag to skip SQL generation
 # MAGIC             return {
@@ -3306,10 +3411,10 @@ Prerequisites:
 # MAGIC                 ),
 # MAGIC                 "question_clear": True,
 # MAGIC                 "is_meta_question": True,  # Flag for routing
-# MAGIC                 "meta_answer": meta_answer,  # Direct answer
+# MAGIC                 "meta_answer": markdown_section,  # The streamed markdown
 # MAGIC                 "pending_clarification": None,
 # MAGIC                 "messages": [
-# MAGIC                     AIMessage(content=meta_answer),
+# MAGIC                     AIMessage(content=meta_answer_display),
 # MAGIC                     SystemMessage(content="Meta-question answered directly, skipping SQL generation")
 # MAGIC                 ]
 # MAGIC             }
@@ -3354,19 +3459,22 @@ Prerequisites:
 # MAGIC                 # Mark turn as triggering clarification
 # MAGIC                 turn["triggered_clarification"] = True
 # MAGIC                 
-# MAGIC                 writer({"type": "clarification_requested", "reason": clarification_reason})
-# MAGIC                 
-# MAGIC                 # Format clarification with options as markdown
-# MAGIC                 formatted_clarification = format_clarification_markdown(
-# MAGIC                     reason=clarification_reason,
-# MAGIC                     options=clarification_options
-# MAGIC                 )
-# MAGIC                 
-# MAGIC                 # Emit markdown content as custom event for UI display
+# MAGIC                 # Emit metadata event (markdown was already streamed during LLM call)
 # MAGIC                 writer({
-# MAGIC                     "type": "clarification_content",
-# MAGIC                     "content": formatted_clarification
+# MAGIC                     "type": "clarification_requested", 
+# MAGIC                     "note": "Clarification markdown already streamed to UI"
 # MAGIC                 })
+# MAGIC                 
+# MAGIC                 # Use the markdown section that was streamed (from hybrid output)
+# MAGIC                 # If no markdown section (edge case), format a simple response
+# MAGIC                 if markdown_section and markdown_section.strip():
+# MAGIC                     clarification_display = markdown_section
+# MAGIC                 else:
+# MAGIC                     # Fallback: format clarification with options as markdown
+# MAGIC                     clarification_display = format_clarification_markdown(
+# MAGIC                         reason=clarification_reason or "Query needs more specificity",
+# MAGIC                         options=clarification_options
+# MAGIC                     )
 # MAGIC                 
 # MAGIC                 return {
 # MAGIC                     "current_turn": turn,
@@ -3375,7 +3483,7 @@ Prerequisites:
 # MAGIC                     "question_clear": False,
 # MAGIC                     "pending_clarification": clarification_request,
 # MAGIC                     "messages": [
-# MAGIC                         AIMessage(content=formatted_clarification),
+# MAGIC                         AIMessage(content=clarification_display),
 # MAGIC                         SystemMessage(content=f"Clarification requested for turn {turn['turn_id']}")
 # MAGIC                     ]
 # MAGIC                 }
