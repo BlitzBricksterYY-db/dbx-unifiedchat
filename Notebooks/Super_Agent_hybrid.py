@@ -3156,7 +3156,7 @@ Prerequisites:
 # MAGIC             if chunk.content:
 # MAGIC                 content += chunk.content
 # MAGIC                 # Emit streaming event for real-time visibility
-# MAGIC                 writer({"type": "llm_token", "content": chunk.content[:50]})  # Preview only
+# MAGIC                 writer({"type": "llm_token", "content": chunk.content})
 # MAGIC         
 # MAGIC         print(f"✓ Streaming complete ({len(content)} chars)")
 # MAGIC         
@@ -4364,6 +4364,7 @@ Prerequisites:
 # MAGIC         event_type = custom_data.get("type", "unknown")
 # MAGIC         
 # MAGIC         formatters = {
+# MAGIC             # Existing formatters
 # MAGIC             "agent_thinking": lambda d: f"💭 {d['agent'].upper()}: {d['content']}",
 # MAGIC             "agent_start": lambda d: f"🚀 Starting {d['agent']} agent for: {d.get('query', '')[:50]}...",
 # MAGIC             "intent_detection": lambda d: f"🎯 Intent: {d['result']} - {d.get('reasoning', '')}",
@@ -4378,6 +4379,19 @@ Prerequisites:
 # MAGIC             "sql_execution_complete": lambda d: f"✓ Query complete: {d.get('rows', 0)} rows, {len(d.get('columns', []))} columns",
 # MAGIC             "summary_start": lambda d: f"📄 Generating summary...",
 # MAGIC             "genie_agent_call": lambda d: f"🤖 Calling Genie agent for space: {d.get('space_id', 'unknown')}",
+# MAGIC             
+# MAGIC             # New clean streaming formatters
+# MAGIC             "llm_streaming_start": lambda d: f"🤖 Streaming response from {d.get('agent', 'LLM')}...",
+# MAGIC             "llm_token": lambda d: d.get('content', ''),  # Just the token content, no decoration
+# MAGIC             "intent_detected": lambda d: f"\n🎯 Intent: {d.get('intent_type', 'unknown')} (confidence: {d.get('confidence', 0):.0%})",
+# MAGIC             "meta_question_detected": lambda d: f"\n💡 Meta-question detected",
+# MAGIC             "clarification_requested": lambda d: f"\n❓ Clarification needed: {d.get('reason', 'unknown')}",
+# MAGIC             "clarification_skipped": lambda d: f"\n⏭️ Clarification skipped: {d.get('reason', 'unknown')}",
+# MAGIC             "agent_step": lambda d: f"\n📍 {d.get('agent', 'agent').upper()}: {d.get('content', d.get('step', 'processing'))}",
+# MAGIC             "agent_result": lambda d: f"\n✅ {d.get('agent', 'agent').upper()}: {d.get('result', 'completed')} - {d.get('content', '')}",
+# MAGIC             "sql_synthesis_start": lambda d: f"\n🔧 Starting SQL synthesis via {d.get('route', 'unknown')} route for {len(d.get('spaces', []))} space(s)",
+# MAGIC             "tools_available": lambda d: f"\n🛠️ Tools ready: {', '.join(d.get('tools', []))}",
+# MAGIC             "summary_complete": lambda d: f"\n✅ Summary complete",
 # MAGIC         }
 # MAGIC         
 # MAGIC         # Bulletproof JSON fallback handler
@@ -4797,19 +4811,32 @@ for event in AGENT.predict_stream(request):
         if hasattr(item, 'text') and item.text:
             text = item.text
             
-            # Categorize event types
-            if text.startswith("💭") or text.startswith("🚀") or text.startswith("🎯") or text.startswith("✓") or text.startswith("🔍") or text.startswith("📊") or text.startswith("📋") or text.startswith("🔧") or text.startswith("📝") or text.startswith("✅") or text.startswith("⚡") or text.startswith("📄"):
-                event_counts["custom"] += 1
-            elif text.startswith("🔹 Step:"):
-                event_counts["updates"] += 1
-            elif text.startswith("🔀 Routing"):
-                event_counts["routing"] += 1
-            elif text.startswith("🔨 Tool result"):
-                event_counts["tool_results"] += 1
+            # Detect if this is a streaming token (no emoji prefix, short text, no newline)
+            is_token = (
+                not text.startswith(("💭", "🚀", "🎯", "✓", "🔍", "📊", "📋", "🔧", "📝", "✅", "⚡", "📄", "🔹", "🔀", "🔨", "🤖", "💡", "❓", "⏭️", "📍", "🛠️")) 
+                and not text.startswith("\n")
+                and len(text) < 100
+            )
             
-            # Print event (truncate long events)
-            display_text = text if len(text) <= 150 else text[:150] + "..."
-            print(f"  {display_text}")
+            if is_token:
+                # Stream token without newline for smooth real-time display
+                print(text, end='', flush=True)
+            else:
+                # Structured event with newline
+                # Categorize event types for summary
+                if text.startswith("💭") or text.startswith("🚀") or text.startswith("🎯") or text.startswith("✓") or text.startswith("🔍") or text.startswith("📊") or text.startswith("📋") or text.startswith("🔧") or text.startswith("📝") or text.startswith("✅") or text.startswith("⚡") or text.startswith("📄") or text.startswith("🤖") or text.startswith("💡") or text.startswith("❓") or text.startswith("⏭️") or text.startswith("📍") or text.startswith("🛠️"):
+                    event_counts["custom"] += 1
+                elif text.startswith("🔹 Step:"):
+                    event_counts["updates"] += 1
+                elif text.startswith("🔀 Routing"):
+                    event_counts["routing"] += 1
+                elif text.startswith("🔨 Tool result"):
+                    event_counts["tool_results"] += 1
+                
+                # Print event (truncate long events)
+                display_text = text if len(text) <= 150 else text[:150] + "..."
+                print(f"  {display_text}")
+                
         elif hasattr(item, 'function_call'):
             event_counts["tool_calls"] += 1
             print(f"  🛠️ Function call: {item.function_call.name}")
