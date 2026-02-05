@@ -2546,7 +2546,7 @@ Prerequisites:
 # MAGIC         
 # MAGIC         # Append Option B downloadable tables if query execution was successful
 # MAGIC         exec_result = state.get('execution_result', {})
-# MAGIC         if exec_result.get('success'):
+# MAGIC         if exec_result and exec_result.get('success'):
 # MAGIC             columns = exec_result.get('columns', [])
 # MAGIC             result = exec_result.get('result', [])
 # MAGIC             
@@ -2729,8 +2729,10 @@ Prerequisites:
 # MAGIC 2. Explains what the system did (planning, SQL generation, execution)
 # MAGIC 3. States the outcome (success with X rows, error, needs clarification, etc.)
 # MAGIC 4. print out SQL synthesis explanation if any SQL was generated
-# MAGIC 5. print out SQL if any SQL was generated; make it the code block
-# MAGIC 6. print out the result itself (like a table).
+# MAGIC 5. print out SQL if any SQL was generated; make it the code block. If multiple SQL queries were generated, print out them in separate code blocks.
+# MAGIC 6. print out the result itself (markdown formatted as a table). If multiple result sets were generated, print out them in separate tables.
+# MAGIC 7. summarize the insights from the result itself (markdown formatted as a list of bullets).
+# MAGIC 8. if multiple result sets were generated, summarize the insights from each result set in a separate list of bullets.
 # MAGIC
 # MAGIC
 # MAGIC Keep it concise and user-friendly. 
@@ -4166,7 +4168,19 @@ Prerequisites:
 # MAGIC                 
 # MAGIC                 # Add compact results info to message
 # MAGIC                 final_message_parts.append(f"\n📊 **Query Results:** {df.shape[0]} rows × {df.shape[1]} columns")
-# MAGIC                 final_message_parts.append(f"\nPreview (first 5 rows):\n```\n{df.head().to_string()}\n```")
+# MAGIC                 
+# MAGIC                 # Show top 100 rows in markdown table format
+# MAGIC                 display_rows = min(100, df.shape[0])
+# MAGIC                 df_preview = df.head(display_rows)
+# MAGIC                 
+# MAGIC                 # Convert to markdown table
+# MAGIC                 markdown_table = df_preview.to_markdown(index=False)
+# MAGIC                 
+# MAGIC                 final_message_parts.append(f"\n### Results Table (Top {display_rows} rows)\n\n{markdown_table}")
+# MAGIC                 
+# MAGIC                 # Add note if more rows exist
+# MAGIC                 if df.shape[0] > display_rows:
+# MAGIC                     final_message_parts.append(f"\n*Showing {display_rows} of {df.shape[0]} total rows*")
 # MAGIC                 
 # MAGIC             except Exception as e:
 # MAGIC                 final_message_parts.append(f"\n⚠️ Could not format results: {e}")
