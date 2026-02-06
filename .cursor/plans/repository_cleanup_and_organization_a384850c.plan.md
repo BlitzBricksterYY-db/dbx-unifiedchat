@@ -13,10 +13,10 @@ todos:
     status: completed
   - id: phase4-etl
     content: "Reorganize ETL: rename Notebooks_Tested_On_Databricks/ to etl/"
-    status: in_progress
+    status: completed
   - id: phase5-notebooks
     content: "Clean up Notebooks/: rename to deploy_agent.py, create test_agent_databricks.py, archive old versions"
-    status: pending
+    status: in_progress
   - id: phase6-infrastructure
     content: Create pyproject.toml (rename to multi-agent-genie), organize configs (keep YAML at root for deployment, .env for local)
     status: pending
