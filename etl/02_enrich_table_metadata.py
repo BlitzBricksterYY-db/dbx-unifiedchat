@@ -553,7 +553,7 @@ else:
     )
 
 # Save to Delta table
-df_enriched.write.mode("overwrite").saveAsTable(enriched_docs_table)
+df_enriched.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(enriched_docs_table)
 
 print(f"\n✓ Saved enriched docs to: {enriched_docs_table}")
 print(f"  Total records: {df_enriched.count()}")
@@ -854,7 +854,7 @@ else:
 
 # Save to Delta table
 chunks_table_name = f"{enriched_docs_table}_chunks"
-df_chunks.write.mode("overwrite").saveAsTable(chunks_table_name)
+df_chunks.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(chunks_table_name)
 
 print(f"\n✓ Saved chunks to: {chunks_table_name}")
 print(f"  Total records: {df_chunks.count()}")
