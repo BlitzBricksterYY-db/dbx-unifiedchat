@@ -198,6 +198,8 @@ def should_use_fast_path(query: str, turn_history: List) -> Dict[str, Any]:
     """
     Determine if query can skip full LLM analysis using fast-path heuristics.
     
+    EXCLUSION: Meta-questions always use full LLM (they need meta-question detection)
+    
     Heuristics for obvious cases that don't need full intent detection:
     1. First query that is detailed and clear (>15 words with SQL keywords)
     2. Follow-up refinements with clear action verbs
@@ -216,6 +218,20 @@ def should_use_fast_path(query: str, turn_history: List) -> Dict[str, Any]:
     """
     query_lower = query.lower().strip()
     word_count = len(query.split())
+    
+    # EXCLUSION: Meta-question patterns - always use full LLM for meta-questions
+    meta_patterns = [
+        'example question', 'sample question', 'sample queries', 'sample query', 'example queries', 'example query',
+        'what can i ask', 'what can i query', 'what questions can i ask', 'what kinds of questions',
+        'what tables', 'what data', 'available tables', 'available data', 'data sources',
+        'what schema', 'what\'s available', 'show me what', 'what do you have',
+        'what can you', 'what are the available', 'tell me what'
+    ]
+    if any(pattern in query_lower for pattern in meta_patterns):
+        return {
+            "use_fast_path": False,
+            "reasoning": "Meta-question pattern detected - requires full LLM analysis for meta-answer"
+        }
     
     # Heuristic 1: First detailed query with SQL-related keywords
     sql_keywords = ['show', 'get', 'list', 'find', 'how many', 'count', 'sum', 'average', 
