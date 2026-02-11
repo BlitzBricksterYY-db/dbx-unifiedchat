@@ -3214,7 +3214,17 @@ print("="*80)
 # MAGIC    - Print out the SQL query in a code block
 # MAGIC    - Print out the result in a readable format (preferably as a markdown table)
 # MAGIC    - Provide insights and analysis for the result
-# MAGIC 5. States the outcome (success with X rows, error, needs clarification, etc.)
+# MAGIC 5. **Code Annotation for Human Readability:**
+# MAGIC    - For each result table, scan the columns for raw codes (e.g., diagnosis_code, procedure_code, ICD codes, CPT codes, not limited to medical domain)
+# MAGIC    - If you find columns containing raw codes WITHOUT corresponding human-readable description columns:
+# MAGIC      * Add a new column with a descriptive name like "{code_column}_description" 
+# MAGIC      * Populate it with human-readable descriptions/meanings of those codes
+# MAGIC      * Use your knowledge base to translate common codes (ICD-10, CPT, etc.) into plain language
+# MAGIC      * Example: diagnosis_code "I10" → diagnosis_code_description "Essential (primary) hypertension"
+# MAGIC      * Example: procedure_code "99213" → procedure_code_description "Office visit, established patient, 20-29 minutes"
+# MAGIC    - Present the enhanced table with both the original codes and the new description columns
+# MAGIC    - This makes the results more interpretable for non-technical users
+# MAGIC 6. States the outcome (success with X rows, error, needs clarification, etc.)
 # MAGIC
 # MAGIC Use markdown formatting for readability. Keep it clear and user-friendly. 
 # MAGIC """
