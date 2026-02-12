@@ -5750,6 +5750,18 @@ result1 = AGENT.predict(ResponsesAgentRequest(
 
 # COMMAND ----------
 
+# DBTITLE 1,test irrelevant questions
+follow_up_msg =  "Can I buy milk here?"
+print("thread_id in use:", thread_id)
+# follow up of thread from above, update here
+# First message
+result1 = AGENT.predict(ResponsesAgentRequest(
+    input=[{"role": "user", "content": f"{follow_up_msg}"}],
+    custom_inputs={"thread_id": f"{thread_id}"}
+))
+
+# COMMAND ----------
+
 # DBTITLE 1,no clarify but actaully a new question msg
 follow_up_msg =  "What are top 10 patients with highest medical charges?"
 print("thread_id in use:", thread_id)
