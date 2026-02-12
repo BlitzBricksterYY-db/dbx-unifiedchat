@@ -194,92 +194,6 @@ def record_cache_miss(cache_type: str):
         _performance_metrics["cache_stats"][key] += 1
 
 
-def should_use_fast_path(query: str, turn_history: List) -> Dict[str, Any]:
-    """
-    Determine if query can skip full LLM analysis using fast-path heuristics.
-    
-    EXCLUSION: Meta-questions always use full LLM (they need meta-question detection)
-    
-    Heuristics for obvious cases that don't need full intent detection:
-    1. First query that is detailed and clear (>15 words with SQL keywords)
-    2. Follow-up refinements with clear action verbs
-    3. Simple data retrieval queries
-    
-    Args:
-        query: Current user query
-        turn_history: Conversation history
-    
-    Returns:
-        Dict with:
-        - use_fast_path: bool - Whether to skip full LLM analysis
-        - intent_type: str - Inferred intent type
-        - confidence: float - Confidence in fast-path decision
-        - reasoning: str - Explanation
-    """
-    query_lower = query.lower().strip()
-    word_count = len(query.split())
-    
-    # EXCLUSION: Meta-question patterns - always use full LLM for meta-questions
-    meta_patterns = [
-        'example question', 'sample question', 'sample queries', 'sample query', 'example queries', 'example query',
-        'what can i ask', 'what can i query', 'what questions can i ask', 'what kinds of questions',
-        'what tables', 'what data', 'available tables', 'available data', 'data sources',
-        'what schema', 'what\'s available', 'show me what', 'what do you have',
-        'what can you', 'what are the available', 'tell me what'
-    ]
-    if any(pattern in query_lower for pattern in meta_patterns):
-        return {
-            "use_fast_path": False,
-            "reasoning": "Meta-question pattern detected - requires full LLM analysis for meta-answer"
-        }
-    
-    # Heuristic 1: First detailed query with SQL-related keywords
-    sql_keywords = ['show', 'get', 'list', 'find', 'how many', 'count', 'sum', 'average', 
-                    'total', 'group by', 'where', 'patients', 'claims', 'providers']
-    has_sql_intent = any(kw in query_lower for kw in sql_keywords)
-    
-    if len(turn_history) == 0 and word_count >= 15 and has_sql_intent:
-        return {
-            "use_fast_path": True,
-            "intent_type": "new_question",
-            "confidence": 0.85,
-            "reasoning": f"First detailed query ({word_count} words) with clear SQL intent",
-            "question_clear": True
-        }
-    
-    # Heuristic 2: Follow-up refinements with clear action verbs
-    refinement_keywords = ['filter', 'narrow', 'exclude', 'include', 'only', 'just', 
-                           'limit to', 'restrict', 'add', 'remove', 'without', 'with']
-    has_refinement_intent = any(kw in query_lower for kw in refinement_keywords)
-    
-    if len(turn_history) > 0 and has_refinement_intent and word_count >= 5:
-        return {
-            "use_fast_path": True,
-            "intent_type": "refinement",
-            "confidence": 0.80,
-            "reasoning": f"Follow-up refinement with clear intent ({word_count} words)",
-            "question_clear": True
-        }
-    
-    # Heuristic 3: Simple retrieval queries (show me, get me, list)
-    simple_commands = query_lower.startswith(('show ', 'get ', 'list ', 'display ', 'give me'))
-    if simple_commands and word_count >= 6 and has_sql_intent:
-        intent = "new_question" if len(turn_history) == 0 else "continuation"
-        return {
-            "use_fast_path": True,
-            "intent_type": intent,
-            "confidence": 0.75,
-            "reasoning": f"Simple retrieval command with clear structure",
-            "question_clear": True
-        }
-    
-    # No fast-path: use full LLM analysis
-    return {
-        "use_fast_path": False,
-        "reasoning": "Query requires full LLM analysis for accurate classification"
-    }
-
-
 def check_clarification_rate_limit(turn_history: List[ConversationTurn], window_size: int = 5) -> bool:
     """
     Check if clarification was triggered in the last N turns (sliding window).
@@ -341,7 +255,6 @@ def unified_intent_context_clarification_node(
     Streaming behavior:
     - Markdown content is streamed to UI as LLM generates it (better TTFT)
     - JSON metadata is parsed after streaming completes for routing decisions
-    - Fast-path optimization bypasses LLM entirely for simple refinements
     
     Args:
         state: Current agent state
@@ -439,66 +352,8 @@ def unified_intent_context_clarification_node(
     print(f"Query: {current_query}")
     print(f"Turn history: {len(turn_history)} turns")
     
-    # PHASE 2 OPTIMIZATION: Check if we can use fast-path routing
-    fast_path_result = should_use_fast_path(current_query, turn_history)
-    
-    if fast_path_result["use_fast_path"]:
-        print(f"🚀 FAST-PATH ACTIVATED: {fast_path_result['reasoning']}")
-        print(f"   Intent: {fast_path_result['intent_type']} (confidence: {fast_path_result['confidence']:.2f})")
-        print(f"   Skipping full LLM analysis (-500ms to -1s)")
-        
-        writer({
-            "type": "fast_path_activated",
-            "intent_type": fast_path_result['intent_type'],
-            "confidence": fast_path_result['confidence'],
-            "reasoning": fast_path_result['reasoning']
-        })
-        
-        # Create simplified context summary for fast-path
-        context_summary = f"{current_query}"
-        if turn_history:
-            last_query = turn_history[-1]['query']
-            context_summary = f"Building on previous query '{last_query}', user asks: {current_query}"
-        
-        # Create conversation turn with fast-path results
-        turn = create_conversation_turn(
-            query=current_query,
-            intent_type=fast_path_result['intent_type'],
-            parent_turn_id=None,
-            context_summary=context_summary,
-            triggered_clarification=False,
-            metadata={"fast_path": True, "confidence": fast_path_result['confidence']}
-        )
-        
-        # Create intent metadata
-        intent_metadata = IntentMetadata(
-            intent_type=fast_path_result['intent_type'],
-            confidence=fast_path_result['confidence'],
-            reasoning=fast_path_result['reasoning'],
-            topic_change_score=0.5,
-            domain=None,
-            operation=None,
-            complexity="simple" if fast_path_result['intent_type'] == "refinement" else "moderate",
-            parent_turn_id=None
-        )
-        
-        # Return early - skip to planning
-        # NOTE: Fast-path bypasses LLM entirely, so no streaming occurs
-        # Streaming only applies to full LLM analysis path below
-        return {
-            "current_turn": turn,
-            "turn_history": [turn],
-            "intent_metadata": intent_metadata,
-            "question_clear": True,  # Fast-path assumes clear queries
-            "pending_clarification": None,
-            "next_agent": "planning",
-            "messages": [
-                SystemMessage(content=f"Fast-path: {fast_path_result['intent_type']} (skipped LLM analysis)")
-            ]
-        }
-    
-    # If not fast-path, continue with full LLM analysis (WITH STREAMING)
-    print("🔄 Using full LLM analysis with streaming (query requires detailed classification)")
+    # Analyze query with full LLM (intent + context + clarity + meta-question detection)
+    print("🔄 Analyzing query with LLM (intent + context + clarity + meta-question detection)")
     
     # Format conversation context
     conversation_context = ""

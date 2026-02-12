@@ -3471,81 +3471,6 @@ print("="*80)
 # MAGIC print("✓ Message truncation functions defined (keeps last 5 message turns, 10 turn_history)")
 # MAGIC
 # MAGIC # ==============================================================================
-# MAGIC # Fast-Path Routing Heuristics (Phase 2 Optimization)
-# MAGIC # ==============================================================================
-# MAGIC
-# MAGIC def should_use_fast_path(query: str, turn_history: List) -> Dict[str, Any]:
-# MAGIC     """
-# MAGIC     Determine if query can skip full LLM analysis using fast-path heuristics.
-# MAGIC     
-# MAGIC     Heuristics for obvious cases that don't need full intent detection:
-# MAGIC     1. First query that is detailed and clear (>15 words with SQL keywords)
-# MAGIC     2. Follow-up refinements with clear action verbs
-# MAGIC     3. Simple data retrieval queries
-# MAGIC     
-# MAGIC     Args:
-# MAGIC         query: Current user query
-# MAGIC         turn_history: Conversation history
-# MAGIC     
-# MAGIC     Returns:
-# MAGIC         Dict with:
-# MAGIC         - use_fast_path: bool - Whether to skip full LLM analysis
-# MAGIC         - intent_type: str - Inferred intent type
-# MAGIC         - confidence: float - Confidence in fast-path decision
-# MAGIC         - reasoning: str - Explanation
-# MAGIC     """
-# MAGIC     query_lower = query.lower().strip()
-# MAGIC     word_count = len(query.split())
-# MAGIC     
-# MAGIC     # Heuristic 1: First detailed query with SQL-related keywords
-# MAGIC     sql_keywords = ['show', 'get', 'list', 'find', 'how many', 'count', 'sum', 'average', 
-# MAGIC                     'total', 'group by', 'where', 'patients', 'claims', 'providers']
-# MAGIC     has_sql_intent = any(kw in query_lower for kw in sql_keywords)
-# MAGIC     
-# MAGIC     if len(turn_history) == 0 and word_count >= 15 and has_sql_intent:
-# MAGIC         return {
-# MAGIC             "use_fast_path": True,
-# MAGIC             "intent_type": "new_question",
-# MAGIC             "confidence": 0.85,
-# MAGIC             "reasoning": f"First detailed query ({word_count} words) with clear SQL intent",
-# MAGIC             "question_clear": True
-# MAGIC         }
-# MAGIC     
-# MAGIC     # Heuristic 2: Follow-up refinements with clear action verbs
-# MAGIC     refinement_keywords = ['filter', 'narrow', 'exclude', 'include', 'only', 'just', 
-# MAGIC                            'limit to', 'restrict', 'add', 'remove', 'without', 'with']
-# MAGIC     has_refinement_intent = any(kw in query_lower for kw in refinement_keywords)
-# MAGIC     
-# MAGIC     if len(turn_history) > 0 and has_refinement_intent and word_count >= 5:
-# MAGIC         return {
-# MAGIC             "use_fast_path": True,
-# MAGIC             "intent_type": "refinement",
-# MAGIC             "confidence": 0.80,
-# MAGIC             "reasoning": f"Follow-up refinement with clear intent ({word_count} words)",
-# MAGIC             "question_clear": True
-# MAGIC         }
-# MAGIC     
-# MAGIC     # Heuristic 3: Simple retrieval queries (show me, get me, list)
-# MAGIC     simple_commands = query_lower.startswith(('show ', 'get ', 'list ', 'display ', 'give me'))
-# MAGIC     if simple_commands and word_count >= 6 and has_sql_intent:
-# MAGIC         intent = "new_question" if len(turn_history) == 0 else "continuation"
-# MAGIC         return {
-# MAGIC             "use_fast_path": True,
-# MAGIC             "intent_type": intent,
-# MAGIC             "confidence": 0.75,
-# MAGIC             "reasoning": f"Simple retrieval command with clear structure",
-# MAGIC             "question_clear": True
-# MAGIC         }
-# MAGIC     
-# MAGIC     # No fast-path: use full LLM analysis
-# MAGIC     return {
-# MAGIC         "use_fast_path": False,
-# MAGIC         "reasoning": "Query requires full LLM analysis for accurate classification"
-# MAGIC     }
-# MAGIC
-# MAGIC print("✓ Fast-path routing heuristics defined (-500ms to -1s for obvious queries)")
-# MAGIC
-# MAGIC # ==============================================================================
 # MAGIC # Unified Intent, Context, and Clarification Node (Simplified - No kumc_poc imports)
 # MAGIC # ==============================================================================
 # MAGIC
@@ -3605,7 +3530,6 @@ print("="*80)
 # MAGIC     Streaming behavior:
 # MAGIC     - Markdown content is streamed to UI as LLM generates it (better TTFT)
 # MAGIC     - JSON metadata is parsed after streaming completes for routing decisions
-# MAGIC     - Fast-path optimization bypasses LLM entirely for simple refinements
 # MAGIC     
 # MAGIC     Returns: Dictionary with state updates
 # MAGIC     """
@@ -3683,66 +3607,8 @@ print("="*80)
 # MAGIC     print(f"Query: {current_query}")
 # MAGIC     print(f"Turn history: {len(turn_history)} turns")
 # MAGIC     
-# MAGIC     # PHASE 2 OPTIMIZATION: Check if we can use fast-path routing
-# MAGIC     fast_path_result = should_use_fast_path(current_query, turn_history)
-# MAGIC     
-# MAGIC     if fast_path_result["use_fast_path"]:
-# MAGIC         print(f"🚀 FAST-PATH ACTIVATED: {fast_path_result['reasoning']}")
-# MAGIC         print(f"   Intent: {fast_path_result['intent_type']} (confidence: {fast_path_result['confidence']:.2f})")
-# MAGIC         print(f"   Skipping full LLM analysis (-500ms to -1s)")
-# MAGIC         
-# MAGIC         writer({
-# MAGIC             "type": "fast_path_activated",
-# MAGIC             "intent_type": fast_path_result['intent_type'],
-# MAGIC             "confidence": fast_path_result['confidence'],
-# MAGIC             "reasoning": fast_path_result['reasoning']
-# MAGIC         })
-# MAGIC         
-# MAGIC         # Create simplified context summary for fast-path
-# MAGIC         context_summary = f"{current_query}"
-# MAGIC         if turn_history:
-# MAGIC             last_query = turn_history[-1]['query']
-# MAGIC             context_summary = f"Building on previous query '{last_query}', user asks: {current_query}"
-# MAGIC         
-# MAGIC         # Create conversation turn with fast-path results
-# MAGIC         turn = create_conversation_turn(
-# MAGIC             query=current_query,
-# MAGIC             intent_type=fast_path_result['intent_type'],
-# MAGIC             parent_turn_id=None,
-# MAGIC             context_summary=context_summary,
-# MAGIC             triggered_clarification=False,
-# MAGIC             metadata={"fast_path": True, "confidence": fast_path_result['confidence']}
-# MAGIC         )
-# MAGIC         
-# MAGIC         # Create intent metadata
-# MAGIC         intent_metadata = IntentMetadata(
-# MAGIC             intent_type=fast_path_result['intent_type'],
-# MAGIC             confidence=fast_path_result['confidence'],
-# MAGIC             reasoning=fast_path_result['reasoning'],
-# MAGIC             topic_change_score=0.5,
-# MAGIC             domain=None,
-# MAGIC             operation=None,
-# MAGIC             complexity="simple" if fast_path_result['intent_type'] == "refinement" else "moderate",
-# MAGIC             parent_turn_id=None
-# MAGIC         )
-# MAGIC         
-# MAGIC         # Return early - skip to planning
-# MAGIC         # NOTE: Fast-path bypasses LLM entirely, so no streaming occurs
-# MAGIC         # Streaming only applies to full LLM analysis path below
-# MAGIC         return {
-# MAGIC             "current_turn": turn,
-# MAGIC             "turn_history": [turn],
-# MAGIC             "intent_metadata": intent_metadata,
-# MAGIC             "question_clear": True,  # Fast-path assumes clear queries
-# MAGIC             "pending_clarification": None,
-# MAGIC             "next_agent": "planning",
-# MAGIC             "messages": [
-# MAGIC                 SystemMessage(content=f"Fast-path: {fast_path_result['intent_type']} (skipped LLM analysis)")
-# MAGIC             ]
-# MAGIC         }
-# MAGIC     
-# MAGIC     # If not fast-path, continue with full LLM analysis (WITH STREAMING)
-# MAGIC     print("🔄 Using full LLM analysis with streaming (query requires detailed classification)")
+# MAGIC     # Analyze query with full LLM (intent + context + clarity + meta-question detection)
+# MAGIC     print("🔄 Analyzing query with LLM (intent + context + clarity + meta-question detection)")
 # MAGIC     
 # MAGIC     # Format conversation context
 # MAGIC     conversation_context = ""
