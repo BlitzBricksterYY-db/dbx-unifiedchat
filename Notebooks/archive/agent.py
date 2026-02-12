@@ -41,12 +41,7 @@ from databricks_langchain import (
 # Import conversation management modules
 import sys
 from pathlib import Path
-# # (obsolete) Add kumc_poc to path if not already present
-# kumc_poc_path = str(Path(__file__).parent.parent / "kumc_poc") if '__file__' in globals() else "../kumc_poc"
-# if kumc_poc_path not in sys.path:
-#     sys.path.insert(0, kumc_poc_path)
-
-# NOTE: No imports from kumc_poc - all TypedDicts and logic are inline
+# NOTE: All TypedDicts and logic are inline (self-contained)
 # This simplifies the agent and makes it self-contained
 from databricks_langchain.genie import GenieAgent
 from langchain.agents import create_agent
@@ -694,7 +689,7 @@ def load_space_context(table_name: str) -> Dict[str, str]:
 # Note: Context is now loaded dynamically in clarification_node
 # This allows refresh without model redeployment
 # ==============================================================================
-# Inline TypedDicts for Unified Agent (No kumc_poc imports)
+# Inline TypedDicts for Unified Agent (self-contained)
 # ==============================================================================
 
 from typing import TypedDict, Optional, List, Dict, Any, Literal, Annotated, Tuple
@@ -886,7 +881,7 @@ def get_reset_state_template() -> Dict[str, Any]:
         "final_summary": None,
     }
 
-print("✓ Inline TypedDicts defined (no kumc_poc imports)")
+print("✓ Inline TypedDicts defined (self-contained)")
 
 # State Reset Template
 # All per-query execution fields that should be cleared for each new query.
@@ -2803,9 +2798,9 @@ print("✓ ResultSummarizeAgent class defined")
 # - find_most_recent_clarification_context() → Intent detection handles this
 # - is_new_question() → Intent detection provides intent_type classification
 #
-# These have been removed to simplify the codebase. See:
-# - kumc_poc/intent_detection_service.py for the replacement
-# - kumc_poc/conversation_models.py for the new data models
+# These have been removed to simplify the codebase.
+# See src/multi_agent/utils/intent_detection_service.py for the replacement
+# See src/multi_agent/core/state.py for the data models
 # ==============================================================================
 
 # ==============================================================================
@@ -3062,7 +3057,7 @@ def should_use_fast_path(query: str, turn_history: List) -> Dict[str, Any]:
 print("✓ Fast-path routing heuristics defined (-500ms to -1s for obvious queries)")
 
 # ==============================================================================
-# Unified Intent, Context, and Clarification Node (Simplified - No kumc_poc imports)
+# Unified Intent, Context, and Clarification Node (Simplified - self-contained)
 # ==============================================================================
 
 def check_clarification_rate_limit(turn_history: List[ConversationTurn], window_size: int = 5) -> bool:
@@ -4462,7 +4457,7 @@ def create_super_agent_hybrid():
     app_graph = workflow
     
     print("✓ Workflow nodes added:")
-    print("  1. Unified Intent+Context+Clarification Node (SIMPLIFIED - no kumc_poc imports)")
+    print("  1. Unified Intent+Context+Clarification Node (SIMPLIFIED - self-contained)")
     print("  2. Planning Agent (OOP)")
     print("  3. SQL Synthesis Agent - Table Route (OOP)")
     print("  4. SQL Synthesis Agent - Genie Route (OOP)")

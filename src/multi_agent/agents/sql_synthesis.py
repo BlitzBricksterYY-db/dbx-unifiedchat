@@ -30,37 +30,14 @@ from typing import Dict, List, Optional, Any, Callable
 from langchain_core.messages import AIMessage
 from langgraph.config import get_stream_writer
 
-# Type imports - these should be imported from the appropriate module
-# For standalone usage, AgentState should be imported from conversation_models or defined here
-try:
-    from kumc_poc.conversation_models import AgentState
-except ImportError:
-    # Fallback: define minimal AgentState type if import fails
-    from typing_extensions import TypedDict
-    class AgentState(TypedDict, total=False):
-        plan: Optional[Dict[str, Any]]
-        relevant_space_ids: Optional[List[str]]
-        relevant_spaces: Optional[List[Dict[str, Any]]]
-        genie_route_plan: Optional[Dict[str, str]]
-        sql_query: Optional[str]
-        sql_synthesis_explanation: Optional[str]
-        synthesis_error: Optional[str]
-        has_sql: Optional[bool]
-        next_agent: Optional[str]
-        messages: List
+# Type imports
+from ..core.state import AgentState
 
-# Agent class imports - these should be imported from the appropriate module
-# For standalone usage, these classes should be imported or defined elsewhere
-try:
-    from kumc_poc.agents.sql_synthesis_agents import (
-        SQLSynthesisTableAgent,
-        SQLSynthesisGenieAgent
-    )
-except ImportError:
-    # If classes don't exist in a separate module, they need to be imported from the notebook
-    # or defined here. For now, we'll assume they're available via import
-    SQLSynthesisTableAgent = None  # type: ignore
-    SQLSynthesisGenieAgent = None  # type: ignore
+# Agent class imports
+from .sql_synthesis_agents import (
+    SQLSynthesisTableAgent,
+    SQLSynthesisGenieAgent
+)
 
 # LLM and utility imports
 try:

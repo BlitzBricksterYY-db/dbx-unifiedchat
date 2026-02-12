@@ -482,12 +482,7 @@ print("="*80)
 # MAGIC # Import conversation management modules
 # MAGIC import sys
 # MAGIC from pathlib import Path
-# MAGIC # # (obsolete) Add kumc_poc to path if not already present
-# MAGIC # kumc_poc_path = str(Path(__file__).parent.parent / "kumc_poc") if '__file__' in globals() else "../kumc_poc"
-# MAGIC # if kumc_poc_path not in sys.path:
-# MAGIC #     sys.path.insert(0, kumc_poc_path)
-# MAGIC
-# MAGIC # NOTE: No imports from kumc_poc - all TypedDicts and logic are inline
+# MAGIC # NOTE: All TypedDicts and logic are inline (self-contained)
 # MAGIC # This simplifies the agent and makes it self-contained
 # MAGIC from databricks_langchain.genie import GenieAgent
 # MAGIC from langchain.agents import create_agent
@@ -1135,7 +1130,7 @@ print("="*80)
 # MAGIC # Note: Context is now loaded dynamically in clarification_node
 # MAGIC # This allows refresh without model redeployment
 # MAGIC # ==============================================================================
-# MAGIC # Inline TypedDicts for Unified Agent (No kumc_poc imports)
+# MAGIC # Inline TypedDicts for Unified Agent (self-contained)
 # MAGIC # ==============================================================================
 # MAGIC
 # MAGIC from typing import TypedDict, Optional, List, Dict, Any, Literal, Annotated, Tuple
@@ -1327,7 +1322,7 @@ print("="*80)
 # MAGIC         "final_summary": None,
 # MAGIC     }
 # MAGIC
-# MAGIC print("✓ Inline TypedDicts defined (no kumc_poc imports)")
+# MAGIC print("✓ Inline TypedDicts defined (self-contained)")
 # MAGIC
 # MAGIC # State Reset Template
 # MAGIC # All per-query execution fields that should be cleared for each new query.
@@ -3287,9 +3282,9 @@ print("="*80)
 # MAGIC # - find_most_recent_clarification_context() → Intent detection handles this
 # MAGIC # - is_new_question() → Intent detection provides intent_type classification
 # MAGIC #
-# MAGIC # These have been removed to simplify the codebase. See:
-# MAGIC # - kumc_poc/intent_detection_service.py for the replacement
-# MAGIC # - kumc_poc/conversation_models.py for the new data models
+# MAGIC # These have been removed to simplify the codebase.
+# MAGIC # See src/multi_agent/utils/intent_detection_service.py for the replacement
+# MAGIC # See src/multi_agent/core/state.py for the data models
 # MAGIC # ==============================================================================
 # MAGIC
 # MAGIC # ==============================================================================
@@ -3471,7 +3466,7 @@ print("="*80)
 # MAGIC print("✓ Message truncation functions defined (keeps last 5 message turns, 10 turn_history)")
 # MAGIC
 # MAGIC # ==============================================================================
-# MAGIC # Unified Intent, Context, and Clarification Node (Simplified - No kumc_poc imports)
+# MAGIC # Unified Intent, Context, and Clarification Node (Simplified - self-contained)
 # MAGIC # ==============================================================================
 # MAGIC
 # MAGIC def check_clarification_rate_limit(turn_history: List[ConversationTurn], window_size: int = 5) -> bool:
@@ -4812,7 +4807,7 @@ print("="*80)
 # MAGIC     app_graph = workflow
 # MAGIC     
 # MAGIC     print("✓ Workflow nodes added:")
-# MAGIC     print("  1. Unified Intent+Context+Clarification Node (SIMPLIFIED - no kumc_poc imports)")
+# MAGIC     print("  1. Unified Intent+Context+Clarification Node (SIMPLIFIED - self-contained)")
 # MAGIC     print("  2. Planning Agent (OOP)")
 # MAGIC     print("  3. SQL Synthesis Agent - Table Route (OOP)")
 # MAGIC     print("  4. SQL Synthesis Agent - Genie Route (OOP)")
