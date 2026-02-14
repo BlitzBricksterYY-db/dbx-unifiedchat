@@ -18,18 +18,24 @@ Organizations struggle to query data across multiple domains and data sources, r
 
 Built on LangGraph, Databricks Genie and Lakebase, this solution enables business users to ask questions spanning multiple data domains without needing to understand the underlying data architecture or write complex SQL queries.
 
+### 📹 Video Walkthrough
+
+Watch a complete walkthrough of the system in action. We are co-promoting dbx-unifiedchat with Databricks Agent Bricks Multi-Agent System. AB-MAS is a No/Low-code solution, while DBX-UnifiedChat is a modularized and fully-DIYable custom multi-agent system. 
+
+[![DBX-UnifiedChat Demo](https://img.shields.io/badge/Watch%20Demo-Loom-blue?style=for-the-badge&logo=loom)](https://www.loom.com/share/e39845fc117b4d5083cd17ff066ef149)
+
 ---
 
 ## Architecture
 
 The system uses a multi-agent architecture powered by LangGraph:
 
-* **Supervisor Agent (multi-purpose)** - Frontend agent that orchestrates the workflow and coordinates handoffs to other agents
+* **Supervisor Agent (multi-purpose)** - Frontend agent that orchestrates the workflow and coordinates handoffs to other agents, including intent detection and clarification, meta-question/irrelevant question handling, prior-turn context management, etc.
 * **Thinking & Planning Agent** - Analyzes queries and creates execution plans based on the query intent and context
 * **Genie Agents** - Query individual Genie spaces for domain-specific data
-* **SQL Synthesis Agent (table route)** - Combines and synthesizes SQL across table data sources using UC Functions (instructed retrieval)
+* **SQL Synthesis Agent (table route)** - Combines and synthesizes SQL across table data sources using UC Functions (multi-step instructed retrieval)
 * **SQL Synthesis Agent (genie route)** - Combines and synthesizes SQL across genie space data sources using Genie agents as tools (parallel execution)
-* **SQL Execution Agent** - Executes queries and extracts results
+* **SQL Execution Agent** - Executes queries and extracts results (parallel execution)
 * **Summarize Agent** - Summarizes results and formats responses for the user
 
 The system leverages:
