@@ -5,7 +5,7 @@ import { selector } from '@/lib/selector';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, ExternalLink } from 'lucide-react';
 
 export const Route = createFileRoute('/_sidebar/enrichment')({
   component: () => (
@@ -20,15 +20,18 @@ export const Route = createFileRoute('/_sidebar/enrichment')({
 
 function EnrichmentView() {
   const { data: selection } = useGetSelectionSuspense(selector());
-  const [jobId, setJobId] = useState<string | null>(null);
+  const [jobId, setJobId] = useState<number | null>(null);
+  const [jobUrl, setJobUrl] = useState<string | null>(null);
   const runEnrichmentMutation = useRunEnrichment();
   const navigate = useNavigate();
 
   const handleRunEnrichment = async () => {
     const result = await runEnrichmentMutation.mutateAsync({
-      table_fqns: selection.table_fqns,
+      data: { table_fqns: selection.table_fqns }
     });
-    setJobId(result.job_id);
+    // result now contains: {run_id, job_url, status}
+    setJobId(result.run_id);
+    setJobUrl(result.job_url);
   };
 
   return (
@@ -55,9 +58,9 @@ function EnrichmentView() {
         </CardContent>
       </Card>
 
-      {jobId && (
+      {jobId && jobUrl && (
         <Suspense fallback={<Skeleton className="h-32 w-full" />}>
-          <EnrichmentProgress jobId={jobId} />
+          <EnrichmentProgress jobId={jobId} jobUrl={jobUrl} />
         </Suspense>
       )}
 
@@ -81,28 +84,86 @@ function EnrichmentView() {
   );
 }
 
-function EnrichmentProgress({ jobId }: { jobId: string }) {
-  const { data: status } = useGetEnrichmentStatusSuspense(jobId, selector());
+function EnrichmentProgress({ jobId, jobUrl }: { jobId: number, jobUrl: string }) {
+  const { data: status } = useGetEnrichmentStatusSuspense(jobId, {
+    query: {
+      refetchInterval: (query) => {
+        const data = query.state.data;
+        // Poll every 5 seconds if job is still running
+        if (data && (data.status === 'pending' || data.status === 'running')) {
+          return 5000;
+        }
+        return false;
+      }
+    }
+  });
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Enrichment Progress</CardTitle>
+        <CardTitle className="flex items-center justify-between">
+          <span>Enrichment Progress</span>
+          <a 
+            href={jobUrl} 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="text-sm text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 flex items-center gap-1 transition-colors"
+          >
+            View Job in Databricks <ExternalLink size={14} />
+          </a>
+        </CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="space-y-2">
+        <div className="space-y-3">
           <div className="flex justify-between text-sm">
-            <span>Status: {status.status}</span>
-            <span>{status.progress} / {status.total}</span>
+            <span className="font-medium">Status: <span className={
+              status.status === 'completed' ? 'text-green-600 dark:text-green-400' :
+              status.status === 'failed' ? 'text-red-600 dark:text-red-400' :
+              status.status === 'running' ? 'text-blue-600 dark:text-blue-400' :
+              'text-slate-600 dark:text-slate-400'
+            }>{status.status.toUpperCase()}</span></span>
+            <span className="text-slate-600 dark:text-slate-400">Run ID: {status.run_id}</span>
           </div>
-          <div className="w-full bg-secondary rounded-full h-2">
-            <div
-              className="bg-primary h-2 rounded-full transition-all"
-              style={{ width: `${(status.progress / status.total) * 100}%` }}
-            />
-          </div>
-          {status.error && (
-            <p className="text-sm text-destructive">{status.error}</p>
+          
+          {status.life_cycle_state && (
+            <div className="text-xs text-slate-600 dark:text-slate-400 bg-slate-50 dark:bg-slate-800 rounded p-2">
+              <div>Lifecycle: <span className="font-mono">{status.life_cycle_state}</span></div>
+              {status.result_state && (
+                <div>Result: <span className="font-mono">{status.result_state}</span></div>
+              )}
+            </div>
+          )}
+          
+          {status.duration_ms && (
+            <div className="text-sm text-slate-600 dark:text-slate-400">
+              Duration: <span className="font-semibold">{(status.duration_ms / 1000).toFixed(1)}s</span>
+            </div>
+          )}
+          
+          {status.state_message && (
+            <p className="text-sm text-slate-600 dark:text-slate-400 italic bg-slate-50 dark:bg-slate-800 rounded p-2">
+              {status.state_message}
+            </p>
+          )}
+          
+          {status.status === 'failed' && (
+            <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 rounded p-3 border border-red-200 dark:border-red-800">
+              <p className="font-semibold">Enrichment job failed</p>
+              <p className="text-xs mt-1">Check the job logs in Databricks for details.</p>
+            </div>
+          )}
+          
+          {status.status === 'running' && (
+            <div className="flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400">
+              <div className="animate-spin h-4 w-4 border-2 border-blue-600 dark:border-blue-400 border-t-transparent rounded-full"></div>
+              <span>Job is running...</span>
+            </div>
+          )}
+          
+          {status.status === 'completed' && (
+            <div className="text-sm text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/20 rounded p-3 border border-green-200 dark:border-green-800">
+              ✓ Enrichment completed successfully!
+            </div>
           )}
         </div>
       </CardContent>

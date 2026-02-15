@@ -2,7 +2,8 @@ import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { useState, useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import customInstance from '@/lib/axios-instance';
-import { useSaveSelection } from '@/lib/api';
+import { useSaveSelection, useListCatalogsSuspense, useListSchemasSuspense, useListTablesSuspense } from '@/lib/api';
+import { selector } from '@/lib/selector';
 
 export const Route = createFileRoute('/_sidebar/catalog-browser')({
   component: CatalogBrowser,
@@ -217,7 +218,7 @@ function CatalogBrowser() {
   const { data: catalogs, isLoading: catalogsLoading, isError: catalogsError, error: catalogsErrorMsg } = useQuery({
     queryKey: ['listCatalogs'],
     queryFn: async () => {
-      const response = await customInstance<Catalog[]>({ url: '/uc/catalogs', method: 'GET' });
+      const response = await customInstance<Catalog[]>({ url: '/api/uc/catalogs', method: 'GET' });
       return response;
     },
   });
@@ -227,7 +228,7 @@ function CatalogBrowser() {
     queryKey: ['listSchemas', selectedCatalog],
     queryFn: async () => {
       const response = await customInstance<Schema[]>({ 
-        url: `/uc/catalogs/${selectedCatalog}/schemas`, 
+        url: `/api/uc/catalogs/${selectedCatalog}/schemas`, 
         method: 'GET' 
       });
       return response;
@@ -240,7 +241,7 @@ function CatalogBrowser() {
     queryKey: ['listTables', selectedCatalog, selectedSchema],
     queryFn: async () => {
       const response = await customInstance<Table[]>({ 
-        url: `/uc/catalogs/${selectedCatalog}/schemas/${selectedSchema}/tables`, 
+        url: `/api/uc/catalogs/${selectedCatalog}/schemas/${selectedSchema}/tables`, 
         method: 'GET' 
       });
       // Cache the tables
@@ -299,7 +300,7 @@ function CatalogBrowser() {
       for (const schema of schemas) {
         try {
           const response = await customInstance<Table[]>({ 
-            url: `/uc/catalogs/${selectedCatalog}/schemas/${schema.name}/tables`, 
+            url: `/api/uc/catalogs/${selectedCatalog}/schemas/${schema.name}/tables`, 
             method: 'GET' 
           });
           allTables.push(...response);
@@ -345,7 +346,7 @@ function CatalogBrowser() {
     setCatalogSelectAllLoading(true);
     try {
       const schemasResponse = await customInstance<Schema[]>({ 
-        url: `/uc/catalogs/${catalogName}/schemas`, 
+        url: `/api/uc/catalogs/${catalogName}/schemas`, 
         method: 'GET' 
       });
       
@@ -353,7 +354,7 @@ function CatalogBrowser() {
       for (const schema of schemasResponse) {
         try {
           const tablesResponse = await customInstance<Table[]>({ 
-            url: `/uc/catalogs/${catalogName}/schemas/${schema.name}/tables`, 
+            url: `/api/uc/catalogs/${catalogName}/schemas/${schema.name}/tables`, 
             method: 'GET' 
           });
           allTables.push(...tablesResponse);
@@ -382,7 +383,7 @@ function CatalogBrowser() {
       // Fetch tables for this schema
       try {
         schemaTables = await customInstance<Table[]>({ 
-          url: `/uc/catalogs/${catalogName}/schemas/${schemaName}/tables`, 
+          url: `/api/uc/catalogs/${catalogName}/schemas/${schemaName}/tables`, 
           method: 'GET' 
         });
         setAllCatalogTables(prev => new Map(prev).set(key, schemaTables!));
@@ -409,7 +410,7 @@ function CatalogBrowser() {
 
   const handleNext = async () => {
     await saveSelectionMutation.mutateAsync({
-      table_fqns: Array.from(selectedTables)
+      data: { table_fqns: Array.from(selectedTables) }
     });
     navigate({ to: '/enrichment' });
   };

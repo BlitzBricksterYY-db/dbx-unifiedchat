@@ -7,9 +7,14 @@ from typing import List
 from .models import *
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
+from databricks.sdk.service.jobs import Task, SparkPythonTask, JobEnvironment, JobParameter
+from databricks.sdk.service.compute import Environment
 from databricks import sql
 import uuid
 import threading
+import os
+import json
+from datetime import datetime
 
 # Initialize SDK
 config = Config()
@@ -18,8 +23,6 @@ warehouse_id = "a4ed2ccbda385db9"
 
 # In-memory storage
 _selection: TableSelectionOut = TableSelectionOut(table_fqns=[], count=0)
-_enrichment_jobs = {}
-_enrichment_results = []
 _graph_data: Optional[GraphDataOut] = None
 _genie_rooms = []
 _genie_creation_status: Optional[GenieCreationStatusOut] = None
@@ -115,12 +118,178 @@ async def get_selection():
 
 
 # ============================================================================
-# ENRICHMENT ROUTES
+# ENRICHMENT ROUTES - DATABRICKS JOB SUBMISSION
 # ============================================================================
 
-def _run_enrichment_task(job_id: str, table_fqns: List[str]):
-    """Background enrichment task."""
-    global _enrichment_results
+# Configuration for enrichment job
+ENRICHMENT_SCRIPT_PATH = os.getenv(
+    "ENRICHMENT_SCRIPT_PATH", 
+    "/Workspace/Users/yang.yang@databricks.com/tables_to_genies/etl/enrich_tables_direct.py"
+)
+
+@api.post("/enrichment/run", response_model=EnrichmentJobOut, operation_id="runEnrichment")
+async def run_enrichment(enrichment_in: EnrichmentRunIn):
+    """Run table enrichment job on Databricks."""
+    
+    # Prepare parameters for the job
+    table_fqns_str = ','.join(enrichment_in.table_fqns)
+    
+    # Job name for persistent job definition
+    job_name = "Table Enrichment Job"
+    
+    # Check if job already exists
+    existing_jobs = list(client.jobs.list(name=job_name))
+    
+    if existing_jobs:
+        # Use existing job
+        job_id = existing_jobs[0].job_id
+        print(f"Using existing job: {job_id}")
+    else:
+        # Create new persistent job
+        print(f"Creating new job: {job_name}")
+        job = client.jobs.create(
+            name=job_name,
+            tasks=[
+                Task(
+                    task_key="enrich_tables",
+                    spark_python_task=SparkPythonTask(
+                        python_file=ENRICHMENT_SCRIPT_PATH,
+                        parameters=[
+                            "{{tables}}",  # Parameter placeholder
+                            "{{sample_size}}",
+                            "{{max_unique_values}}",
+                            "{{llm_endpoint}}"
+                        ]
+                    ),
+                    environment_key="serverless_env"
+                )
+            ],
+            environments=[
+                JobEnvironment(
+                    environment_key="serverless_env",
+                    spec=Environment(
+                        client="1"  # Serverless environment
+                    )
+                )
+            ],
+            parameters=[
+                JobParameter(name="tables", default=""),
+                JobParameter(name="sample_size", default="20"),
+                JobParameter(name="max_unique_values", default="50"),
+                JobParameter(name="llm_endpoint", default="databricks-claude-sonnet-4-5")
+            ]
+        )
+        job_id = job.job_id
+        print(f"Created job: {job_id}")
+    
+    # Run the job with actual parameters
+    run_result = client.jobs.run_now(
+        job_id=job_id,
+        job_parameters={
+            "tables": table_fqns_str,
+            "sample_size": "20",
+            "max_unique_values": "50",
+            "llm_endpoint": "databricks-claude-sonnet-4-5"
+        }
+    )
+    
+    # Get run details to access run_page_url
+    run_details = client.jobs.get_run(run_id=run_result.run_id)
+    job_url = run_details.run_page_url
+    
+    return EnrichmentJobOut(
+        run_id=run_result.run_id,
+        job_url=job_url,
+        status=EnrichmentStatus.PENDING,
+        table_count=len(enrichment_in.table_fqns),
+        submitted_at=datetime.now().isoformat()
+    )
+
+
+@api.get("/enrichment/status/{run_id}", response_model=EnrichmentJobStatusOut, operation_id="getEnrichmentStatus")
+async def get_enrichment_status(run_id: int):
+    """Get Databricks job status."""
+    
+    try:
+        run = client.jobs.get_run(run_id=run_id)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Job run not found: {str(e)}")
+    
+    # Map Databricks states to our status
+    life_cycle_state = run.state.life_cycle_state.value if run.state.life_cycle_state else None
+    result_state = run.state.result_state.value if run.state.result_state else None
+    
+    status = EnrichmentStatus.PENDING
+    if life_cycle_state == "RUNNING":
+        status = EnrichmentStatus.RUNNING
+    elif life_cycle_state == "TERMINATED":
+        if result_state == "SUCCESS":
+            status = EnrichmentStatus.COMPLETED
+        elif result_state == "FAILED":
+            status = EnrichmentStatus.FAILED
+        elif result_state == "CANCELED":
+            status = EnrichmentStatus.CANCELLED
+    
+    job_url = f"{config.host}/#job/{run_id}"
+    
+    return EnrichmentJobStatusOut(
+        run_id=run_id,
+        status=status,
+        job_url=job_url,
+        life_cycle_state=life_cycle_state,
+        result_state=result_state,
+        state_message=run.state.state_message,
+        start_time=run.start_time,
+        end_time=run.end_time,
+        duration_ms=(run.end_time - run.start_time) if run.end_time and run.start_time else None
+    )
+
+
+@api.get("/enrichment/results", response_model=List[EnrichmentResultListOut], operation_id="listEnrichmentResults")
+async def list_enrichment_results():
+    """List enriched tables from Unity Catalog."""
+    
+    try:
+        # Query enriched results from UC table
+        conn = sql.connect(
+            server_hostname=config.host,
+            http_path=f"/sql/1.0/warehouses/{warehouse_id}",
+            credentials_provider=lambda: config.authenticate,
+        )
+        
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT table_fqn, enriched_doc 
+            FROM yyang.multi_agent_genie.enriched_tables_direct 
+            WHERE enriched = true
+            ORDER BY id DESC
+            LIMIT 100
+        """)
+        
+        results = []
+        for row in cursor.fetchall():
+            table_fqn = row[0]
+            enriched_doc = json.loads(row[1])
+            
+            results.append(EnrichmentResultListOut(
+                fqn=table_fqn,
+                column_count=enriched_doc.get('total_columns', 0),
+                enriched=enriched_doc.get('enriched', False)
+            ))
+        
+        cursor.close()
+        conn.close()
+        
+        return results
+        
+    except Exception as e:
+        print(f"Error fetching enrichment results: {e}")
+        return []
+
+
+@api.get("/enrichment/results/{fqn:path}", response_model=EnrichmentResultOut, operation_id="getEnrichmentResult")
+async def get_enrichment_result(fqn: str):
+    """Get enrichment result for specific table from Unity Catalog."""
     
     try:
         conn = sql.connect(
@@ -129,122 +298,45 @@ def _run_enrichment_task(job_id: str, table_fqns: List[str]):
             credentials_provider=lambda: config.authenticate,
         )
         
-        for i, fqn in enumerate(table_fqns):
-            try:
-                parts = fqn.split('.')
-                if len(parts) != 3:
-                    continue
-                
-                catalog, schema, table = parts
-                
-                # Get columns
-                cursor = conn.cursor()
-                cursor.execute(f"DESCRIBE `{catalog}`.`{schema}`.`{table}`")
-                columns_raw = cursor.fetchall()
-                cursor.close()
-                
-                # Sample first column
-                if columns_raw:
-                    first_col = columns_raw[0][0]
-                    cursor = conn.cursor()
-                    cursor.execute(f"SELECT `{first_col}` FROM `{catalog}`.`{schema}`.`{table}` LIMIT 5")
-                    samples = [str(row[0]) for row in cursor.fetchall()]
-                    cursor.close()
-                else:
-                    samples = []
-                
-                columns = [
-                    ColumnEnriched(
-                        name=col[0],
-                        type=col[1],
-                        comment=col[2] if len(col) > 2 and col[2] else '',
-                        sample_values=samples if idx == 0 else []
-                    )
-                    for idx, col in enumerate(columns_raw[:10])
-                ]
-                
-                result = EnrichmentResultOut(
-                    fqn=fqn,
-                    catalog=catalog,
-                    schema=schema,
-                    table=table,
-                    column_count=len(columns_raw),
-                    columns=columns,
-                    enriched=True,
-                    timestamp=datetime.now().isoformat()
-                )
-                
-                _enrichment_results.append(result)
-                _enrichment_jobs[job_id]['progress'] = i + 1
-                
-            except Exception as e:
-                print(f"Error enriching {fqn}: {e}")
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT enriched_doc FROM yyang.multi_agent_genie.enriched_tables_direct WHERE table_fqn = ?",
+            (fqn,)
+        )
         
+        row = cursor.fetchone()
+        cursor.close()
         conn.close()
-        _enrichment_jobs[job_id]['status'] = EnrichmentStatus.COMPLETED
         
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Table {fqn} not found")
+        
+        enriched_doc = json.loads(row[0])
+        
+        # Convert to response model
+        return EnrichmentResultOut(
+            fqn=enriched_doc['table_fqn'],
+            catalog=enriched_doc['catalog'],
+            schema=enriched_doc['schema'],
+            table=enriched_doc['table'],
+            column_count=enriched_doc['total_columns'],
+            columns=[
+                ColumnEnriched(
+                    name=col['column_name'],
+                    type=col['data_type'],
+                    comment=col.get('enhanced_comment', col.get('comment', '')),
+                    sample_values=col.get('sample_values', [])
+                )
+                for col in enriched_doc['enriched_columns'][:10]
+            ],
+            enriched=enriched_doc['enriched'],
+            timestamp=enriched_doc['enrichment_timestamp']
+        )
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        _enrichment_jobs[job_id]['status'] = EnrichmentStatus.FAILED
-        _enrichment_jobs[job_id]['error'] = str(e)
-
-
-@api.post("/enrichment/run", response_model=EnrichmentStatusOut, operation_id="runEnrichment")
-async def run_enrichment(enrichment_in: EnrichmentRunIn):
-    """Start enrichment job."""
-    job_id = f"enrich-{str(uuid.uuid4())[:8]}"
-    
-    _enrichment_jobs[job_id] = {
-        'status': EnrichmentStatus.RUNNING,
-        'progress': 0,
-        'total': len(enrichment_in.table_fqns),
-        'error': None
-    }
-    
-    thread = threading.Thread(target=_run_enrichment_task, args=(job_id, enrichment_in.table_fqns))
-    thread.daemon = True
-    thread.start()
-    
-    return EnrichmentStatusOut(
-        job_id=job_id,
-        status=EnrichmentStatus.RUNNING,
-        progress=0,
-        total=len(enrichment_in.table_fqns)
-    )
-
-
-@api.get("/enrichment/status/{job_id}", response_model=EnrichmentStatusOut, operation_id="getEnrichmentStatus")
-async def get_enrichment_status(job_id: str):
-    """Get enrichment job status."""
-    if job_id not in _enrichment_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    job = _enrichment_jobs[job_id]
-    return EnrichmentStatusOut(
-        job_id=job_id,
-        status=job['status'],
-        progress=job['progress'],
-        total=job['total'],
-        error=job.get('error')
-    )
-
-
-@api.get("/enrichment/results", response_model=List[EnrichmentResultListOut], operation_id="listEnrichmentResults")
-async def list_enrichment_results():
-    """List all enrichment results."""
-    return [EnrichmentResultListOut(
-        fqn=r.fqn,
-        column_count=r.column_count,
-        enriched=r.enriched
-    ) for r in _enrichment_results]
-
-
-@api.get("/enrichment/results/{fqn:path}", response_model=EnrichmentResultOut, operation_id="getEnrichmentResult")
-async def get_enrichment_result(fqn: str):
-    """Get enrichment result for a specific table."""
-    for result in _enrichment_results:
-        if result.fqn == fqn:
-            return result
-    raise HTTPException(status_code=404, detail="Result not found")
+        raise HTTPException(status_code=500, detail=f"Error fetching result: {str(e)}")
 
 
 # ============================================================================

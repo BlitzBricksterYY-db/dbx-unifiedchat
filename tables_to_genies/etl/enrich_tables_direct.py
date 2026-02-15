@@ -1,187 +1,708 @@
 """
-Enrichment module adapted from etl/02_enrich_table_metadata.py.
-Works with direct table FQNs instead of Genie space.json exports.
+Table Metadata Enrichment Module
+
+Adapted from etl/02_enrich_table_metadata.py for direct table FQN processing.
+This module enriches table metadata with:
+- Column samples and value dictionaries
+- LLM-enhanced column descriptions
+- LLM-synthesized table descriptions
+- Multi-level chunks for vector search (table + column levels)
+
+Designed to run as a Databricks job with Spark SQL.
 """
-from databricks import sql
-from databricks.sdk import WorkspaceClient
-from databricks.sdk.core import Config
-from typing import List, Dict, Any
+
 import json
+import pandas as pd
+from datetime import datetime
+from pyspark.sql import functions as F
+from pyspark.sql.functions import col
+from typing import Dict, List, Any
 
 
-class TableEnricher:
-    """Enriches tables with metadata, samples, and LLM-enhanced descriptions."""
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def json_serializer(obj):
+    """
+    Convert non-serializable objects to strings.
     
-    def __init__(self, warehouse_id: str = "a4ed2ccbda385db9"):
-        self.config = Config()
-        self.client = WorkspaceClient(config=self.config)
-        self.warehouse_id = warehouse_id
-        self.llm_endpoint = "databricks-claude-sonnet-4-5"
+    Helper function to safely serialize objects for JSON output.
+    """
+    # Handle PySpark Column objects
+    if hasattr(obj, '__class__') and 'pyspark' in str(type(obj)):
+        return str(obj)
+    # Handle datetime/date objects
+    if hasattr(obj, 'isoformat') and callable(getattr(obj, 'isoformat', None)):
+        return obj.isoformat()
+    return str(obj)
+
+
+def get_table_metadata(table_identifier: str) -> pd.DataFrame:
+    """
+    Get table metadata including columns, data types, and comments.
     
-    def get_table_metadata(self, table_fqn: str) -> List[Dict[str, Any]]:
-        """Get column metadata for a table using SQL warehouse."""
-        try:
-            conn = sql.connect(
-                server_hostname=self.config.host,
-                http_path=f"/sql/1.0/warehouses/{self.warehouse_id}",
-                credentials_provider=lambda: self.config.authenticate,
-            )
-            
-            cursor = conn.cursor()
-            cursor.execute(f"DESCRIBE {table_fqn}")
-            rows = cursor.fetchall()
-            cursor.close()
-            conn.close()
-            
-            columns = []
-            for row in rows:
-                if row[0] and row[1] and not row[0].startswith('#'):
-                    columns.append({
-                        'col_name': row[0],
-                        'data_type': row[1],
-                        'comment': row[2] if len(row) > 2 else ''
-                    })
-            
-            return columns
-            
-        except Exception as e:
-            print(f"Error getting metadata for {table_fqn}: {e}")
-            return []
+    Args:
+        table_identifier: Fully qualified table name (catalog.schema.table)
     
-    def sample_column_values(self, table_fqn: str, column_name: str, sample_size: int = 20) -> List[Any]:
-        """Sample distinct values from a column."""
-        try:
-            conn = sql.connect(
-                server_hostname=self.config.host,
-                http_path=f"/sql/1.0/warehouses/{self.warehouse_id}",
-                credentials_provider=lambda: self.config.authenticate,
-            )
-            
-            cursor = conn.cursor()
-            query = f"""
-            SELECT DISTINCT `{column_name}` 
-            FROM {table_fqn} 
-            WHERE `{column_name}` IS NOT NULL 
-            LIMIT {sample_size}
-            """
-            cursor.execute(query)
-            rows = cursor.fetchall()
-            cursor.close()
-            conn.close()
-            
-            return [str(row[0]) for row in rows]
-            
-        except Exception as e:
-            print(f"Error sampling {column_name} from {table_fqn}: {e}")
-            return []
+    Returns:
+        Pandas DataFrame with column metadata
+    """
+    try:
+        df_description = spark.sql(f"DESCRIBE {table_identifier}")
+        
+        # Filter out metadata rows, keep only actual columns
+        df_clean = df_description.filter(
+            (col('data_type').isNotNull()) & 
+            (~col('col_name').startswith('#')) & 
+            (col('col_name') != '') & 
+            (col('data_type') != '') &
+            (~col('col_name').isin(
+                '# Delta Statistics Columns', 'Column Names', 'Column Selection Method', 
+                'Created Time', 'Last Access', 'Created By', 'Statistics', 'Type', 
+                'Location', 'Provider', 'Owner', 'Is_managed_location', 
+                'Predictive Optimization', 'Table Properties', 'Catalog', 'Database', 
+                'Table', '# Detailed Table Information', 'Name', 'Comment', 
+                '# Partitioning', 'Part 0', 'Partition Provider',
+                'Legacy UC Partitioned DELTASHARING Table'
+            ))
+        )
+        
+        return df_clean.toPandas()
+    except Exception as e:
+        print(f"Error getting metadata for {table_identifier}: {str(e)}")
+        return pd.DataFrame(columns=['col_name', 'data_type', 'comment'])
+
+
+def sample_column_values(table_identifier: str, column_name: str, sample_size: int = 100) -> List[Any]:
+    """
+    Sample distinct values from a column.
     
-    def enrich_table(self, table_fqn: str) -> Dict[str, Any]:
+    Args:
+        table_identifier: Fully qualified table name
+        column_name: Column to sample from
+        sample_size: Number of samples to retrieve
+    
+    Returns:
+        List of sampled values (converted to JSON-serializable types)
+    """
+    try:
+        query = f"""
+        SELECT DISTINCT `{column_name}` 
+        FROM {table_identifier} 
+        WHERE `{column_name}` IS NOT NULL 
+        LIMIT {sample_size}
         """
-        Enrich a single table with metadata and samples.
-        
-        Args:
-            table_fqn: Fully qualified table name
-        
-        Returns:
-            Enriched table metadata dict
+        result = spark.sql(query).collect()
+        # Convert values to JSON-serializable types
+        sampled_values = []
+        for row in result:
+            val = row[0]
+            # Convert date/datetime objects to strings
+            if hasattr(val, 'isoformat'):
+                sampled_values.append(val.isoformat())
+            else:
+                sampled_values.append(val)
+        return sampled_values
+    except Exception as e:
+        print(f"Error sampling {column_name} from {table_identifier}: {str(e)}")
+        return []
+
+
+def build_value_dictionary(table_identifier: str, column_name: str, max_values: int = 50) -> Dict[str, int]:
+    """
+    Build a value dictionary (value frequency) for a column.
+    
+    Args:
+        table_identifier: Fully qualified table name
+        column_name: Column to build dictionary for
+        max_values: Maximum number of unique values to include
+    
+    Returns:
+        Dictionary mapping values to their frequencies
+    """
+    try:
+        query = f"""
+        SELECT `{column_name}`, COUNT(*) as frequency 
+        FROM {table_identifier} 
+        WHERE `{column_name}` IS NOT NULL 
+        GROUP BY `{column_name}` 
+        ORDER BY frequency DESC 
+        LIMIT {max_values}
         """
-        print(f"Enriching {table_fqn}")
+        result = spark.sql(query).collect()
+        return {str(row[0]): int(row[1]) for row in result}
+    except Exception as e:
+        print(f"Error building value dictionary for {column_name} from {table_identifier}: {str(e)}")
+        return {}
+
+
+def enrich_column_metadata(columns_metadata: pd.DataFrame, table_identifier: str, 
+                          sample_size: int, max_unique_values: int,
+                          column_configs: List[Dict] = None) -> List[Dict]:
+    """
+    Enrich column metadata with sampled values and value dictionaries.
+    
+    Args:
+        columns_metadata: DataFrame with column metadata
+        table_identifier: Fully qualified table name
+        sample_size: Number of samples per column
+        max_unique_values: Maximum unique values for value dictionary
+        column_configs: Original column configurations (optional)
+    
+    Returns:
+        List of enriched column metadata dictionaries
+    """
+    enriched_columns = []
+    
+    # Create a lookup for column configs
+    config_lookup = {}
+    if column_configs:
+        for config in column_configs:
+            config_lookup[config.get('column_name')] = config
+    
+    for _, row in columns_metadata.iterrows():
+        col_name = row['col_name']
+        col_type = row['data_type']
+        col_comment = row.get('comment', '')
         
-        parts = table_fqn.split('.')
-        if len(parts) != 3:
-            return {'table_fqn': table_fqn, 'error': 'Invalid FQN', 'enriched': False}
+        # Get original config if exists
+        original_config = config_lookup.get(col_name, {})
         
-        catalog, schema, table = parts
+        enriched_col = {
+            'column_name': col_name,
+            'data_type': col_type,
+            'comment': col_comment,
+            'original_config': original_config
+        }
         
-        # Get column metadata
-        columns = self.get_table_metadata(table_fqn)
-        
-        # Enrich columns with samples
-        enriched_columns = []
-        for col in columns[:10]:  # Limit to first 10 columns for speed
-            enriched_col = col.copy()
+        # Only sample and build dictionaries if not excluded
+        if not original_config.get('exclude', False):
+            # Sample values if requested or by default
+            if original_config.get('enable_format_assistance', True):
+                sampled_values = sample_column_values(table_identifier, col_name, sample_size)
+                enriched_col['sample_values'] = sampled_values
             
-            # Sample values
-            samples = self.sample_column_values(table_fqn, col['col_name'], sample_size=5)
-            enriched_col['sample_values'] = samples
-            
-            enriched_columns.append(enriched_col)
+            # Build value dictionary if requested
+            if original_config.get('enable_entity_matching', False):
+                value_dict = build_value_dictionary(table_identifier, col_name, max_unique_values)
+                enriched_col['value_dictionary'] = value_dict
         
+        enriched_columns.append(enriched_col)
+    
+    return enriched_columns
+
+
+def enhance_comments_with_llm(columns: List[Dict], llm_endpoint: str) -> List[Dict]:
+    """
+    Use LLM to enhance column comments with better descriptions.
+    
+    Args:
+        columns: List of column dictionaries
+        llm_endpoint: LLM endpoint name
+    
+    Returns:
+        List of columns with enhanced comments
+    """
+    # Helper to serialize dates and other objects
+    def safe_json_default(obj):
+        if hasattr(obj, 'isoformat'):
+            return obj.isoformat()
+        return str(obj)
+    
+    # Prepare simplified version for LLM
+    simplified_cols = []
+    for col in columns:
+        simplified_cols.append({
+            'col_name': col['column_name'],
+            'data_type': col['data_type'],
+            'comment': col.get('comment', ''),
+            'sample_values': col.get('sample_values', [])[:10] if 'sample_values' in col else []
+        })
+    
+    prompt = (
+        "You will receive a list of database columns in JSON format. "
+        "Your task is to improve the 'comment' field for each column by:\n"
+        "1. Making it more descriptive and informative\n"
+        "2. Using the data_type and sample_values as context\n"
+        "3. Explaining what the column represents in plain English\n\n"
+        f"{json.dumps(simplified_cols, indent=2, default=safe_json_default)}\n\n"
+        "Return a JSON array with the same structure, but add an 'enhanced_comment' field "
+        "with your improved description. Only return valid JSON, no explanations."
+    )
+    
+    try:
+        llm_result = spark.sql(
+            f"SELECT ai_query('{llm_endpoint}', ?) as result", 
+            [prompt]
+        ).collect()[0]['result']
+        
+        # Clean up response
+        llm_result_str = llm_result.replace('```json', '').replace('```', '').strip()
+        enhanced_cols = json.loads(llm_result_str)
+        
+        # Merge enhanced comments back
+        for i, col in enumerate(columns):
+            if i < len(enhanced_cols) and 'enhanced_comment' in enhanced_cols[i]:
+                col['enhanced_comment'] = enhanced_cols[i]['enhanced_comment']
+        
+        return columns
+    except Exception as e:
+        print(f"Error enhancing comments with LLM: {str(e)}")
+        return columns
+
+
+def synthesize_table_description(table_identifier: str, enriched_columns: List[Dict], llm_endpoint: str) -> str:
+    """
+    Synthesize a comprehensive table description using column metadata.
+    
+    Args:
+        table_identifier: Fully qualified table name
+        enriched_columns: List of enriched column dictionaries
+        llm_endpoint: LLM endpoint name
+    
+    Returns:
+        Synthesized table description
+    """
+    # Helper to serialize dates and other objects
+    def safe_json_default(obj):
+        if hasattr(obj, 'isoformat'):
+            return obj.isoformat()
+        return str(obj)
+    
+    # Prepare column summary for LLM
+    col_summaries = []
+    for col in enriched_columns:
+        col_summary = {
+            'column_name': col['column_name'],
+            'data_type': col['data_type'],
+            'enhanced_comment': col.get('enhanced_comment', col.get('comment', '')),
+            'has_value_dictionary': 'value_dictionary' in col,
+            'sample_values': col.get('sample_values', [])[:3] if 'sample_values' in col else []
+        }
+        col_summaries.append(col_summary)
+    
+    prompt = (
+        f"You are analyzing a database table: {table_identifier}\n\n"
+        f"Here are the columns with their descriptions:\n"
+        f"{json.dumps(col_summaries, indent=2, default=safe_json_default)}\n\n"
+        "Based on this information, write a concise 2-3 sentence description of what this table contains "
+        "and its purpose. Focus on the data domain, key entities, and typical use cases. "
+        "Return only the description text, no JSON or formatting."
+    )
+    
+    try:
+        llm_result = spark.sql(
+            f"SELECT ai_query('{llm_endpoint}', ?) as result", 
+            [prompt]
+        ).collect()[0]['result']
+        
+        # Clean up response
+        table_description = llm_result.strip()
+        return table_description
+    except Exception as e:
+        print(f"Error synthesizing table description: {str(e)}")
+        # Fallback: create a simple description
+        return f"Table {table_identifier} with {len(enriched_columns)} columns."
+
+
+# ============================================================================
+# Main Enrichment Functions
+# ============================================================================
+
+def enrich_table(table_fqn: str, 
+                 sample_size: int = 20, 
+                 max_unique_values: int = 50, 
+                 llm_endpoint: str = "databricks-claude-sonnet-4-5") -> Dict[str, Any]:
+    """
+    Enrich a single table with comprehensive metadata.
+    
+    Args:
+        table_fqn: Fully qualified table name (catalog.schema.table)
+        sample_size: Number of sample values per column
+        max_unique_values: Maximum unique values for value dictionary
+        llm_endpoint: LLM endpoint for description enhancement
+    
+    Returns:
+        Enriched table metadata dictionary
+    """
+    print(f"\n{'='*80}")
+    print(f"Enriching table: {table_fqn}")
+    print(f"{'='*80}")
+    
+    # Parse FQN
+    parts = table_fqn.split('.')
+    if len(parts) != 3:
+        return {
+            'table_fqn': table_fqn,
+            'error': 'Invalid FQN format (expected catalog.schema.table)',
+            'enriched': False
+        }
+    
+    catalog, schema, table = parts
+    
+    try:
+        # Get base table metadata
+        table_metadata = get_table_metadata(table_fqn)
+        
+        if table_metadata.empty:
+            print(f"  ✗ Could not get metadata for {table_fqn}")
+            return {
+                'table_fqn': table_fqn,
+                'catalog': catalog,
+                'schema': schema,
+                'table': table,
+                'error': 'No metadata available',
+                'enriched': False
+            }
+        
+        # Enrich with samples and value dictionaries
+        print(f"  → Enriching {len(table_metadata)} columns...")
+        enriched_columns = enrich_column_metadata(
+            table_metadata, 
+            table_fqn, 
+            sample_size, 
+            max_unique_values,
+            column_configs=None  # No pre-existing configs for direct table enrichment
+        )
+        
+        # Enhance comments with LLM
+        print(f"  → Enhancing column comments with LLM...")
+        enriched_columns = enhance_comments_with_llm(enriched_columns, llm_endpoint)
+        
+        # Synthesize table description using enriched column metadata
+        print(f"  → Synthesizing table description...")
+        table_description = synthesize_table_description(table_fqn, enriched_columns, llm_endpoint)
+        
+        enriched_table = {
+            'table_fqn': table_fqn,
+            'catalog': catalog,
+            'schema': schema,
+            'table': table,
+            'table_description': table_description,
+            'enriched_columns': enriched_columns,
+            'total_columns': len(enriched_columns),
+            'enriched': True,
+            'enrichment_timestamp': datetime.now().isoformat()
+        }
+        
+        print(f"  ✓ Enriched {len(enriched_columns)} columns")
+        print(f"  ✓ Table description: {table_description[:100]}...")
+        
+        return enriched_table
+        
+    except Exception as e:
+        print(f"  ✗ Error enriching {table_fqn}: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return {
             'table_fqn': table_fqn,
             'catalog': catalog,
             'schema': schema,
             'table': table,
-            'column_count': len(columns),
-            'enriched_columns': enriched_columns,
-            'enriched': True,
-            'timestamp': str(sql.Timestamp.now()) if hasattr(sql, 'Timestamp') else ""
+            'error': str(e),
+            'enriched': False
         }
+
+
+def enrich_tables(table_fqns: List[str], 
+                  sample_size: int = 20, 
+                  max_unique_values: int = 50, 
+                  llm_endpoint: str = "databricks-claude-sonnet-4-5") -> List[Dict[str, Any]]:
+    """
+    Enrich multiple tables with comprehensive metadata.
     
-    def enrich_tables(self, table_fqns: List[str]) -> List[Dict[str, Any]]:
-        """
-        Enrich multiple tables.
-        
-        Args:
-            table_fqns: List of fully qualified table names
-        
-        Returns:
-            List of enriched table metadata dicts
-        """
-        enriched_tables = []
-        
-        for fqn in table_fqns:
-            try:
-                enriched = self.enrich_table(fqn)
-                enriched_tables.append(enriched)
-            except Exception as e:
-                print(f"Error enriching {fqn}: {e}")
-                enriched_tables.append({
-                    'table_fqn': fqn,
-                    'error': str(e),
-                    'enriched': False
-                })
-        
-        return enriched_tables
+    Args:
+        table_fqns: List of fully qualified table names
+        sample_size: Number of sample values per column
+        max_unique_values: Maximum unique values for value dictionary
+        llm_endpoint: LLM endpoint for description enhancement
     
-    def save_enriched_tables(self, enriched_tables: List[Dict[str, Any]], target_table: str = "serverless_dbx_unifiedchat_catalog.multi_agent_genie.enriched_tables_direct"):
-        """
-        Save enriched tables to Unity Catalog table via SQL warehouse.
+    Returns:
+        List of enriched table metadata dictionaries
+    """
+    print(f"\n{'='*80}")
+    print(f"Starting enrichment of {len(table_fqns)} tables")
+    print(f"{'='*80}")
+    
+    enriched_tables = []
+    
+    for fqn in table_fqns:
+        enriched = enrich_table(fqn, sample_size, max_unique_values, llm_endpoint)
+        enriched_tables.append(enriched)
+    
+    successful = sum(1 for t in enriched_tables if t.get('enriched', False))
+    print(f"\n{'='*80}")
+    print(f"Enrichment complete: {successful}/{len(table_fqns)} tables successful")
+    print(f"{'='*80}")
+    
+    return enriched_tables
+
+
+# ============================================================================
+# Chunk Generation for Vector Search
+# ============================================================================
+
+def create_table_chunks(enriched_tables: List[Dict]) -> List[Dict]:
+    """
+    Create multi-level chunks for vector search (table + column levels only).
+    
+    This follows the Hybrid Multi-Level Chunking strategy from the parent implementation,
+    but excludes space-level chunks.
+    
+    Args:
+        enriched_tables: List of enriched table dictionaries
+    
+    Returns:
+        List of chunk dictionaries with metadata for vector search
+    """
+    all_chunks = []
+    chunk_id = 0
+    
+    for table_doc in enriched_tables:
+        if not table_doc.get('enriched', False):
+            continue  # Skip failed enrichments
         
-        Args:
-            enriched_tables: List of enriched table dicts
-            target_table: Target UC table for storage
-        """
-        try:
-            conn = sql.connect(
-                server_hostname=self.config.host,
-                http_path=f"/sql/1.0/warehouses/{self.warehouse_id}",
-                credentials_provider=lambda: self.config.authenticate,
-            )
+        table_fqn = table_doc.get('table_fqn', '')
+        table_name = table_doc.get('table', '')
+        table_desc = table_doc.get('table_description', '')
+        enriched_columns = table_doc.get('enriched_columns', [])
+        
+        # ===================================================================
+        # Level 1: Table Overview Chunk
+        # ===================================================================
+        # Build column list with brief descriptions
+        column_lines = []
+        categorical_fields = []
+        
+        for col in enriched_columns:
+            col_name = col.get('column_name')
+            col_type = col.get('data_type')
+            enhanced_comment = col.get('enhanced_comment', col.get('comment', ''))
             
-            cursor = conn.cursor()
+            # Truncate long descriptions for overview
+            if len(enhanced_comment) > 300:
+                enhanced_comment = enhanced_comment[:300-3] + "..."
             
-            # Create table if not exists
-            cursor.execute(f"""
-            CREATE TABLE IF NOT EXISTS {target_table} (
-                table_fqn STRING,
-                enriched_doc STRING,
-                enrichment_timestamp TIMESTAMP
-            )
-            """)
+            column_lines.append(f"• {col_name} ({col_type}): {enhanced_comment}")
             
-            # Insert enriched data
-            for enriched in enriched_tables:
-                enriched_json = json.dumps(enriched)
-                cursor.execute(f"""
-                INSERT INTO {target_table}
-                VALUES ('{enriched['table_fqn']}', '{enriched_json}', current_timestamp())
-                """)
+            # Track categorical fields with top values
+            if 'value_dictionary' in col and col['value_dictionary']:
+                top_values = list(col['value_dictionary'].keys())[:5]
+                categorical_fields.append(f"• {col_name}: {', '.join(top_values)}")
+        
+        table_overview_text = f"""Table: {table_name}
+Full Path: {table_fqn}
+
+Table Description: {table_desc}
+
+Columns ({len(enriched_columns)} total):
+{chr(10).join(column_lines)}
+"""
+        
+        if categorical_fields:
+            table_overview_text += f"""
+Key Categorical Fields:
+{chr(10).join(categorical_fields)}
+"""
+        
+        all_chunks.append({
+            'chunk_id': chunk_id,
+            'chunk_type': 'table_overview',
+            'table_fqn': table_fqn,
+            'table_name': table_name,
+            'column_name': None,
+            'searchable_content': table_overview_text,
+            'is_categorical': any('value_dictionary' in c for c in enriched_columns),
+            'is_temporal': any(any(t in c.get('data_type', '').lower() for t in ['date', 'time', 'timestamp']) for c in enriched_columns),
+            'is_identifier': any(any(k in c['column_name'].lower() for k in ['_id', 'id_']) for c in enriched_columns),
+            'has_value_dictionary': any('value_dictionary' in c for c in enriched_columns),
+            'metadata_json': json.dumps({
+                'table_fqn': table_fqn,
+                'total_columns': len(enriched_columns)
+            }, default=json_serializer)
+        })
+        chunk_id += 1
+        
+        # ===================================================================
+        # Level 2: Column Detail Chunks (one per column)
+        # ===================================================================
+        for col in enriched_columns:
+            col_name = col.get('column_name')
+            col_type = col.get('data_type')
+            enhanced_comment = col.get('enhanced_comment', col.get('comment', ''))
+            sample_values = col.get('sample_values', [])
+            value_dict = col.get('value_dictionary', {})
             
-            cursor.close()
-            conn.close()
+            # Determine column characteristics
+            is_categorical = len(value_dict) > 0
+            is_temporal = any(t in col_type.lower() for t in ['date', 'time', 'timestamp'])
+            is_identifier = any(k in col_name.lower() for k in ['_id', 'id_'])
+            has_value_dictionary = len(value_dict) > 0
             
-            print(f"✓ Saved {len(enriched_tables)} enriched tables to {target_table}")
+            # Build column detail text
+            column_detail_text = f"""Column: {col_name}
+Table: {table_name}
+Full Table Path: {table_fqn}
+Data Type: {col_type}
+
+Description: {enhanced_comment}
+"""
             
-        except Exception as e:
-            print(f"Error saving enriched tables: {e}")
+            # Add sample values (limited to 5 for readability)
+            if sample_values:
+                limited_samples = sample_values[:5]
+                column_detail_text += f"""
+Sample Values: {', '.join([str(v) for v in limited_samples])}
+"""
+            
+            # Add top values from value dictionary
+            if value_dict:
+                top_entries = sorted(value_dict.items(), key=lambda x: x[1], reverse=True)[:10]
+                value_lines = [f"  - {val}: {count:,} records" for val, count in top_entries]
+                column_detail_text += f"""
+Top Values:
+{chr(10).join(value_lines)}
+"""
+            
+            # Add classification info
+            characteristics = []
+            if is_categorical:
+                characteristics.append("categorical")
+            if is_temporal:
+                characteristics.append("temporal")
+            if is_identifier:
+                characteristics.append("identifier")
+            
+            if characteristics:
+                column_detail_text += f"""
+Classification: {', '.join(characteristics)}
+"""
+            
+            all_chunks.append({
+                'chunk_id': chunk_id,
+                'chunk_type': 'column_detail',
+                'table_fqn': table_fqn,
+                'table_name': table_name,
+                'column_name': col_name,
+                'searchable_content': column_detail_text,
+                'is_categorical': is_categorical,
+                'is_temporal': is_temporal,
+                'is_identifier': is_identifier,
+                'has_value_dictionary': has_value_dictionary,
+                'metadata_json': json.dumps({
+                    'data_type': col_type,
+                    'sample_values': sample_values[:5],
+                    'value_dictionary_size': len(value_dict)
+                }, default=json_serializer)
+            })
+            chunk_id += 1
+    
+    return all_chunks
+
+
+# ============================================================================
+# Save to Unity Catalog
+# ============================================================================
+
+def save_to_unity_catalog(enriched_tables: List[Dict], 
+                          chunks: List[Dict],
+                          catalog_name: str = "yyang",
+                          schema_name: str = "multi_agent_genie",
+                          enriched_docs_table: str = "enriched_tables_direct",
+                          chunks_table: str = "enriched_tables_chunks") -> None:
+    """
+    Save enriched tables and chunks to Unity Catalog delta tables.
+    
+    Args:
+        enriched_tables: List of enriched table dictionaries
+        chunks: List of chunk dictionaries
+        catalog_name: Target catalog name
+        schema_name: Target schema name
+        enriched_docs_table: Name for enriched docs table
+        chunks_table: Name for chunks table
+    """
+    # Ensure catalog and schema exist
+    try:
+        spark.sql(f"CREATE CATALOG IF NOT EXISTS `{catalog_name}`")
+    except Exception:
+        pass
+    spark.sql(f"USE CATALOG `{catalog_name}`")
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{schema_name}`")
+    spark.sql(f"USE SCHEMA `{schema_name}`")
+    
+    print(f"\n{'='*80}")
+    print(f"Saving to Unity Catalog: {catalog_name}.{schema_name}")
+    print(f"{'='*80}")
+    
+    # Save enriched docs
+    if enriched_tables:
+        enriched_docs_json = [json.dumps(doc, default=json_serializer) for doc in enriched_tables]
+        df_enriched = spark.createDataFrame(
+            [(i, doc_json, doc['table_fqn'], doc.get('enriched', False)) 
+             for i, (doc_json, doc) in enumerate(zip(enriched_docs_json, enriched_tables))],
+            schema="id INT, enriched_doc STRING, table_fqn STRING, enriched BOOLEAN"
+        )
+        
+        full_table_name = f"{catalog_name}.{schema_name}.{enriched_docs_table}"
+        df_enriched.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(full_table_name)
+        print(f"✓ Saved {df_enriched.count()} enriched docs to: {full_table_name}")
+    
+    # Save chunks
+    if chunks:
+        df_chunks = spark.createDataFrame(chunks)
+        full_chunks_table = f"{catalog_name}.{schema_name}.{chunks_table}"
+        df_chunks.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(full_chunks_table)
+        print(f"✓ Saved {df_chunks.count()} chunks to: {full_chunks_table}")
+        
+        # Show chunk distribution
+        chunk_type_counts = {}
+        for chunk in chunks:
+            chunk_type = chunk['chunk_type']
+            chunk_type_counts[chunk_type] = chunk_type_counts.get(chunk_type, 0) + 1
+        
+        print("\nChunk distribution:")
+        for chunk_type, count in chunk_type_counts.items():
+            print(f"  - {chunk_type}: {count} chunks")
+
+
+# ============================================================================
+# Entry Point for Databricks Job
+# ============================================================================
+
+if __name__ == "__main__":
+    import sys
+    
+    # Parse job parameters
+    # Expected: python enrich_tables_direct.py "table1,table2,table3" 20 50
+    table_fqns_str = sys.argv[1] if len(sys.argv) > 1 else ""
+    sample_size = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+    max_unique_values = int(sys.argv[3]) if len(sys.argv) > 3 else 50
+    llm_endpoint = sys.argv[4] if len(sys.argv) > 4 else "databricks-claude-sonnet-4-5"
+    
+    # Parse comma-separated table FQNs
+    table_fqns = [fqn.strip() for fqn in table_fqns_str.split(',') if fqn.strip()]
+    
+    if not table_fqns:
+        print("Error: No table FQNs provided")
+        print("Usage: python enrich_tables_direct.py 'catalog.schema.table1,catalog.schema.table2' [sample_size] [max_unique_values] [llm_endpoint]")
+        sys.exit(1)
+    
+    print(f"Parameters:")
+    print(f"  Tables: {len(table_fqns)}")
+    print(f"  Sample size: {sample_size}")
+    print(f"  Max unique values: {max_unique_values}")
+    print(f"  LLM endpoint: {llm_endpoint}")
+    
+    # Run enrichment
+    enriched = enrich_tables(table_fqns, sample_size, max_unique_values, llm_endpoint)
+    
+    # Create chunks
+    chunks = create_table_chunks(enriched)
+    
+    # Save to Unity Catalog
+    save_to_unity_catalog(enriched, chunks)
+    
+    print("\n" + "="*80)
+    print("Enrichment job complete!")
+    print("="*80)

@@ -68,6 +68,7 @@ class EnrichmentStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class EnrichmentRunIn(BaseModel):
@@ -75,8 +76,30 @@ class EnrichmentRunIn(BaseModel):
     table_fqns: List[str]
 
 
+class EnrichmentJobOut(BaseModel):
+    """Response when submitting enrichment job."""
+    run_id: int
+    job_url: str
+    status: EnrichmentStatus
+    table_count: int
+    submitted_at: str
+
+
+class EnrichmentJobStatusOut(BaseModel):
+    """Job status response."""
+    run_id: int
+    status: EnrichmentStatus
+    job_url: str
+    life_cycle_state: Optional[str] = None  # PENDING, RUNNING, TERMINATING, TERMINATED
+    result_state: Optional[str] = None  # SUCCESS, FAILED, CANCELLED
+    state_message: Optional[str] = None
+    start_time: Optional[int] = None
+    end_time: Optional[int] = None
+    duration_ms: Optional[int] = None
+
+
 class EnrichmentStatusOut(BaseModel):
-    """Enrichment job status."""
+    """Enrichment job status (legacy - kept for compatibility)."""
     job_id: str
     status: EnrichmentStatus
     progress: int
