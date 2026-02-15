@@ -15,6 +15,8 @@ const queryClient = new QueryClient({
       // Suspense disabled - causes issues with TanStack Router in dev
       suspense: false,
       refetchOnWindowFocus: false,
+      refetchOnMount: true,
+      staleTime: 0, // Always consider data stale, refetch on mount
       retry: 1,
     },
   },

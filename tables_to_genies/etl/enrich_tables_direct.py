@@ -610,7 +610,8 @@ def save_to_unity_catalog(enriched_tables: List[Dict],
                           catalog_name: str = "yyang",
                           schema_name: str = "multi_agent_genie",
                           enriched_docs_table: str = "enriched_tables_direct",
-                          chunks_table: str = "enriched_tables_chunks") -> None:
+                          chunks_table: str = "enriched_tables_chunks",
+                          write_mode: str = "overwrite") -> None:
     """
     Save enriched tables and chunks to Unity Catalog delta tables.
     
@@ -621,6 +622,7 @@ def save_to_unity_catalog(enriched_tables: List[Dict],
         schema_name: Target schema name
         enriched_docs_table: Name for enriched docs table
         chunks_table: Name for chunks table
+        write_mode: Write mode - "overwrite", "append", or "error"
     """
     # Ensure catalog and schema exist
     try:
@@ -645,15 +647,15 @@ def save_to_unity_catalog(enriched_tables: List[Dict],
         )
         
         full_table_name = f"{catalog_name}.{schema_name}.{enriched_docs_table}"
-        df_enriched.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(full_table_name)
-        print(f"✓ Saved {df_enriched.count()} enriched docs to: {full_table_name}")
+        df_enriched.write.mode(write_mode).option("overwriteSchema", "true").saveAsTable(full_table_name)
+        print(f"✓ Saved {df_enriched.count()} enriched docs to: {full_table_name} (mode: {write_mode})")
     
     # Save chunks
     if chunks:
         df_chunks = spark.createDataFrame(chunks)
         full_chunks_table = f"{catalog_name}.{schema_name}.{chunks_table}"
-        df_chunks.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(full_chunks_table)
-        print(f"✓ Saved {df_chunks.count()} chunks to: {full_chunks_table}")
+        df_chunks.write.mode(write_mode).option("overwriteSchema", "true").saveAsTable(full_chunks_table)
+        print(f"✓ Saved {df_chunks.count()} chunks to: {full_chunks_table} (mode: {write_mode})")
         
         # Show chunk distribution
         chunk_type_counts = {}
@@ -671,28 +673,59 @@ def save_to_unity_catalog(enriched_tables: List[Dict],
 # ============================================================================
 
 if __name__ == "__main__":
-    import sys
-    
-    # Parse job parameters
-    # Expected: python enrich_tables_direct.py "table1,table2,table3" 20 50
-    table_fqns_str = sys.argv[1] if len(sys.argv) > 1 else ""
-    sample_size = int(sys.argv[2]) if len(sys.argv) > 2 else 20
-    max_unique_values = int(sys.argv[3]) if len(sys.argv) > 3 else 50
-    llm_endpoint = sys.argv[4] if len(sys.argv) > 4 else "databricks-claude-sonnet-4-5"
+    # Get parameters from notebook widgets (Databricks notebook style)
+    # These are set when running as a notebook task via Jobs API
+    try:
+        # Try to use dbutils widgets (notebook mode)
+        table_fqns_str = dbutils.widgets.get("tables")
+        sample_size = int(dbutils.widgets.get("sample_size"))
+        max_unique_values = int(dbutils.widgets.get("max_unique_values"))
+        llm_endpoint = dbutils.widgets.get("llm_endpoint")
+        metadata_table_full = dbutils.widgets.get("metadata_table")
+        chunks_table_full = dbutils.widgets.get("chunks_table")
+        write_mode = dbutils.widgets.get("write_mode")
+    except:
+        # Fallback to sys.argv for local testing
+        import sys
+        table_fqns_str = sys.argv[1] if len(sys.argv) > 1 else ""
+        sample_size = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+        max_unique_values = int(sys.argv[3]) if len(sys.argv) > 3 else 50
+        llm_endpoint = sys.argv[4] if len(sys.argv) > 4 else "databricks-claude-sonnet-4-5"
+        metadata_table_full = sys.argv[5] if len(sys.argv) > 5 else "serverless_dbx_unifiedchat_catalog.gold.enriched_table_metadata"
+        chunks_table_full = sys.argv[6] if len(sys.argv) > 6 else "serverless_dbx_unifiedchat_catalog.gold.enriched_table_chunks"
+        write_mode = sys.argv[7] if len(sys.argv) > 7 else "overwrite"
     
     # Parse comma-separated table FQNs
     table_fqns = [fqn.strip() for fqn in table_fqns_str.split(',') if fqn.strip()]
     
     if not table_fqns:
         print("Error: No table FQNs provided")
-        print("Usage: python enrich_tables_direct.py 'catalog.schema.table1,catalog.schema.table2' [sample_size] [max_unique_values] [llm_endpoint]")
-        sys.exit(1)
+        print("Usage: Provide 'tables' parameter with comma-separated FQNs")
+        raise ValueError("No table FQNs provided")
+    
+    # Parse destination table names (format: catalog.schema.table)
+    metadata_parts = metadata_table_full.split('.')
+    chunks_parts = chunks_table_full.split('.')
+    
+    if len(metadata_parts) != 3 or len(chunks_parts) != 3:
+        print(f"Error: Invalid table format. Expected 'catalog.schema.table'")
+        print(f"  Metadata table: {metadata_table_full}")
+        print(f"  Chunks table: {chunks_table_full}")
+        raise ValueError("Invalid table format")
+    
+    catalog_name = metadata_parts[0]
+    schema_name = metadata_parts[1]
+    metadata_table_name = metadata_parts[2]
+    chunks_table_name = chunks_parts[2]
     
     print(f"Parameters:")
     print(f"  Tables: {len(table_fqns)}")
     print(f"  Sample size: {sample_size}")
     print(f"  Max unique values: {max_unique_values}")
     print(f"  LLM endpoint: {llm_endpoint}")
+    print(f"  Metadata table: {metadata_table_full}")
+    print(f"  Chunks table: {chunks_table_full}")
+    print(f"  Write mode: {write_mode}")
     
     # Run enrichment
     enriched = enrich_tables(table_fqns, sample_size, max_unique_values, llm_endpoint)
@@ -701,7 +734,15 @@ if __name__ == "__main__":
     chunks = create_table_chunks(enriched)
     
     # Save to Unity Catalog
-    save_to_unity_catalog(enriched, chunks)
+    save_to_unity_catalog(
+        enriched, 
+        chunks,
+        catalog_name=catalog_name,
+        schema_name=schema_name,
+        enriched_docs_table=metadata_table_name,
+        chunks_table=chunks_table_name,
+        write_mode=write_mode
+    )
     
     print("\n" + "="*80)
     print("Enrichment job complete!")

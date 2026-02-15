@@ -3,17 +3,18 @@ FastAPI routes following APX patterns.
 All routes have response_model and operation_id (required for OpenAPI generation).
 """
 from fastapi import APIRouter, HTTPException
-from typing import List
+from typing import List, Dict, Any
 from .models import *
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
-from databricks.sdk.service.jobs import Task, SparkPythonTask, JobEnvironment, JobParameter
+from databricks.sdk.service.jobs import Task, NotebookTask, JobEnvironment, Source
 from databricks.sdk.service.compute import Environment
 from databricks import sql
 import uuid
 import threading
 import os
 import json
+import asyncio
 from datetime import datetime
 
 # Initialize SDK
@@ -145,21 +146,17 @@ async def run_enrichment(enrichment_in: EnrichmentRunIn):
         job_id = existing_jobs[0].job_id
         print(f"Using existing job: {job_id}")
     else:
-        # Create new persistent job
+        # Create new persistent job using notebook task
         print(f"Creating new job: {job_name}")
         job = client.jobs.create(
             name=job_name,
             tasks=[
                 Task(
                     task_key="enrich_tables",
-                    spark_python_task=SparkPythonTask(
-                        python_file=ENRICHMENT_SCRIPT_PATH,
-                        parameters=[
-                            "{{tables}}",  # Parameter placeholder
-                            "{{sample_size}}",
-                            "{{max_unique_values}}",
-                            "{{llm_endpoint}}"
-                        ]
+                    notebook_task=NotebookTask(
+                        notebook_path=ENRICHMENT_SCRIPT_PATH,
+                        source=Source.WORKSPACE
+                        # base_parameters will be overridden on each run via run_now()
                     ),
                     environment_key="serverless_env"
                 )
@@ -171,25 +168,22 @@ async def run_enrichment(enrichment_in: EnrichmentRunIn):
                         client="1"  # Serverless environment
                     )
                 )
-            ],
-            parameters=[
-                JobParameter(name="tables", default=""),
-                JobParameter(name="sample_size", default="20"),
-                JobParameter(name="max_unique_values", default="50"),
-                JobParameter(name="llm_endpoint", default="databricks-claude-sonnet-4-5")
             ]
         )
         job_id = job.job_id
         print(f"Created job: {job_id}")
     
-    # Run the job with actual parameters
+    # Run the job with notebook parameters
     run_result = client.jobs.run_now(
         job_id=job_id,
-        job_parameters={
+        notebook_params={
             "tables": table_fqns_str,
             "sample_size": "20",
             "max_unique_values": "50",
-            "llm_endpoint": "databricks-claude-sonnet-4-5"
+            "llm_endpoint": "databricks-claude-sonnet-4-5",
+            "metadata_table": enrichment_in.metadata_table,
+            "chunks_table": enrichment_in.chunks_table,
+            "write_mode": enrichment_in.write_mode
         }
     )
     
@@ -220,8 +214,10 @@ async def get_enrichment_status(run_id: int):
     result_state = run.state.result_state.value if run.state.result_state else None
     
     status = EnrichmentStatus.PENDING
-    if life_cycle_state == "RUNNING":
+    if life_cycle_state == "RUNNING" or life_cycle_state == "PENDING":
         status = EnrichmentStatus.RUNNING
+    elif life_cycle_state == "TERMINATING":
+        status = EnrichmentStatus.RUNNING  # Still considered running
     elif life_cycle_state == "TERMINATED":
         if result_state == "SUCCESS":
             status = EnrichmentStatus.COMPLETED
@@ -229,8 +225,15 @@ async def get_enrichment_status(run_id: int):
             status = EnrichmentStatus.FAILED
         elif result_state == "CANCELED":
             status = EnrichmentStatus.CANCELLED
+        else:
+            status = EnrichmentStatus.FAILED  # Default to failed for unknown result states
+    elif life_cycle_state == "SKIPPED":
+        status = EnrichmentStatus.CANCELLED
+    elif life_cycle_state == "INTERNAL_ERROR":
+        status = EnrichmentStatus.FAILED
     
-    job_url = f"{config.host}/#job/{run_id}"
+    # Use the correct job URL from Databricks
+    job_url = run.run_page_url
     
     return EnrichmentJobStatusOut(
         run_id=run_id,
@@ -525,3 +528,75 @@ async def list_created_genie_rooms():
         table_count=r['table_count'],
         status=GenieRoomStatus.CREATED
     ) for r in _genie_creation_status.rooms if r['status'] == 'created']
+
+
+def _execute_preview_query(table_fqn: str):
+    """Helper function to execute preview queries using Spark SQL."""
+    from pyspark.sql import SparkSession
+    from datetime import date, datetime
+    from decimal import Decimal
+    
+    # Get or create Spark session
+    spark = SparkSession.builder.getOrCreate()
+    
+    # Get row count
+    count_df = spark.sql(f"SELECT COUNT(*) as count FROM {table_fqn}")
+    row_count = count_df.collect()[0][0]
+    
+    # Get sample rows
+    sample_df = spark.sql(f"SELECT * FROM {table_fqn} LIMIT 10")
+    
+    # Get column names
+    columns = sample_df.columns
+    
+    # Convert rows to dictionaries with JSON-serializable types
+    rows = []
+    for row in sample_df.collect():
+        row_dict = {}
+        for col in columns:
+            val = row[col]
+            
+            # Convert to JSON-serializable types
+            if val is None:
+                row_dict[col] = None
+            elif isinstance(val, (date, datetime)):
+                row_dict[col] = val.isoformat()
+            elif isinstance(val, Decimal):
+                row_dict[col] = float(val)
+            elif isinstance(val, (bytes, bytearray)):
+                row_dict[col] = val.hex()
+            elif isinstance(val, (list, dict)):
+                row_dict[col] = str(val) if len(str(val)) < 1000 else str(val)[:1000] + "..."
+            else:
+                val_str = str(val)
+                row_dict[col] = val_str if len(val_str) < 1000 else val_str[:1000] + "..."
+        
+        rows.append(row_dict)
+    
+    return row_count, columns, rows
+
+@api.get("/enrichment/preview/{table_fqn:path}", response_model=TablePreviewOut, operation_id="previewEnrichmentTable")
+async def preview_enrichment_table(table_fqn: str):
+    """Preview a table from Unity Catalog."""
+    
+    try:
+        # Parse table FQN
+        parts = table_fqn.split(".")
+        if len(parts) != 3:
+            raise HTTPException(status_code=400, detail="Table FQN must be in format catalog.schema.table")
+        
+        catalog_name, schema_name, table_name = parts
+        
+        # Run blocking SDK call in thread pool to avoid blocking event loop
+        row_count, columns, rows = await asyncio.to_thread(_execute_preview_query, table_fqn)
+        
+        return TablePreviewOut(
+            table_fqn=table_fqn,
+            row_count=row_count,
+            columns=columns,
+            sample_rows=rows
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to preview table: {str(e)}")

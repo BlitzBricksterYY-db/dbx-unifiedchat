@@ -1,9 +1,12 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { Suspense, useState } from 'react';
-import { useGetSelectionSuspense, useRunEnrichment, useGetEnrichmentStatusSuspense, useListEnrichmentResultsSuspense } from '@/lib/api';
+import { useGetSelectionSuspense, useRunEnrichment, useGetEnrichmentStatusSuspense } from '@/lib/api';
 import { selector } from '@/lib/selector';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ArrowLeft, ExternalLink } from 'lucide-react';
 
@@ -22,12 +25,20 @@ function EnrichmentView() {
   const { data: selection } = useGetSelectionSuspense(selector());
   const [jobId, setJobId] = useState<number | null>(null);
   const [jobUrl, setJobUrl] = useState<string | null>(null);
+  const [metadataTable, setMetadataTable] = useState('serverless_dbx_unifiedchat_catalog.gold.enriched_table_metadata');
+  const [chunksTable, setChunksTable] = useState('serverless_dbx_unifiedchat_catalog.gold.enriched_table_chunks');
+  const [writeMode, setWriteMode] = useState<'overwrite' | 'append' | 'error'>('overwrite');
   const runEnrichmentMutation = useRunEnrichment();
   const navigate = useNavigate();
 
   const handleRunEnrichment = async () => {
     const result = await runEnrichmentMutation.mutateAsync({
-      data: { table_fqns: selection.table_fqns }
+      data: { 
+        table_fqns: selection.table_fqns,
+        metadata_table: metadataTable,
+        chunks_table: chunksTable,
+        write_mode: writeMode
+      }
     });
     // result now contains: {run_id, job_url, status}
     setJobId(result.run_id);
@@ -51,22 +62,67 @@ function EnrichmentView() {
           </div>
 
           {!jobId && (
-            <Button onClick={handleRunEnrichment} disabled={runEnrichmentMutation.isPending}>
-              {runEnrichmentMutation.isPending ? 'Starting...' : 'Run Enrichment'}
-            </Button>
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="metadata-table">Metadata Table (Destination)</Label>
+                  <Input
+                    id="metadata-table"
+                    value={metadataTable}
+                    onChange={(e) => setMetadataTable(e.target.value)}
+                    placeholder="catalog.schema.table"
+                    className="font-mono text-sm"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Enriched table metadata will be written here
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="chunks-table">Chunks Table (Destination)</Label>
+                  <Input
+                    id="chunks-table"
+                    value={chunksTable}
+                    onChange={(e) => setChunksTable(e.target.value)}
+                    placeholder="catalog.schema.table"
+                    className="font-mono text-sm"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Table/column chunks for vector search will be written here
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="write-mode">Write Mode</Label>
+                <Select value={writeMode} onValueChange={(value: any) => setWriteMode(value)}>
+                  <SelectTrigger id="write-mode" className="w-full md:w-64">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="overwrite">Overwrite (replace existing data)</SelectItem>
+                    <SelectItem value="append">Append (add to existing data)</SelectItem>
+                    <SelectItem value="error">Error (fail if table exists)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <Button onClick={handleRunEnrichment} disabled={runEnrichmentMutation.isPending}>
+                {runEnrichmentMutation.isPending ? 'Starting...' : 'Run Enrichment'}
+              </Button>
+            </div>
           )}
         </CardContent>
       </Card>
 
       {jobId && jobUrl && (
         <Suspense fallback={<Skeleton className="h-32 w-full" />}>
-          <EnrichmentProgress jobId={jobId} jobUrl={jobUrl} />
-        </Suspense>
-      )}
-
-      {jobId && (
-        <Suspense fallback={<Skeleton className="h-64 w-full" />}>
-          <EnrichmentResults />
+          <EnrichmentProgress 
+            jobId={jobId} 
+            jobUrl={jobUrl}
+            metadataTable={metadataTable}
+            chunksTable={chunksTable}
+          />
         </Suspense>
       )}
 
@@ -84,7 +140,17 @@ function EnrichmentView() {
   );
 }
 
-function EnrichmentProgress({ jobId, jobUrl }: { jobId: number, jobUrl: string }) {
+function EnrichmentProgress({ 
+  jobId, 
+  jobUrl, 
+  metadataTable, 
+  chunksTable 
+}: { 
+  jobId: number; 
+  jobUrl: string;
+  metadataTable: string;
+  chunksTable: string;
+}) {
   const { data: status } = useGetEnrichmentStatusSuspense(jobId, {
     query: {
       refetchInterval: (query) => {
@@ -161,46 +227,44 @@ function EnrichmentProgress({ jobId, jobUrl }: { jobId: number, jobUrl: string }
           )}
           
           {status.status === 'completed' && (
-            <div className="text-sm text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/20 rounded p-3 border border-green-200 dark:border-green-800">
-              ✓ Enrichment completed successfully!
-            </div>
+            <>
+              <div className="text-sm text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/20 rounded p-3 border border-green-200 dark:border-green-800">
+                ✓ Enrichment completed successfully!
+              </div>
+              
+              <div className="mt-4 space-y-3">
+                <div className="text-sm font-semibold text-slate-700 dark:text-slate-300">Output Tables:</div>
+                
+                <div className="flex flex-col gap-2">
+                  <a
+                    href={`https://fevm-serverless-dbx-unifiedchat.cloud.databricks.com/explore/data/${metadataTable.split('.')[0]}/${metadataTable.split('.')[1]}/${metadataTable.split('.')[2]}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-2 px-4 py-3 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg border border-slate-200 dark:border-slate-700 transition-colors"
+                  >
+                    <ExternalLink size={16} className="text-blue-600 dark:text-blue-400" />
+                    <div className="flex-1">
+                      <div className="text-sm font-medium text-slate-900 dark:text-slate-100">Metadata Table</div>
+                      <div className="text-xs font-mono text-slate-600 dark:text-slate-400">{metadataTable}</div>
+                    </div>
+                  </a>
+                  
+                  <a
+                    href={`https://fevm-serverless-dbx-unifiedchat.cloud.databricks.com/explore/data/${chunksTable.split('.')[0]}/${chunksTable.split('.')[1]}/${chunksTable.split('.')[2]}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-2 px-4 py-3 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg border border-slate-200 dark:border-slate-700 transition-colors"
+                  >
+                    <ExternalLink size={16} className="text-blue-600 dark:text-blue-400" />
+                    <div className="flex-1">
+                      <div className="text-sm font-medium text-slate-900 dark:text-slate-100">Chunks Table</div>
+                      <div className="text-xs font-mono text-slate-600 dark:text-slate-400">{chunksTable}</div>
+                    </div>
+                  </a>
+                </div>
+              </div>
+            </>
           )}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function EnrichmentResults() {
-  const { data: results } = useListEnrichmentResultsSuspense(selector());
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Enrichment Results</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="rounded-md border">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b">
-                <th className="text-left p-3">Table</th>
-                <th className="text-right p-3">Columns</th>
-                <th className="text-center p-3">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {results.map((result) => (
-                <tr key={result.fqn} className="border-b last:border-0">
-                  <td className="p-3 text-sm">{result.fqn}</td>
-                  <td className="p-3 text-sm text-right">{result.column_count}</td>
-                  <td className="p-3 text-center">
-                    {result.enriched ? '✓' : '✗'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
         </div>
       </CardContent>
     </Card>

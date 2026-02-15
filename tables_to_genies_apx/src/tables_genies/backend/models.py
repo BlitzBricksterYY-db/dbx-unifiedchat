@@ -2,7 +2,7 @@
 Pydantic models following APX 3-model pattern.
 """
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 from enum import Enum
 
@@ -74,6 +74,9 @@ class EnrichmentStatus(str, Enum):
 class EnrichmentRunIn(BaseModel):
     """Input for running enrichment."""
     table_fqns: List[str]
+    metadata_table: Optional[str] = "serverless_dbx_unifiedchat_catalog.gold.enriched_table_metadata"
+    chunks_table: Optional[str] = "serverless_dbx_unifiedchat_catalog.gold.enriched_table_chunks"
+    write_mode: Optional[str] = "overwrite"  # overwrite, append, or error
 
 
 class EnrichmentJobOut(BaseModel):
@@ -125,6 +128,14 @@ class EnrichmentResultOut(BaseModel):
     columns: List[ColumnEnriched]
     enriched: bool
     timestamp: str
+
+
+class TablePreviewOut(BaseModel):
+    """Preview of a table."""
+    table_fqn: str
+    row_count: int
+    columns: List[str]
+    sample_rows: List[Dict[str, Any]]
 
 
 class EnrichmentResultListOut(BaseModel):
