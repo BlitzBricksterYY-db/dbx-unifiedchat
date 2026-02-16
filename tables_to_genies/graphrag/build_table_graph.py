@@ -53,14 +53,18 @@ class GraphRAGTableGraphBuilder:
             fqn = table_data['fqn']
             catalog = table_data.get('catalog', fqn.split('.')[0])
             schema = table_data.get('schema', fqn.split('.')[1])
+            table_name = table_data.get('table', fqn.split('.')[-1])
             
-            # Table entity
+            # Table entity with rich metadata
             entities['tables'][fqn] = {
                 'fqn': fqn,
                 'catalog': catalog,
                 'schema': schema,
+                'table': table_name,
                 'column_count': table_data.get('column_count', 0),
                 'columns': [col.get('name') for col in table_data.get('columns', [])],
+                'table_description': table_data.get('table_description', ''),
+                'enriched_columns': table_data.get('enriched_columns', []),
             }
             
             # Column entities (for FK detection)
@@ -396,7 +400,7 @@ Only identify meaningful relationships (confidence >= 5). Return valid JSON only
     
     def to_cytoscape_format(self) -> Dict[str, Any]:
         """
-        Convert graph to Cytoscape.js format.
+        Convert graph to Cytoscape.js format with rich metadata.
         
         Returns:
             Dict with elements list for Cytoscape.js
@@ -406,8 +410,19 @@ Only identify meaningful relationships (confidence >= 5). Return valid JSON only
         
         elements = []
         
-        # Nodes
+        # Nodes with full metadata
         for node, data in self.graph.nodes(data=True):
+            # Build simplified columns list for hover panel
+            columns_detail = []
+            enriched_cols = data.get('enriched_columns', [])
+            for col in enriched_cols:
+                columns_detail.append({
+                    'name': col.get('column_name', ''),
+                    'type': col.get('data_type', ''),
+                    'comment': col.get('enhanced_comment', col.get('comment', '')),
+                    'sample_values': col.get('sample_values', [])[:3]  # Only first 3 samples
+                })
+            
             elements.append({
                 'data': {
                     'id': node,
@@ -416,6 +431,8 @@ Only identify meaningful relationships (confidence >= 5). Return valid JSON only
                     'schema': data.get('schema', ''),
                     'column_count': data.get('column_count', 0),
                     'community': data.get('community', 0),
+                    'table_description': data.get('table_description', ''),
+                    'columns': columns_detail,
                 },
                 'classes': f"community-{data.get('community', 0)}"
             })
