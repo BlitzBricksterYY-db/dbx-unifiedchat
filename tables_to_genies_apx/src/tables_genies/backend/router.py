@@ -1,6 +1,14 @@
 """
 FastAPI routes following APX patterns.
 All routes have response_model and operation_id (required for OpenAPI generation).
+
+Service Principal Authentication:
+This backend uses Service Principal (App SP) authentication for Databricks.
+Required environment variables:
+- DATABRICKS_HOST: Workspace URL (e.g., https://adb-1234567890123456.7.azuredatabricks.net/)
+- DATABRICKS_CLIENT_ID: Service Principal Application ID
+- DATABRICKS_CLIENT_SECRET: Service Principal Secret
+- DATABRICKS_SQL_WAREHOUSE_ID: SQL Warehouse ID for Genie spaces (optional, defaults to configured ID)
 """
 from fastapi import APIRouter, HTTPException
 from typing import List, Dict, Any
@@ -16,13 +24,60 @@ import threading
 import os
 import json
 import asyncio
-import requests
 from datetime import datetime
+import logging
 
-# Initialize SDK
-config = Config()
-client = WorkspaceClient(config=config)
-warehouse_id = "a4ed2ccbda385db9"
+logger = logging.getLogger(__name__)
+
+# Initialize SDK with environment-aware authentication
+# - Local development: Uses PROD profile with PAT from ~/.databrickscfg
+# - Databricks App: Uses App Service Principal (SP) authentication automatically
+def _is_running_in_databricks_app() -> bool:
+    """Detect if running in a Databricks App environment."""
+    # Check for Databricks App environment variables
+    return (
+        os.getenv("DATABRICKS_RUNTIME_VERSION") is not None or
+        os.getenv("DB_IS_DRIVER") == "TRUE" or
+        (os.getenv("DATABRICKS_CLIENT_ID") is not None and 
+         os.getenv("DATABRICKS_CLIENT_SECRET") is not None)
+    )
+
+# Configure authentication based on environment
+if _is_running_in_databricks_app():
+    logger.info("[Auth] Running in Databricks App - using App SP authentication")
+    print("[Auth] Running in Databricks App - using App SP authentication", flush=True)
+    
+    # Validate required Service Principal environment variables
+    required_env_vars = ["DATABRICKS_HOST", "DATABRICKS_CLIENT_ID", "DATABRICKS_CLIENT_SECRET"]
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+    
+    if missing_vars:
+        raise ValueError(f"Missing required Service Principal environment variables: {missing_vars}")
+    
+    config = Config(
+        host=os.getenv("DATABRICKS_HOST"),
+        client_id=os.getenv("DATABRICKS_CLIENT_ID"),
+        client_secret=os.getenv("DATABRICKS_CLIENT_SECRET")
+    )
+else:
+    logger.info("[Auth] Running locally - using PROD profile with PAT")
+    print("[Auth] Running locally - using PROD profile with PAT", flush=True)
+    config = Config(profile="PROD")  # Local dev with PAT from ~/.databrickscfg
+
+try:
+    client = WorkspaceClient(config=config)
+    # Test the authentication by getting current user
+    current_user = client.current_user.me()
+    logger.info(f"[Auth] ✅ Successfully authenticated: {current_user.display_name}")
+    print(f"[Auth] ✅ Successfully authenticated: {current_user.display_name}", flush=True)
+except Exception as e:
+    logger.error(f"[Auth] ❌ Authentication failed: {e}")
+    print(f"[Auth] ❌ Authentication failed: {e}", flush=True)
+    raise
+
+warehouse_id = os.getenv("DATABRICKS_SQL_WAREHOUSE_ID", "a4ed2ccbda385db9")
+logger.info(f"[Config] Using SQL Warehouse ID: {warehouse_id}")
+print(f"[Config] Using SQL Warehouse ID: {warehouse_id}", flush=True)
 
 # In-memory storage with file persistence for development
 CACHE_DIR = "/tmp/tables_to_genies_cache"
@@ -283,7 +338,7 @@ async def list_enrichment_results():
         # Run blocking SDK call in thread pool
         def _fetch():
             # Create a fresh client for this thread
-            local_client = WorkspaceClient(config=Config())
+            local_client = WorkspaceClient(config=config)
             return local_client.statement_execution.execute_statement(
                 warehouse_id=warehouse_id,
                 statement=statement,
@@ -321,7 +376,7 @@ async def get_enrichment_result(fqn: str):
         statement = f"SELECT enriched_doc FROM serverless_dbx_unifiedchat_catalog.gold.enriched_table_metadata WHERE table_fqn = '{fqn}'"
         
         def _fetch():
-            local_client = WorkspaceClient(config=Config())
+            local_client = WorkspaceClient(config=config)
             return local_client.statement_execution.execute_statement(
                 warehouse_id=warehouse_id,
                 statement=statement,
@@ -402,7 +457,7 @@ async def build_graph():
         """
         
         def _fetch():
-            local_client = WorkspaceClient(config=Config())
+            local_client = WorkspaceClient(config=config)
             return local_client.statement_execution.execute_statement(
                 warehouse_id=warehouse_id,
                 statement=statement,
@@ -471,7 +526,7 @@ async def build_graph():
             _add_graph_log("Calling LLM for analysis...")
             
             def _llm_call():
-                local_client = WorkspaceClient(config=Config())
+                local_client = WorkspaceClient(config=config)
                 # Use ai_query with Claude Sonnet
                 llm_statement = "SELECT ai_query('databricks-claude-sonnet-4-5', :prompt) as result"
                 param = StatementParameterListItem(name='prompt', value=prompt, type='STRING')
@@ -591,75 +646,146 @@ async def delete_genie_room(room_id: str):
 
 
 def _create_rooms_task():
-    """Background task for creating Genie spaces."""
+    """
+    Background task for creating Genie spaces.
+    Uses WorkspaceClient with App SP authentication (automatic when running in Databricks App)
+    or PROD profile with PAT (when running locally).
+    """
     global _genie_creation_status
     
     import logging
     logger = logging.getLogger(__name__)
     
     try:
+        # List existing spaces to check for updates vs creates
+        existing_spaces = {}
+        try:
+            logger.info("[Genie Creation] Listing existing Genie spaces...")
+            print(f"[Genie Creation] Listing existing Genie spaces...", flush=True)
+            spaces_list = list(client.genie.list_spaces())
+            for space in spaces_list:
+                if hasattr(space, 'title') and space.title:
+                    existing_spaces[space.title] = space
+            logger.info(f"[Genie Creation] Found {len(existing_spaces)} existing spaces")
+            print(f"[Genie Creation] Found {len(existing_spaces)} existing spaces", flush=True)
+        except Exception as e:
+            logger.warning(f"[Genie Creation] Could not list existing spaces: {e}")
+            print(f"[Genie Creation] Warning: Could not list existing spaces: {e}", flush=True)
+        
         for i, room in enumerate(_genie_creation_status.rooms):
             try:
                 room['status'] = 'creating'
                 logger.info(f"[Genie Creation] Starting room: {room['name']}")
-                print(f"[Genie Creation] Starting room: {room['name']}", flush=True)
+                print(f"\n{'='*80}", flush=True)
+                print(f"[Genie Creation] Processing room: {room['name']}", flush=True)
+                print(f"[Genie Creation] Tables ({len(room['tables'])}): {room['tables'][:3]}{'...' if len(room['tables']) > 3 else ''}", flush=True)
                 
-                # Use REST API directly to create Genie space with tables
-                # Based on Databricks documentation, table_identifiers should be inside serialized_space
-                import requests
-                headers = {
-                    "Authorization": f"Bearer {config.token}",
-                    "Content-Type": "application/json"
-                }
-                
-                serialized_space_data = {
-                    "table_identifiers": room['tables']
-                }
-                
-                create_payload = {
-                    "title": room['name'],
-                    "description": f"Genie space with {room['table_count']} tables",
-                    "sql_warehouse_id": warehouse_id,
-                    "serialized_space": json.dumps(serialized_space_data)
-                }
-                
-                api_url = f"{config.host}/api/2.0/genie/spaces"
-                print(f"[Genie Creation] API URL: {api_url}", flush=True)
-                
-                response = requests.post(
-                    api_url,
-                    headers=headers,
-                    json=create_payload
-                )
-                
-                if response.status_code >= 400:
-                    # Try fallback if serialized_space failed - some environments use different schemas
-                    error_data = response.json()
-                    if "table_identifiers" in str(error_data):
-                         print(f"[Genie Creation] Fallback: trying top-level table_identifiers", flush=True)
-                         fallback_payload = {
-                             "title": room['name'],
-                             "description": f"Genie space with {room['table_count']} tables",
-                             "sql_warehouse_id": warehouse_id,
-                             "table_identifiers": room['tables']
-                         }
-                         response = requests.post(api_url, headers=headers, json=fallback_payload)
+                # Check if space already exists with this name
+                if room['name'] in existing_spaces:
+                    # Update existing space
+                    existing_space = existing_spaces[room['name']]
+                    print(f"[Genie Creation] Found existing space, updating: {existing_space.space_id}", flush=True)
                     
-                    if response.status_code >= 400:
-                        raise Exception(f"API Error {response.status_code}: {response.text}")
+                    try:
+                        # Prepare serialized_space for update
+                        # Tables MUST be sorted by identifier.
+                        sorted_tables = sorted(room['tables'])
+                        ser_space_obj = {
+                            "version": 1,
+                            "data_sources": {
+                                "tables": [{"identifier": fqn} for fqn in sorted_tables]
+                            }
+                        }
+                        serialized_space = json.dumps(ser_space_obj, separators=(",", ":"))
+                        
+                        # Use SDK's update_space method with correct parameters
+                        update_payload = {
+                            "title": room['name'],
+                            "description": f"Genie space with {room['table_count']} tables",
+                            "warehouse_id": warehouse_id,
+                            "serialized_space": serialized_space
+                        }
+                        
+                        client.api_client.do(
+                            "PUT",
+                            f"/api/2.0/genie/spaces/{existing_space.space_id}",
+                            body=update_payload
+                        )
+                        
+                        space_id = existing_space.space_id
+                        print(f"[Genie Creation] ✅ Updated space: {space_id}", flush=True)
+                        
+                    except Exception as update_error:
+                        print(f"[Genie Creation] Update failed, will try to recreate: {update_error}", flush=True)
+                        raise update_error
+                        
+                else:
+                    # Create new space
+                    print(f"[Genie Creation] Creating new Genie space...", flush=True)
+                    
+                    # Use the Python SDK's internal API client for direct REST calls
+                    # This mimics what the MCP tool does successfully
+                    try:
+                        # Prepare the serialized_space placeholder
+                        # Genie space APIs expect serialized_space as a JSON-escaped string.
+                        # Tables MUST be sorted by identifier.
+                        sorted_tables = sorted(room['tables'])
+                        ser_space_obj = {
+                            "version": 1,
+                            "data_sources": {
+                                "tables": [{"identifier": fqn} for fqn in sorted_tables]
+                            }
+                        }
+                        serialized_space = json.dumps(ser_space_obj, separators=(",", ":"))
+                        
+                        payload = {
+                            "warehouse_id": warehouse_id,
+                            "title": room['name'],
+                            "description": f"Genie space with {room['table_count']} tables",
+                            "serialized_space": serialized_space
+                        }
+                        
+                        print(f"[Genie Creation] Payload: {json.dumps(payload, indent=2)}", flush=True)
+                        
+                        # Use the SDK's internal API client to make the REST call
+                        response = client.api_client.do(
+                            "POST",
+                            "/api/2.0/genie/spaces",
+                            body=payload
+                        )
+                        
+                        space_id = response.get('space_id') or response.get('id')
+                        
+                        if not space_id:
+                            raise Exception(f"No space_id in response: {response}")
+                        
+                        print(f"[Genie Creation] ✅ Created space: {space_id}", flush=True)
+                        
+                        # No need for separate update if we include serialized_space in POST
+                        print(f"[Genie Creation] ✅ Tables added to space via serialized_space", flush=True)
+                        
+                    except Exception as create_error:
+                        print(f"[Genie Creation] Create failed: {create_error}", flush=True)
+                        raise create_error
                 
-                space_data = response.json()
-                space_id = space_data.get('space_id') or space_data.get('id')
-                
-                logger.info(f"[Genie Creation] Space created: {space_id}")
-                print(f"[Genie Creation] Space created: {space_id}", flush=True)
+                # Extract workspace ID from host if possible (e.g., adb-7474651667509820.0.azuredatabricks.net)
+                workspace_id = ""
+                host = config.host or ""
+                if "adb-" in host:
+                    workspace_id = host.split("adb-")[1].split(".")[0]
                 
                 room['status'] = 'created'
                 room['space_id'] = space_id
-                room['url'] = f"{config.host}/sql/genie/{space_id}"
+                
+                # Format URL as /genie/rooms/{space_id}?o={workspace_id}
+                if workspace_id:
+                    room['url'] = f"{config.host}/genie/rooms/{space_id}?o={workspace_id}"
+                else:
+                    room['url'] = f"{config.host}/genie/rooms/{space_id}"
                 
                 logger.info(f"[Genie Creation] ✅ Successfully created room: {room['name']}")
-                print(f"[Genie Creation] ✅ Successfully created room: {room['name']}", flush=True)
+                print(f"[Genie Creation] ✅ Room URL: {room['url']}", flush=True)
+                print(f"{'='*80}\n", flush=True)
                 
             except Exception as e:
                 import traceback

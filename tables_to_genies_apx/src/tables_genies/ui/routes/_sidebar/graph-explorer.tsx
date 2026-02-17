@@ -702,6 +702,10 @@ function GraphVisualization() {
         }
       });
 
+      // Clear hover states to prevent "sticky" highlights after room ID changes
+      setHoveredRoomId(null);
+      setHoveredTableFqn(null);
+
       // Store the updated room data locally
       setFullRoomData(prev => ({
         ...prev,
@@ -715,6 +719,15 @@ function GraphVisualization() {
     queryClient.invalidateQueries({ queryKey: [`/api/genie/rooms`] });
     queryClient.refetchQueries({ queryKey: [`/api/genie/rooms`] });
   }, [fullRoomData, deleteRoomMutation, createRoomMutation, queryClient]);
+
+  const onPaneClick = useCallback(() => {
+    setSelectedNodes([]);
+    setShowSelectionPanel(false);
+    setHighlightedCommunity(null);
+    setHoveredNode(null);
+    setHoveredTableFqn(null);
+    setHoveredRoomId(null);
+  }, []);
 
   const semanticEdgeCount = initialEdges.filter(e => e.data.isSemantic).length;
 
@@ -735,6 +748,7 @@ function GraphVisualization() {
             onNodeMouseEnter={onNodeMouseEnter}
             onNodeMouseLeave={onNodeMouseLeave}
             onSelectionChange={onSelectionChange}
+            onPaneClick={onPaneClick}
             onInit={(instance) => { reactFlowInstanceRef.current = instance; }}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
