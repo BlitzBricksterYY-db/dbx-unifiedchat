@@ -1,13 +1,13 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { Suspense, useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { useBuildGraph, useGetGraphData, useGetGraphDataSuspense, useGetGraphBuildLogs, useCreateGenieRoom, useListGenieRoomsSuspense, useDeleteGenieRoom, useGenerateFromCommunities } from '@/lib/api';
+import { useBuildGraph, useGetGraphData, useGetGraphDataSuspense, useGetGraphBuildLogs, useCreateGenieRoom, useListGenieRoomsSuspense, useDeleteGenieRoom, useGenerateFromCommunities, useGenerateFromSchemas, useClearAllGenieRooms, useGetGroupDescriptions } from '@/lib/api';
 import { selector } from '@/lib/selector';
 import { loadState, saveState, isStepCompleted, markStepCompleted } from '@/lib/workflow-state';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, Terminal, X, ChevronDown, ChevronRight, Plus, Layers, Info, Minus, Sparkles, Trash2 } from 'lucide-react';
+import { ArrowLeft, Terminal, X, ChevronDown, ChevronRight, Plus, Layers, Info, Minus, Sparkles, Trash2, Network, Database, HelpCircle, RefreshCw } from 'lucide-react';
 import { 
   ReactFlow, 
   Background, 
@@ -65,6 +65,7 @@ function GraphExplorerContent() {
   const [graphBuilt, setGraphBuilt] = useState(loadGraphBuiltState());
   const buildGraphMutation = useBuildGraph();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const enrichmentDone = isStepCompleted('enrichment-done');
 
   // Visualization state
@@ -124,6 +125,15 @@ function GraphExplorerContent() {
     setGraphBuilt(true);
     localStorage.setItem('graph-explorer-built', 'true');
     markStepCompleted('graph-built');
+  };
+
+  const handleRebuildGraph = async () => {
+    // Tear down current state so the build card + logs are visible
+    setGraphBuilt(false);
+    localStorage.removeItem('graph-explorer-built');
+    // Invalidate cached group descriptions so they regenerate after the new graph is ready
+    queryClient.removeQueries({ queryKey: ['/api/graph/group-descriptions'] });
+    await handleBuildGraph();
   };
 
   return (
@@ -187,6 +197,17 @@ function GraphExplorerContent() {
         <Button variant="outline" onClick={() => navigate({ to: '/enrichment', search: (prev: any) => prev })}>
           <ArrowLeft size={16} /> Back
         </Button>
+        {graphBuilt && (
+          <Button
+            variant="outline"
+            onClick={handleRebuildGraph}
+            disabled={buildGraphMutation.isPending}
+            className="text-amber-600 border-amber-300 hover:bg-amber-50 hover:border-amber-400 dark:text-amber-400 dark:border-amber-700 dark:hover:bg-amber-900/20"
+          >
+            <RefreshCw size={16} className={buildGraphMutation.isPending ? 'animate-spin' : ''} />
+            Rebuild Graph
+          </Button>
+        )}
         {graphBuilt && isStepCompleted('graph-built') && (
           <Button onClick={() => navigate({ to: '/genie-builder' })}>
             Next: Build Rooms →
@@ -197,14 +218,6 @@ function GraphExplorerContent() {
   );
 }
 
-// Schema color mapping
-const SCHEMA_COLORS: Record<string, string> = {
-  'demo_mixed': '#ef4444',
-  'claims': '#10b981',
-  'drug_discovery': '#f59e0b',
-  'default': '#3b82f6',
-};
-
 const ROOM_COLORS = [
   '#2563eb', '#7c3aed', '#db2777', '#dc2626', '#ea580c', 
   '#d97706', '#65a30d', '#059669', '#0891b2', '#4f46e5'
@@ -212,7 +225,7 @@ const ROOM_COLORS = [
 
 // Custom node component
 function TableNode({ data, selected }: { data: any, selected?: boolean }) {
-  const schemaColor = SCHEMA_COLORS[data.schema] || SCHEMA_COLORS.default;
+  const schemaColor = data.activeColor || data.schemaColor || '#3b82f6';
   const rooms = data.rooms || [];
 
   return (
@@ -344,9 +357,15 @@ function GraphVisualization({ graphBuilt }: { graphBuilt: boolean }) {
   const queryClient = useQueryClient();
   const { data: graphData } = useGetGraphDataSuspense({ query: selector() } as any);
   const { data: genieRooms = [] } = useListGenieRoomsSuspense({ query: selector() } as any);
+  // Fetch LLM-generated group descriptions once graph is built; cached on the backend until reset
+  const { data: groupDescriptions } = useGetGroupDescriptions({
+    query: { enabled: graphBuilt, staleTime: Infinity, retry: false },
+  });
   const createRoomMutation = useCreateGenieRoom();
   const deleteRoomMutation = useDeleteGenieRoom();
   const generateFromCommunitiesMutation = useGenerateFromCommunities();
+  const generateFromSchemasMutation = useGenerateFromSchemas();
+  const clearAllRoomsMutation = useClearAllGenieRooms();
   
   // Load persisted visualization state
   const loadPersistedState = () => {
@@ -411,6 +430,14 @@ function GraphVisualization({ graphBuilt }: { graphBuilt: boolean }) {
   const [hoveredRoomId, setHoveredRoomId] = useState<string | null>(null);
   const [hoveredTableFqn, setHoveredTableFqn] = useState<string | null>(null);
   
+  // Panel collapse states
+  const [communitiesPanelCollapsed, setCommunitiesPanelCollapsed] = useState(false);
+  const [edgesPanelCollapsed, setEdgesPanelCollapsed] = useState(false);
+  const [roomsPanelCollapsed, setRoomsPanelCollapsed] = useState(false);
+
+  // Legend mode: 'schema' = group by DB schema, 'community' = group by graph-detected community
+  const [legendMode, setLegendMode] = useState<'schema' | 'community'>('schema');
+  
   // Store React Flow instance
   const reactFlowInstanceRef = useRef<any>(null);
 
@@ -428,6 +455,74 @@ function GraphVisualization({ graphBuilt }: { graphBuilt: boolean }) {
     });
     setFullRoomData((prev: any) => ({ ...prev, ...newFullRoomData }));
   }, [genieRooms]);
+
+  // Extract unique schemas, assign colors, and collect tables per schema for tooltips
+  const { dynamicSchemaColors, schemaInfo } = useMemo(() => {
+    const tablesBySchema: Record<string, string[]> = {};
+    graphData.elements.forEach((elem: any) => {
+      if (!elem.data.source && elem.data.schema) {
+        if (!tablesBySchema[elem.data.schema]) tablesBySchema[elem.data.schema] = [];
+        tablesBySchema[elem.data.schema].push(elem.data.id);
+      }
+    });
+
+    const colors = ['#ef4444', '#10b981', '#f59e0b', '#3b82f6', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
+    const schemaColorMap: Record<string, string> = {};
+    const schemaInfoMap: Record<string, { tables: string[] }> = {};
+
+    Object.keys(tablesBySchema).sort().forEach((schema, idx) => {
+      schemaColorMap[schema] = colors[idx % colors.length];
+      schemaInfoMap[schema] = { tables: tablesBySchema[schema] };
+    });
+
+    return { dynamicSchemaColors: schemaColorMap, schemaInfo: schemaInfoMap };
+  }, [graphData]);
+
+  // Extract unique graph-detected communities and assign colors dynamically
+  const dynamicCommunityColors = useMemo(() => {
+    const communityIds = new Set<number>();
+    graphData.elements.forEach((elem: any) => {
+      if (!elem.data.source && elem.data.community !== undefined) {
+        communityIds.add(elem.data.community);
+      }
+    });
+
+    const colors = ['#ef4444', '#10b981', '#f59e0b', '#3b82f6', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
+    const communityColorMap: Record<string, string> = {};
+
+    Array.from(communityIds).sort((a, b) => a - b).forEach((id, idx) => {
+      communityColorMap[String(id)] = colors[idx % colors.length];
+    });
+
+    return communityColorMap;
+  }, [graphData]);
+
+  // Count tables per community, derive a display name, and store the table list for tooltips
+  const communityInfo = useMemo(() => {
+    const tablesByComm: Record<string, string[]> = {};
+    graphData.elements.forEach((elem: any) => {
+      if (!elem.data.source && elem.data.community !== undefined) {
+        const key = String(elem.data.community);
+        if (!tablesByComm[key]) tablesByComm[key] = [];
+        tablesByComm[key].push(elem.data.id);
+      }
+    });
+
+    const info: Record<string, { count: number; label: string; tables: string[] }> = {};
+    Object.entries(tablesByComm).forEach(([communityId, tables]) => {
+      // Mirror the backend naming: most common schema → "Schema Name Community N"
+      const schemas = tables.map((fqn: string) => fqn.split('.')[1]).filter(Boolean);
+      let label = `Community ${communityId}`;
+      if (schemas.length > 0) {
+        const mostCommon = schemas.sort(
+          (a, b) => schemas.filter(s => s === b).length - schemas.filter(s => s === a).length
+        )[0];
+        label = `${mostCommon.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())} Community ${communityId}`;
+      }
+      info[communityId] = { count: tables.length, label, tables };
+    });
+    return info;
+  }, [graphData]);
 
   // Room mapping with colors and symbols - Deduplicated by name (since "updates" create new rooms)
   const roomMap = useMemo(() => {
@@ -518,6 +613,9 @@ function GraphVisualization({ graphBuilt }: { graphBuilt: boolean }) {
           data: {
             ...elem.data,
             rooms: tableRoomMap[elem.data.id] || [],
+            schemaColor: dynamicSchemaColors[elem.data.schema] || '#3b82f6',
+            communityColor: dynamicCommunityColors[String(elem.data.community)] || '#3b82f6',
+            // activeColor is set in the filtered pass below based on legendMode
           },
         });
         
@@ -544,7 +642,7 @@ function GraphVisualization({ graphBuilt }: { graphBuilt: boolean }) {
     });
 
     return { nodes, edges };
-  }, [graphData, tableRoomMap]);
+  }, [graphData, tableRoomMap, dynamicSchemaColors, dynamicCommunityColors]);
 
   // Apply filtering and highlighting to nodes and edges
   const { filteredNodes, filteredEdges } = useMemo(() => {
@@ -554,8 +652,11 @@ function GraphVisualization({ graphBuilt }: { graphBuilt: boolean }) {
       : null;
 
     const nodes = initialNodes.map(node => {
-      const isDimmed = highlightedCommunity && node.data.schema !== highlightedCommunity;
-      const isHighlighted = highlightedCommunity && node.data.schema === highlightedCommunity;
+      const nodeKey = legendMode === 'community'
+        ? String(node.data.community)
+        : (node.data.schema as string);
+      const isDimmed = highlightedCommunity && nodeKey !== highlightedCommunity;
+      const isHighlighted = highlightedCommunity && nodeKey === highlightedCommunity;
       
       // Room hover highlight
       const isInHoveredRoom = hoveredRoomTableIds && hoveredRoomTableIds.has(node.id);
@@ -567,6 +668,9 @@ function GraphVisualization({ graphBuilt }: { graphBuilt: boolean }) {
         ...node,
         data: {
           ...node.data,
+          activeColor: legendMode === 'community'
+            ? (node.data.communityColor as string)
+            : (node.data.schemaColor as string),
           isDimmed: isDimmed || (hoveredRoomTableIds && !isInHoveredRoom) || (hoveredTableFqn && !isHoveredTable),
           isHighlighted: !!(isHighlighted || isInHoveredRoom || isHoveredTable),
         }
@@ -582,8 +686,9 @@ function GraphVisualization({ graphBuilt }: { graphBuilt: boolean }) {
       
       const sourceNode = nodes.find(n => n.id === edge.source) as any;
       const targetNode = nodes.find(n => n.id === edge.target) as any;
-      const inCommunity = sourceNode?.data.schema === highlightedCommunity && 
-                          targetNode?.data.schema === highlightedCommunity;
+      const srcKey = legendMode === 'community' ? String(sourceNode?.data.community) : sourceNode?.data.schema;
+      const tgtKey = legendMode === 'community' ? String(targetNode?.data.community) : targetNode?.data.schema;
+      const inCommunity = srcKey === highlightedCommunity && tgtKey === highlightedCommunity;
       
       return {
         ...edge,
@@ -595,7 +700,7 @@ function GraphVisualization({ graphBuilt }: { graphBuilt: boolean }) {
     });
 
     return { filteredNodes: nodes, filteredEdges: edges };
-  }, [initialNodes, initialEdges, showStructuralEdges, showSemanticEdges, highlightedCommunity, hoveredRoomId, hoveredTableFqn, fullRoomData]);
+  }, [initialNodes, initialEdges, showStructuralEdges, showSemanticEdges, highlightedCommunity, hoveredRoomId, hoveredTableFqn, fullRoomData, legendMode]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(filteredNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(filteredEdges);
@@ -775,6 +880,28 @@ function GraphVisualization({ graphBuilt }: { graphBuilt: boolean }) {
     });
   }, [generateFromCommunitiesMutation, queryClient]);
 
+  const handleGenerateFromSchemas = useCallback(async () => {
+    await generateFromSchemasMutation.mutateAsync(undefined, {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: [`/api/genie/rooms`] });
+        queryClient.refetchQueries({ queryKey: [`/api/genie/rooms`] });
+        markStepCompleted('rooms-defined');
+      }
+    });
+  }, [generateFromSchemasMutation, queryClient]);
+
+  const handleClearAllRooms = useCallback(async () => {
+    await clearAllRoomsMutation.mutateAsync(undefined, {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: [`/api/genie/rooms`] });
+        queryClient.refetchQueries({ queryKey: [`/api/genie/rooms`] });
+        setExpandedRoomName(null);
+        setHoveredRoomId(null);
+        setHoveredTableFqn(null);
+      }
+    });
+  }, [clearAllRoomsMutation, queryClient]);
+
   const handleDeleteRoom = useCallback(async (roomId: string, roomName: string) => {
     await deleteRoomMutation.mutateAsync({ roomId }, {
       onSuccess: () => {
@@ -829,9 +956,8 @@ function GraphVisualization({ graphBuilt }: { graphBuilt: boolean }) {
             <Background variant={BackgroundVariant.Dots} gap={12} size={1} />
             <Controls />
             <MiniMap 
-              nodeColor={(node) => {
-                const schema = node.data?.schema as string;
-                return SCHEMA_COLORS[schema] || SCHEMA_COLORS.default;
+              nodeColor={(node): string => {
+                return (node.data?.activeColor as string) || (node.data?.schemaColor as string) || '#3b82f6';
               }}
               maskColor="rgba(0, 0, 0, 0.1)"
               pannable
@@ -839,81 +965,273 @@ function GraphVisualization({ graphBuilt }: { graphBuilt: boolean }) {
             />
             
             {/* Legend Panel */}
-            <Panel position="top-left" className="bg-white dark:bg-slate-800 rounded-lg shadow-lg p-3 text-sm max-w-[200px]">
-              <div className="font-semibold mb-2 flex items-center justify-between">
-                <span>Communities</span>
-                {highlightedCommunity && (
-                  <button 
-                    onClick={() => setHighlightedCommunity(null)}
-                    className="text-[10px] text-blue-500 hover:underline"
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
-              <div className="space-y-1">
-                {Object.entries(SCHEMA_COLORS).map(([schema, color]) => (
-                  schema !== 'default' && (
-                    <div 
-                      key={schema} 
-                      className={`flex items-center gap-2 cursor-pointer p-1 rounded transition-colors ${highlightedCommunity === schema ? 'bg-blue-50 dark:bg-blue-900/30 ring-1 ring-blue-200' : 'hover:bg-slate-100 dark:hover:bg-slate-700'}`}
-                      onClick={() => setHighlightedCommunity(schema === highlightedCommunity ? null : schema)}
+            <Panel position="top-left" className="bg-white dark:bg-slate-800 rounded-lg shadow-lg text-sm max-w-[210px]">
+              <div className="p-3">
+                {/* Header row */}
+                <div className="font-semibold flex items-center justify-between gap-2 mb-2">
+                  <div className="flex items-center gap-1.5">
+                    {legendMode === 'schema' ? <Database size={13} className="text-slate-500" /> : <Network size={13} className="text-slate-500" />}
+                    <span>{legendMode === 'schema' ? 'Schemas' : 'Communities'}</span>
+                    {/* Custom tooltip — browser `title` doesn't reliably render inside React Flow panels */}
+                    <span className="relative group/help cursor-help text-slate-400 hover:text-slate-600 dark:hover:text-slate-300">
+                      <HelpCircle size={12} />
+                      <span className="pointer-events-none absolute left-5 top-0 z-50 w-52 rounded-md bg-slate-900 dark:bg-slate-700 px-2.5 py-2 text-[11px] font-normal leading-snug text-white shadow-xl opacity-0 group-hover/help:opacity-100 transition-opacity duration-150 whitespace-normal">
+                        {legendMode === 'schema'
+                          ? 'Color-coded by database schema — the middle segment of catalog.schema.table. Click a schema to highlight its tables on the graph.'
+                          : 'Groups detected by the graph algorithm based on table relationships. Tables in the same community are more closely connected. Click a community to highlight it.'}
+                      </span>
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    {highlightedCommunity && !communitiesPanelCollapsed && (
+                      <button
+                        onClick={() => setHighlightedCommunity(null)}
+                        className="text-[10px] text-blue-500 hover:underline"
+                      >
+                        Clear
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setCommunitiesPanelCollapsed(!communitiesPanelCollapsed)}
+                      className="p-0.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors"
+                      title={communitiesPanelCollapsed ? 'Expand' : 'Collapse'}
                     >
-                      <div className="w-3 h-3 rounded shrink-0" style={{ backgroundColor: color as string }}></div>
-                      <span className="text-xs truncate">{schema}</span>
-                    </div>
-                  )
-                ))}
+                      {communitiesPanelCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Mode toggle switch */}
+                <div
+                  className="flex items-center gap-1 bg-slate-100 dark:bg-slate-700 rounded-md p-0.5 mb-2"
+                  title="Switch between coloring nodes by database schema or by graph-detected community"
+                >
+                  <button
+                    onClick={() => { setLegendMode('schema'); setHighlightedCommunity(null); }}
+                    className={`flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded text-[11px] font-medium transition-all ${
+                      legendMode === 'schema'
+                        ? 'bg-white dark:bg-slate-600 text-slate-900 dark:text-slate-100 shadow-sm'
+                        : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'
+                    }`}
+                    title="Color nodes by their database schema (catalog.schema.table)"
+                  >
+                    <Database size={11} />
+                    Schema
+                  </button>
+                  <button
+                    onClick={() => { setLegendMode('community'); setHighlightedCommunity(null); }}
+                    className={`flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded text-[11px] font-medium transition-all ${
+                      legendMode === 'community'
+                        ? 'bg-white dark:bg-slate-600 text-slate-900 dark:text-slate-100 shadow-sm'
+                        : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'
+                    }`}
+                    title="Color nodes by graph-detected community (tables more connected to each other)"
+                  >
+                    <Network size={11} />
+                    Community
+                  </button>
+                </div>
+
+                {/* Legend items */}
+                {!communitiesPanelCollapsed && (
+                  <div className="space-y-1">
+                    {legendMode === 'schema'
+                      ? Object.entries(dynamicSchemaColors).map(([schema, color]) => {
+                          const tables = schemaInfo[schema]?.tables ?? [];
+                          const description = groupDescriptions?.schemas[schema] ?? '';
+                          // Check if a matching Genie Room exists for this schema
+                          const matchedRoom = roomMap.find(r =>
+                            r.name.toLowerCase() === schema.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()).toLowerCase()
+                          );
+                          const displayName = matchedRoom ? matchedRoom.name : schema.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase());
+                          return (
+                            <div
+                              key={schema}
+                              className="relative group/schemaitem"
+                            >
+                              <div
+                                className={`flex items-center gap-2 cursor-pointer p-1 rounded transition-colors ${highlightedCommunity === schema ? 'bg-blue-50 dark:bg-blue-900/30 ring-1 ring-blue-200' : 'hover:bg-slate-100 dark:hover:bg-slate-700'}`}
+                                onClick={() => setHighlightedCommunity(schema === highlightedCommunity ? null : schema)}
+                              >
+                                <div className="w-3 h-3 rounded shrink-0" style={{ backgroundColor: color }}></div>
+                                <span className="text-xs truncate flex-1">{displayName}</span>
+                                <span className="text-[10px] text-slate-400 shrink-0">{tables.length}</span>
+                              </div>
+                              {/* Tooltip */}
+                              <div className="pointer-events-none absolute left-full top-0 ml-2 z-50 w-64 rounded-md bg-slate-900 dark:bg-slate-700 px-2.5 py-2 text-[11px] font-normal leading-snug text-white shadow-xl opacity-0 group-hover/schemaitem:opacity-100 transition-opacity duration-150 whitespace-normal">
+                                <p className="font-semibold mb-1 text-slate-200">{displayName}</p>
+                                {description
+                                  ? <p className="text-slate-300 italic mb-2 leading-relaxed">{description}</p>
+                                  : groupDescriptions && <p className="text-slate-500 italic mb-2">No description available.</p>
+                                }
+                                <p className="text-slate-400 mb-1.5">{tables.length} table{tables.length !== 1 ? 's' : ''} in this schema</p>
+                                <ul className="space-y-0.5 max-h-28 overflow-y-auto">
+                                  {tables.map((fqn: string) => (
+                                    <li key={fqn} className="text-slate-300 font-mono text-[10px] truncate">• {fqn.split('.').pop()}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            </div>
+                          );
+                        })
+                      : Object.entries(dynamicCommunityColors).map(([communityId, color]) => {
+                          const info = communityInfo[communityId];
+                          const tables = info?.tables ?? [];
+                          const description = groupDescriptions?.communities[communityId] ?? '';
+                          // Match by community_id first (authoritative — name set once at room-creation time),
+                          // fall back to label derived from graph data when no room exists yet.
+                          const matchedRoom = roomMap.find(r => r.community_id === communityId);
+                          const displayName = matchedRoom ? matchedRoom.name : (info?.label ?? `Community ${communityId}`);
+                          return (
+                            <div
+                              key={communityId}
+                              className="relative group/commitem"
+                            >
+                              <div
+                                className={`flex items-center gap-2 cursor-pointer p-1 rounded transition-colors ${highlightedCommunity === communityId ? 'bg-blue-50 dark:bg-blue-900/30 ring-1 ring-blue-200' : 'hover:bg-slate-100 dark:hover:bg-slate-700'}`}
+                                onClick={() => setHighlightedCommunity(communityId === highlightedCommunity ? null : communityId)}
+                              >
+                                <div className="w-3 h-3 rounded shrink-0" style={{ backgroundColor: color }}></div>
+                                <span className="text-xs truncate flex-1">{displayName}</span>
+                                <span className="text-[10px] text-slate-400 shrink-0">{info?.count ?? 0}</span>
+                              </div>
+                              {/* Tooltip */}
+                              <div className="pointer-events-none absolute left-full top-0 ml-2 z-50 w-64 rounded-md bg-slate-900 dark:bg-slate-700 px-2.5 py-2 text-[11px] font-normal leading-snug text-white shadow-xl opacity-0 group-hover/commitem:opacity-100 transition-opacity duration-150 whitespace-normal">
+                                <p className="font-semibold mb-1 text-slate-200">{displayName}</p>
+                                {description
+                                  ? <p className="text-slate-300 italic mb-2 leading-relaxed">{description}</p>
+                                  : groupDescriptions && <p className="text-slate-500 italic mb-2">No description available.</p>
+                                }
+                                <p className="text-slate-400 mb-1.5">{tables.length} closely-related table{tables.length !== 1 ? 's' : ''} detected by graph algorithm</p>
+                                <ul className="space-y-0.5 max-h-28 overflow-y-auto">
+                                  {tables.map((fqn: string) => (
+                                    <li key={fqn} className="text-slate-300 font-mono text-[10px] truncate">• {fqn.split('.').pop()}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            </div>
+                          );
+                        })
+                    }
+                  </div>
+                )}
               </div>
             </Panel>
 
             {/* Edge Toggles Panel */}
-            <Panel position="top-right" className="bg-white dark:bg-slate-800 rounded-lg shadow-lg p-3 text-sm mr-2 mt-2">
-              <div className="font-semibold mb-2 flex items-center gap-2">
-                <Layers size={14} />
-                <span>Edge Visibility</span>
-              </div>
-              <div className="space-y-2">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input 
-                    type="checkbox" 
-                    checked={showStructuralEdges} 
-                    onChange={(e) => setShowStructuralEdges(e.target.checked)}
-                    className="rounded border-slate-300"
-                  />
-                  <span className="text-xs">Structural Edges</span>
-                  <div className="w-4 h-0.5 bg-slate-400 ml-auto"></div>
-                </label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input 
-                    type="checkbox" 
-                    checked={showSemanticEdges} 
-                    onChange={(e) => setShowSemanticEdges(e.target.checked)}
-                    className="rounded border-slate-300"
-                  />
-                  <span className="text-xs">Semantic Edges ({semanticEdgeCount})</span>
-                  <div className="w-4 h-0.5 bg-purple-500 border-t border-dashed ml-auto"></div>
-                </label>
+            <Panel position="top-right" className="bg-white dark:bg-slate-800 rounded-lg shadow-lg text-sm mr-2 mt-2">
+              <div className="p-3">
+                <div className="font-semibold flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Layers size={14} />
+                    <span>Edge Visibility</span>
+                  </div>
+                  <button
+                    onClick={() => setEdgesPanelCollapsed(!edgesPanelCollapsed)}
+                    className="p-0.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors"
+                    title={edgesPanelCollapsed ? 'Expand' : 'Collapse'}
+                  >
+                    {edgesPanelCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                  </button>
+                </div>
+                {!edgesPanelCollapsed && (
+                  <div className="space-y-2 mt-2">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input 
+                        type="checkbox" 
+                        checked={showStructuralEdges} 
+                        onChange={(e) => setShowStructuralEdges(e.target.checked)}
+                        className="rounded border-slate-300"
+                      />
+                      <span className="text-xs">Structural Edges</span>
+                      <div className="w-4 h-0.5 bg-slate-400 ml-auto"></div>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input 
+                        type="checkbox" 
+                        checked={showSemanticEdges} 
+                        onChange={(e) => setShowSemanticEdges(e.target.checked)}
+                        className="rounded border-slate-300"
+                      />
+                      <span className="text-xs">Semantic Edges ({semanticEdgeCount})</span>
+                      <div className="w-4 h-0.5 bg-purple-500 border-t border-dashed ml-auto"></div>
+                    </label>
+                  </div>
+                )}
               </div>
             </Panel>
 
             {/* Room Panel */}
-            <Panel position="top-right" className="bg-white dark:bg-slate-800 rounded-lg shadow-lg p-3 text-sm mr-2 mt-28 max-w-[250px]">
-              <div className="font-semibold mb-2 flex items-center justify-between gap-2">
-                <span>Genie Rooms</span>
-                <Button 
-                  variant="ghost" 
-                  size="xs"
-                  className="h-7 w-7 p-0 text-purple-600 hover:text-purple-700 hover:bg-purple-50 dark:text-purple-400 dark:hover:text-purple-300 dark:hover:bg-purple-900/20"
-                  onClick={handleGenerateFromCommunities}
-                  disabled={generateFromCommunitiesMutation.isPending}
-                  title="Generate rooms from communities (AI)"
-                >
-                  <Sparkles size={16} className={generateFromCommunitiesMutation.isPending ? 'animate-pulse' : ''} />
-                </Button>
-              </div>
-              <div className="space-y-2 max-h-60 overflow-y-auto">
-                {roomMap.map((room) => (
+            <Panel position="top-right" className="bg-white dark:bg-slate-800 rounded-lg shadow-lg text-sm mr-2 mt-28 max-w-[250px]">
+              <div className="p-3">
+                <div className="font-semibold flex items-center justify-between gap-2">
+                  <span>Genie Rooms</span>
+                  <div className="flex items-center gap-1">
+                    {!roomsPanelCollapsed && (
+                      <>
+                        {/* Clear all rooms */}
+                        {roomMap.length > 0 && (
+                          <span className="relative group/clearbtn">
+                            <Button
+                              variant="ghost"
+                              size="xs"
+                              className="h-7 w-7 p-0 text-red-500 hover:text-red-700 hover:bg-red-50 dark:text-red-400 dark:hover:text-red-300 dark:hover:bg-red-900/20"
+                              onClick={handleClearAllRooms}
+                              disabled={clearAllRoomsMutation.isPending}
+                            >
+                              <Trash2 size={14} className={clearAllRoomsMutation.isPending ? 'animate-pulse' : ''} />
+                            </Button>
+                            <span className="pointer-events-none absolute right-0 top-8 z-50 w-32 rounded-md bg-slate-900 dark:bg-slate-700 px-2.5 py-2 text-[11px] font-normal leading-snug text-white shadow-xl opacity-0 group-hover/clearbtn:opacity-100 transition-opacity duration-150 whitespace-normal">
+                              Clear all rooms
+                            </span>
+                          </span>
+                        )}
+
+                        {/* Generate one room per database schema */}
+                        <span className="relative group/schemabtn">
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="h-7 w-7 p-0 text-blue-600 hover:text-blue-700 hover:bg-blue-50 dark:text-blue-400 dark:hover:text-blue-300 dark:hover:bg-blue-900/20"
+                            onClick={handleGenerateFromSchemas}
+                            disabled={generateFromSchemasMutation.isPending}
+                          >
+                            <Database size={15} className={generateFromSchemasMutation.isPending ? 'animate-pulse' : ''} />
+                          </Button>
+                          <span className="pointer-events-none absolute right-0 top-8 z-50 w-44 rounded-md bg-slate-900 dark:bg-slate-700 px-2.5 py-2 text-[11px] font-normal leading-snug text-white shadow-xl opacity-0 group-hover/schemabtn:opacity-100 transition-opacity duration-150 whitespace-normal">
+                            Generate one room per database schema (middle segment of catalog.<strong>schema</strong>.table)
+                          </span>
+                        </span>
+
+                        {/* Generate rooms from graph-detected communities */}
+                        <span className="relative group/commbtn">
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="h-7 w-7 p-0 text-purple-600 hover:text-purple-700 hover:bg-purple-50 dark:text-purple-400 dark:hover:text-purple-300 dark:hover:bg-purple-900/20"
+                            onClick={handleGenerateFromCommunities}
+                            disabled={generateFromCommunitiesMutation.isPending}
+                          >
+                            <Sparkles size={16} className={generateFromCommunitiesMutation.isPending ? 'animate-pulse' : ''} />
+                          </Button>
+                          <span className="pointer-events-none absolute right-0 top-8 z-50 w-44 rounded-md bg-slate-900 dark:bg-slate-700 px-2.5 py-2 text-[11px] font-normal leading-snug text-white shadow-xl opacity-0 group-hover/commbtn:opacity-100 transition-opacity duration-150 whitespace-normal">
+                            Generate rooms from graph-detected communities (AI-identified clusters of related tables)
+                          </span>
+                        </span>
+                      </>
+                    )}
+                    <button
+                      onClick={() => setRoomsPanelCollapsed(!roomsPanelCollapsed)}
+                      className="p-0.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors"
+                      title={roomsPanelCollapsed ? 'Expand' : 'Collapse'}
+                    >
+                      {roomsPanelCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                    </button>
+                  </div>
+                </div>
+                {!roomsPanelCollapsed && (
+                  <div className="space-y-2 max-h-60 overflow-y-auto mt-2">
+                    {roomMap.map((room) => (
                   <div key={room.id} className="border rounded-md overflow-hidden">
                     <div className="w-full flex items-center gap-2 p-2 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors group/room">
                       <button 
@@ -987,8 +1305,10 @@ function GraphVisualization({ graphBuilt }: { graphBuilt: boolean }) {
                     )}
                   </div>
                 ))}
-                {roomMap.length === 0 && (
-                  <div className="text-xs text-slate-500 italic p-2 text-center">No rooms created yet</div>
+                    {roomMap.length === 0 && (
+                      <div className="text-xs text-slate-500 italic p-2 text-center">No rooms created yet</div>
+                    )}
+                  </div>
                 )}
               </div>
             </Panel>

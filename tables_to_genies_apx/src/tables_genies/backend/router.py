@@ -100,6 +100,7 @@ if os.path.exists(GRAPH_DATA_FILE):
 _graph_build_logs: List[GraphBuildLogOut] = []
 _genie_rooms = []
 _genie_creation_status: Optional[GenieCreationStatusOut] = None
+_group_descriptions: Optional[GroupDescriptionsOut] = None
 
 api = APIRouter(prefix="/api")
 
@@ -110,12 +111,13 @@ api = APIRouter(prefix="/api")
 @api.post("/reset", operation_id="resetWorkflow")
 async def reset_workflow():
     """Reset all server-side workflow state."""
-    global _selection, _graph_data, _graph_build_logs, _genie_rooms, _genie_creation_status
+    global _selection, _graph_data, _graph_build_logs, _genie_rooms, _genie_creation_status, _group_descriptions
     _selection = TableSelectionOut(table_fqns=[], count=0)
     _graph_data = None
     _graph_build_logs = []
     _genie_rooms = []
     _genie_creation_status = None
+    _group_descriptions = None
 
     # Remove cached graph data from disk
     if os.path.exists(GRAPH_DATA_FILE):
@@ -462,9 +464,10 @@ async def get_graph_build_logs():
 @api.post("/graph/build", response_model=GraphBuildStatusOut, operation_id="buildGraph")
 async def build_graph():
     """Build table relationship graph using LLM-powered GraphRAG approach."""
-    global _graph_data, _graph_build_logs
+    global _graph_data, _graph_build_logs, _group_descriptions
     
     _graph_build_logs = []
+    _group_descriptions = None  # Invalidate cached descriptions so they regenerate for the new graph
     _add_graph_log("Starting LLM-powered GraphRAG graph build process...")
     
     # Fetch full enriched documents with table descriptions
@@ -638,6 +641,83 @@ async def get_graph_data():
     return _graph_data
 
 
+@api.get("/graph/group-descriptions", response_model=GroupDescriptionsOut, operation_id="getGroupDescriptions")
+async def get_group_descriptions():
+    """Get LLM-generated verbal descriptions for each schema and community in the graph.
+    Results are cached in memory until the workflow is reset."""
+    global _group_descriptions
+
+    if _group_descriptions is not None:
+        return _group_descriptions
+
+    if not _graph_data:
+        raise HTTPException(status_code=404, detail="Graph not built yet")
+
+    # Collect tables and their descriptions grouped by schema and community
+    schema_tables: dict[str, list[str]] = {}
+    community_tables: dict[str, list[str]] = {}
+
+    for elem in _graph_data.elements:
+        if "source" not in elem["data"]:  # node, not edge
+            fqn = elem["data"]["id"]
+            short_name = fqn.split(".")[-1]
+            schema = elem["data"].get("schema", "")
+            community = str(elem["data"].get("community", 0))
+            desc = (elem["data"].get("table_description") or "").strip()
+            entry = f"{short_name}: {desc}" if desc else short_name
+
+            if schema:
+                schema_tables.setdefault(schema, []).append(entry)
+            community_tables.setdefault(community, []).append(entry)
+
+    async def describe_group(key: str, entries: list[str], group_type: str) -> tuple[str, str]:
+        """Call databricks-gpt-oss-20b via ai_query to summarize a group."""
+        if not entries:
+            return key, ""
+        tables_text = "\n".join(entries[:8])  # cap to 8 tables to keep prompt short
+        prompt = (
+            f"The following {group_type} contains these database tables:\n{tables_text}\n\n"
+            f"Write exactly one sentence (max 25 words) describing what this {group_type} covers, "
+            f"mentioning the data domain and key analysis possibilities. "
+            f"Do not start with 'This schema' or 'This community'. Be specific and direct."
+        )
+
+        def _call():
+            local_client = WorkspaceClient(config=config)
+            stmt = "SELECT ai_query('databricks-gpt-oss-20b', :prompt) as result"
+            param = StatementParameterListItem(name="prompt", value=prompt, type="STRING")
+            return local_client.statement_execution.execute_statement(
+                warehouse_id=warehouse_id,
+                statement=stmt,
+                parameters=[param],
+                wait_timeout="30s",
+            )
+
+        try:
+            res = await asyncio.to_thread(_call)
+            if res.result and res.result.data_array:
+                raw = res.result.data_array[0][0] or ""
+                return key, raw.strip().strip('"').strip("'")
+        except Exception as e:
+            logger.warning(f"LLM description failed for {group_type} '{key}': {e}")
+        return key, ""
+
+    # Fire all LLM calls concurrently to keep total latency low
+    schema_tasks = [describe_group(s, entries, "database schema") for s, entries in schema_tables.items()]
+    community_tasks = [describe_group(c, entries, "data community") for c, entries in community_tables.items()]
+
+    schema_results, community_results = await asyncio.gather(
+        asyncio.gather(*schema_tasks),
+        asyncio.gather(*community_tasks),
+    )
+
+    _group_descriptions = GroupDescriptionsOut(
+        schemas={k: v for k, v in schema_results},
+        communities={k: v for k, v in community_results},
+    )
+    return _group_descriptions
+
+
 # ============================================================================
 # GENIE ROOM ROUTES
 # ============================================================================
@@ -677,18 +757,59 @@ async def generate_from_communities():
             id=f"room-comm-{community_id}-{str(uuid.uuid4())[:4]}",
             name=room_name,
             tables=tables,
-            table_count=len(tables)
+            table_count=len(tables),
+            community_id=str(community_id),  # Stored so the frontend can match by ID, not fragile name
         )
         new_rooms.append(room)
     
     # Replace or append? User said "populate the Panel", usually means replace or add to.
-    # Let's append but avoid duplicates by name
+    # Let's append but avoid duplicates by community_id (more reliable than name)
+    existing_community_ids = {r.community_id for r in _genie_rooms if r.community_id is not None}
+    existing_names = {r.name for r in _genie_rooms}
+    for nr in new_rooms:
+        if nr.community_id not in existing_community_ids and nr.name not in existing_names:
+            _genie_rooms.append(nr)
+            existing_community_ids.add(nr.community_id)
+            existing_names.add(nr.name)
+            
+    return _genie_rooms
+
+
+@api.post("/genie/generate-from-schemas", response_model=List[GenieRoomOut], operation_id="generateFromSchemas")
+async def generate_from_schemas():
+    """Generate Genie rooms by grouping tables by their database schema (catalog.schema.table)."""
+    global _genie_rooms
+
+    if not _graph_data:
+        raise HTTPException(status_code=400, detail="Graph must be built first")
+
+    # Group table FQNs by schema (middle segment of catalog.schema.table)
+    schema_groups: dict[str, list[str]] = {}
+    for elem in _graph_data.elements:
+        if "source" not in elem["data"]:  # node, not edge
+            table_fqn = elem["data"]["id"]
+            parts = table_fqn.split(".")
+            schema = parts[1] if len(parts) >= 3 else "default"
+            schema_groups.setdefault(schema, []).append(table_fqn)
+
+    new_rooms = []
+    for schema, tables in sorted(schema_groups.items()):
+        room_name = schema.replace("_", " ").title()
+        room = GenieRoomOut(
+            id=f"room-schema-{schema}-{str(uuid.uuid4())[:4]}",
+            name=room_name,
+            tables=tables,
+            table_count=len(tables),
+        )
+        new_rooms.append(room)
+
+    # Append, avoiding name duplicates
     existing_names = {r.name for r in _genie_rooms}
     for nr in new_rooms:
         if nr.name not in existing_names:
             _genie_rooms.append(nr)
             existing_names.add(nr.name)
-            
+
     return _genie_rooms
 
 
@@ -732,6 +853,14 @@ async def delete_genie_room(room_id: str):
     global _genie_rooms
     _genie_rooms = [r for r in _genie_rooms if r.id != room_id]
     return {"message": "Room deleted"}
+
+
+@api.delete("/genie/rooms", operation_id="clearAllGenieRooms")
+async def clear_all_genie_rooms():
+    """Delete all planned rooms."""
+    global _genie_rooms
+    _genie_rooms = []
+    return {"message": "All rooms cleared"}
 
 
 def _create_rooms_task():

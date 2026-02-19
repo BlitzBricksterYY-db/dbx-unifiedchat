@@ -205,6 +205,12 @@ class GraphDataOut(BaseModel):
     communities: Optional[dict] = None
 
 
+class GroupDescriptionsOut(BaseModel):
+    """LLM-generated verbal descriptions for each schema and community group."""
+    schemas: Dict[str, str]
+    communities: Dict[str, str]
+
+
 # ============================================================================
 # GENIE ROOM MODELS
 # ============================================================================
@@ -235,6 +241,7 @@ class GenieRoomOut(BaseModel):
     name: str
     tables: List[str]
     table_count: int
+    community_id: Optional[str] = None  # Set when generated from graph communities
 
 
 class GenieRoomListOut(BaseModel):
