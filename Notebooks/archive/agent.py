@@ -1159,6 +1159,7 @@ class SQLSynthesisTableAgent:
             f"{catalog}.{schema}.get_space_summary",
             f"{catalog}.{schema}.get_table_overview",
             f"{catalog}.{schema}.get_column_detail",
+            f"{catalog}.{schema}.get_space_instructions",
             f"{catalog}.{schema}.get_space_details",
         ]
         
@@ -1176,13 +1177,17 @@ class SQLSynthesisTableAgent:
                 "## WORKFLOW:\n"
                 "1. Review the execution plan and provided metadata\n"
                 "2. If metadata is sufficient → Generate SQL immediately\n"
-                "3. If insufficient, call UC function tools in this order:\n"
+                "3. If insufficient, call UC function tools in this order to gather metadata:\n"
                 "   a) get_space_summary for space information\n"
                 "   b) get_table_overview for table schemas\n"
                 "   c) get_column_detail for specific columns\n"
                 "   d) get_space_details ONLY as last resort (token intensive)\n"
-                "4. At last, if you still cannot find enough metadata in relevant spaces provided, dont stuck there. Expand the searching scope to all spaces mentioned in the execution plan's 'vector_search_relevant_spaces_info' field. Extract the space_id from 'vector_search_relevant_spaces_info'. \n"
-                "5. Generate complete, executable SQL\n\n"
+                "4. **CRITICAL - FINAL STEP BEFORE SQL SYNTHESIS**:\n"
+                "   **MUST call get_space_instructions** to fetch SQL examples, filters, and measures guidance\n"
+                "   This provides essential SQL patterns and best practices for the specific space\n"
+                "5. If still cannot find enough metadata in relevant spaces, expand searching scope to all spaces\n"
+                "   mentioned in the execution plan's 'vector_search_relevant_spaces_info' field\n"
+                "6. Generate complete, executable SQL using the gathered metadata AND instructions\n\n"
 
                 "## UC FUNCTION USAGE:\n"
                 "- Pass arguments as JSON array strings: '[\"space_id_1\", \"space_id_2\"]' or 'null'\n"
@@ -3887,7 +3892,7 @@ def sql_synthesis_table_node(state: AgentState) -> dict:
         writer({"type": "agent_step", "agent": "sql_synthesis_table", "step": "analyzing_plan", "content": f"📋 Analyzing execution plan for {len(relevant_space_ids)} relevant spaces"})
         
         # Emit tool preparation event
-        uc_functions = ["get_space_summary", "get_table_overview", "get_column_detail", "get_space_details"]
+        uc_functions = ["get_space_summary", "get_table_overview", "get_column_detail", "get_space_instructions", "get_space_details"]
         writer({"type": "tools_available", "agent": "sql_synthesis_table", "tools": uc_functions, "content": f"🔧 Available UC functions: {', '.join(uc_functions)}"})
         
         # Emit query strategy
