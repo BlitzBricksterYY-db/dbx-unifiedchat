@@ -172,8 +172,8 @@ class SQLSynthesisTableAgent:
                 "5. Generate complete, executable SQL using the gathered metadata, print out the final SQL\n\n"
 
                 "## UC FUNCTION USAGE:\n"
-                "- Pass arguments as JSON array strings: '[\"space_id_1\", \"space_id_2\"]' or 'null'\n"
-                "- Always explicitly passing all required arguments, even it is 'null'\n"
+                "- Pass arguments as JSON array strings: e.g., '[\"space_id_1\", \"space_id_2\"]' or passing a NULL without any quote\n"
+                "- Always explicitly passing all required arguments, even it is a NULL\n"
                 "- Only query spaces from execution plan's relevant_space_ids\n"
                 "- Use minimal sufficiency: only query what you need\n"
                 "- OPTIMIZATION: When possible, call multiple UC functions in parallel by returning multiple tool calls\n"

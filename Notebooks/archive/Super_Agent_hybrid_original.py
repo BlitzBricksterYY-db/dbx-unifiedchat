@@ -649,6 +649,7 @@ UC_FUNCTION_NAMES = [
     f"{CATALOG}.{SCHEMA}.get_space_summary",
     f"{CATALOG}.{SCHEMA}.get_table_overview",
     f"{CATALOG}.{SCHEMA}.get_column_detail",
+    f"{CATALOG}.{SCHEMA}.get_space_instructions",
     f"{CATALOG}.{SCHEMA}.get_space_details",
 ]
 
@@ -1680,8 +1681,8 @@ ROLE: You receive execution plans from the planning agent and generate SQL queri
 5. Generate complete, executable SQL using the gathered metadata, print out the final SQL
 
 ## UC FUNCTION USAGE:
-- Pass arguments as JSON array strings: '[\"space_id_1\", \"space_id_2\"]' or 'null'
-- Always explicitly passing all required arguments, even it is 'null'
+- Pass arguments as JSON array strings: e.g., '[\"space_id_1\", \"space_id_2\"]' or passing a NULL without any quote
+- Always explicitly passing all required arguments, even it is a NULL
 - Only query spaces from execution plan's relevant_space_ids
 - Use minimal sufficiency: only query what you need
 - OPTIMIZATION: When possible, call multiple UC functions in parallel by returning multiple tool calls
