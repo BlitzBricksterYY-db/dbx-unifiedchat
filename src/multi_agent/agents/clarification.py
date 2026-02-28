@@ -66,8 +66,12 @@ def _load_space_context_uncached(table_name: str) -> Dict[str, str]:
     Returns:
         Dictionary mapping space_id to searchable_content
     """
-    from pyspark.sql import SparkSession
-    spark = SparkSession.builder.getOrCreate()
+    try:
+        from databricks.connect import DatabricksSession
+        spark = DatabricksSession.builder.getOrCreate()
+    except ImportError:
+        from pyspark.sql import SparkSession
+        spark = SparkSession.builder.getOrCreate()
     
     df = spark.sql(f"""
         SELECT space_id, searchable_content
