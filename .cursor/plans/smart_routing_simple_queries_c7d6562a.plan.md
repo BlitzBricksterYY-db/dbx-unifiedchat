@@ -108,26 +108,7 @@ flowchart TD
 
 ## Key Features
 
-### 1. User Override for Full Analysis (LLM-Detected, NOT Regex)
-
-The **LLM intelligently detects** when users want comprehensive analysis, rather than using rigid keyword matching.
-
-**Why LLM-based detection?**
-
-- Understands natural language intent vs just matching keywords
-- Handles variations: "be thorough", "I need full details", "analyze comprehensively"  
-- Avoids false positives: "full table" vs "full analysis"
-- More robust and user-friendly
-
-**Example**: 
-
-```
-User: "How many patients in total we have? Do full analysis"
-LLM: Detects override intent → sets use_full_analysis: true in metadata
-System: Skips quick route → uses planning agent (even though single-domain)
-```
-
-### 2. Automatic Fallback to Planning
+### 1. Automatic Fallback to Planning
 
 If Genie returns empty SQL or results, automatically fallback to planning agent:
 
@@ -137,7 +118,7 @@ If Genie returns empty SQL or results, automatically fallback to planning agent:
 
 This ensures robustness when quick route encounters issues.
 
-### 3. Graceful Error Handling in Summarization
+### 2. Graceful Error Handling in Summarization
 
 Lightweight summarization node handles errors gracefully:
 
