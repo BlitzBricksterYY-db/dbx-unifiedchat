@@ -14,7 +14,15 @@ All functions use LANGUAGE SQL for better performance and compatibility.
 try:
     from databricks.sdk.runtime import spark
 except ImportError:
-    spark = None
+    try:
+        from databricks.connect import DatabricksSession
+        spark = DatabricksSession.builder.getOrCreate()
+    except ImportError:
+        try:
+            from pyspark.sql import SparkSession
+            spark = SparkSession.builder.getOrCreate()
+        except ImportError:
+            spark = None
 
 
 def register_uc_functions(catalog: str, schema: str, table_name: str):
