@@ -78,7 +78,7 @@ See [Architecture Documentation](docs/ARCHITECTURE.md) for detailed design.
 
 ## Presentation
 
-* [**View Project Slides (Interactive HTML)**](docs/decks/slides_2slide.html) - A comprehensive overview of the multi-agent system, architecture, and performance metrics.
+* [**View Project Slides (Interactive HTML)**](docs/decks/slides_2slide.html) - A comprehensive overview of the multi-agent system, and its associated tool kits for table migration and metadata enrichment.
 
 ---
 
