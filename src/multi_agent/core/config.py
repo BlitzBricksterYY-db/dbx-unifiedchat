@@ -185,7 +185,7 @@ class LakebaseConfig:
     def from_env(cls) -> 'LakebaseConfig':
         """Load configuration from environment variables."""
         return cls(
-            instance_name=os.getenv("LAKEBASE_INSTANCE_NAME", "agent-state-db"),
+            instance_name=os.getenv("LAKEBASE_INSTANCE_NAME", ""),
             embedding_endpoint=os.getenv("LAKEBASE_EMBEDDING_ENDPOINT", "databricks-gte-large-en"),
             embedding_dims=int(os.getenv("LAKEBASE_EMBEDDING_DIMS", "1024")),
         )
@@ -259,9 +259,11 @@ class AgentConfig:
                 "Expected alphanumeric string (e.g., '148ccb90800933a1')"
             )
         
-        # Check Lakebase (critical for distributed Model Serving)
+        # Check Lakebase (optional - falls back to in-memory MemorySaver if not set)
         if not self.lakebase.instance_name:
-            raise ValueError("LAKEBASE_INSTANCE_NAME cannot be empty")
+            print("WARNING: LAKEBASE_INSTANCE_NAME not set. Falling back to in-memory MemorySaver.")
+            print("   Multi-turn memory will NOT be shared across Model Serving replicas.")
+            print("   Set LAKEBASE_INSTANCE_NAME in config to enable distributed state management.")
         
         if self.lakebase.embedding_dims <= 0:
             raise ValueError("LAKEBASE_EMBEDDING_DIMS must be positive")

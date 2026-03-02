@@ -122,6 +122,9 @@ This creates:
 1. Lakebase Postgres instance (if it doesn't exist)
 2. checkpoints table - For short-term memory (multi-turn conversations)
 3. store table - For long-term memory (user preferences with semantic search)
+
+If Lakebase is not available or LAKEBASE_INSTANCE_NAME is empty, the cell is skipped
+and the agent will fall back to an in-memory MemorySaver at runtime.
 """
 
 from databricks_langchain import CheckpointSaver, DatabricksStore
@@ -129,116 +132,128 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.database import DatabaseInstance
 import time
 
-print("="*80)
-print("LAKEBASE INSTANCE SETUP")
-print("="*80)
-print(f"Instance name: {LAKEBASE_INSTANCE_NAME}")
+LAKEBASE_ENABLED = bool(LAKEBASE_INSTANCE_NAME)
 
-# Initialize Databricks workspace client
-w = WorkspaceClient()
-
-# Check if Lakebase instance exists, create if not
-instance_exists = False
-try:
-    instance = w.database.get_database_instance(LAKEBASE_INSTANCE_NAME)
-    print(f"✓ Lakebase instance '{LAKEBASE_INSTANCE_NAME}' already exists")
-    instance_exists = True
-except Exception as e:
-    print(f"Instance not found. Creating new Lakebase instance...")
+if not LAKEBASE_ENABLED:
+    print("="*80)
+    print("⚠️  LAKEBASE SKIPPED: LAKEBASE_INSTANCE_NAME is not set.")
+    print("   The agent will use in-memory MemorySaver as a fallback.")
+    print("   Multi-turn state will NOT be shared across Model Serving replicas.")
+    print("   To enable distributed state management, set lakebase_instance_name in prod_config.yaml.")
+    print("="*80)
+else:
     try:
-        # Create Lakebase instance with DatabaseInstance object
-        instance = w.database.create_database_instance(
-            DatabaseInstance(
-                name=LAKEBASE_INSTANCE_NAME,
-                capacity="CU_1"  # Start with smallest capacity (1 compute unit)
-            )
-        )
-        print(f"✓ Lakebase instance '{LAKEBASE_INSTANCE_NAME}' creation initiated")
-        print(f"  Capacity: CU_1")
-        print("  Waiting for instance to become available...")
-        
-        # Wait for instance to be ready (can take 2-5 minutes)
-        max_wait_time = 300  # 5 minutes
-        wait_interval = 10  # Check every 10 seconds
-        elapsed_time = 0
-        
-        while elapsed_time < max_wait_time:
+        print("="*80)
+        print("LAKEBASE INSTANCE SETUP")
+        print("="*80)
+        print(f"Instance name: {LAKEBASE_INSTANCE_NAME}")
+
+        # Initialize Databricks workspace client
+        w = WorkspaceClient()
+
+        # Check if Lakebase instance exists, create if not
+        instance_exists = False
+        try:
+            instance = w.database.get_database_instance(LAKEBASE_INSTANCE_NAME)
+            print(f"✓ Lakebase instance '{LAKEBASE_INSTANCE_NAME}' already exists")
+            instance_exists = True
+        except Exception:
+            print(f"Instance not found. Creating new Lakebase instance...")
             try:
+                instance = w.database.create_database_instance(
+                    DatabaseInstance(
+                        name=LAKEBASE_INSTANCE_NAME,
+                        capacity="CU_1"  # Start with smallest capacity (1 compute unit)
+                    )
+                )
+                print(f"✓ Lakebase instance '{LAKEBASE_INSTANCE_NAME}' creation initiated")
+                print(f"  Capacity: CU_1")
+                print("  Waiting for instance to become available...")
+
+                max_wait_time = 300  # 5 minutes
+                wait_interval = 10  # Check every 10 seconds
+                elapsed_time = 0
+
+                while elapsed_time < max_wait_time:
+                    try:
+                        instance = w.database.get_database_instance(LAKEBASE_INSTANCE_NAME)
+                        print(f"✓ Instance is now available (waited {elapsed_time}s)")
+                        instance_exists = True
+                        break
+                    except:
+                        time.sleep(wait_interval)
+                        elapsed_time += wait_interval
+                        print(f"  Still waiting... ({elapsed_time}s elapsed)")
+
+                if not instance_exists:
+                    raise TimeoutError(f"Instance not ready after {max_wait_time}s")
+
+            except Exception as create_error:
+                print(f"❌ Error creating Lakebase instance: {create_error}")
+                raise
+
+        if instance_exists:
+            print("\n" + "="*80)
+            print("CHECKING INSTANCE STATUS")
+            print("="*80)
+
+            max_status_wait = 600  # 10 minutes
+            status_check_interval = 60
+            status_elapsed = 0
+
+            while status_elapsed < max_status_wait:
                 instance = w.database.get_database_instance(LAKEBASE_INSTANCE_NAME)
-                # If we can get the instance without error, it's ready
-                print(f"✓ Instance is now available (waited {elapsed_time}s)")
-                instance_exists = True
-                break
-            except:
-                time.sleep(wait_interval)
-                elapsed_time += wait_interval
-                print(f"  Still waiting... ({elapsed_time}s elapsed)")
-        
-        if not instance_exists:
-            print(f"⚠️ Instance creation is taking longer than expected.")
-            print(f"   Please wait a few more minutes and re-run this cell.")
-            raise TimeoutError(f"Instance not ready after {max_wait_time}s")
-            
-    except Exception as create_error:
-        print(f"❌ Error creating Lakebase instance: {create_error}")
-        raise
+                instance_state = instance.state.value if instance.state else "UNKNOWN"
 
-if instance_exists:
-    # Check if instance is in RUNNING state before proceeding
-    print("\n" + "="*80)
-    print("CHECKING INSTANCE STATUS")
-    print("="*80)
-    
-    max_status_wait = 600  # 10 minutes max wait for RUNNING state
-    status_check_interval = 60  # Check every 1 minute
-    status_elapsed = 0
-    
-    while status_elapsed < max_status_wait:
-        instance = w.database.get_database_instance(LAKEBASE_INSTANCE_NAME)
-        instance_state = instance.state.value if instance.state else "UNKNOWN"
-        
-        print(f"Instance state: {instance_state}")
-        
-        if instance_state == "AVAILABLE":
-            print("✓ Instance is AVAILABLE and ready for table setup")
-            break
-        elif instance_state in ["FAILED", "DELETED"]:
-            raise RuntimeError(f"Instance is in {instance_state} state. Cannot proceed.")
-        else:
-            print(f"Instance {instance_state} not ready yet. Waiting 1 minute before rechecking...")
-            time.sleep(status_check_interval)
-            status_elapsed += status_check_interval
-            print(f"  Total wait time: {status_elapsed}s")
-    
-    if status_elapsed >= max_status_wait:
-        raise TimeoutError(f"Instance did not reach RUNNING state after {max_status_wait}s")
+                print(f"Instance state: {instance_state}")
 
-    print("\n" + "="*80)
-    print("INITIALIZING LAKEBASE TABLES")
-    print("="*80)
+                if instance_state == "AVAILABLE":
+                    print("✓ Instance is AVAILABLE and ready for table setup")
+                    break
+                elif instance_state in ["FAILED", "DELETED"]:
+                    raise RuntimeError(f"Instance is in {instance_state} state. Cannot proceed.")
+                else:
+                    print(f"Instance {instance_state} not ready yet. Waiting 1 minute before rechecking...")
+                    time.sleep(status_check_interval)
+                    status_elapsed += status_check_interval
+                    print(f"  Total wait time: {status_elapsed}s")
 
-    # Setup checkpoint table for short-term memory
-    print("Setting up checkpoint table...")
-    with CheckpointSaver(instance_name=LAKEBASE_INSTANCE_NAME) as saver:
-        saver.setup()
-        print("✓ Checkpoint table created/verified")
+            if status_elapsed >= max_status_wait:
+                raise TimeoutError(f"Instance did not reach RUNNING state after {max_status_wait}s")
 
-    # Setup store table for long-term memory
-    print("Setting up store table...")
-    store = DatabricksStore(
-        instance_name=LAKEBASE_INSTANCE_NAME,
-        embedding_endpoint=EMBEDDING_ENDPOINT,
-        embedding_dims=EMBEDDING_DIMS,
-    )
-    store.setup()
-    print("✓ Store table created/verified")
+            print("\n" + "="*80)
+            print("INITIALIZING LAKEBASE TABLES")
+            print("="*80)
 
-    print("\n" + "="*80)
-    print("✅ LAKEBASE SETUP COMPLETE!")
-    print("="*80)
-    print(f"Instance: {LAKEBASE_INSTANCE_NAME}")
-    print("Tables: checkpoints, store")
-    print("="*80)
+            print("Setting up checkpoint table...")
+            with CheckpointSaver(instance_name=LAKEBASE_INSTANCE_NAME) as saver:
+                saver.setup()
+                print("✓ Checkpoint table created/verified")
+
+            print("Setting up store table...")
+            store = DatabricksStore(
+                instance_name=LAKEBASE_INSTANCE_NAME,
+                embedding_endpoint=EMBEDDING_ENDPOINT,
+                embedding_dims=EMBEDDING_DIMS,
+            )
+            store.setup()
+            print("✓ Store table created/verified")
+
+            print("\n" + "="*80)
+            print("✅ LAKEBASE SETUP COMPLETE!")
+            print("="*80)
+            print(f"Instance: {LAKEBASE_INSTANCE_NAME}")
+            print("Tables: checkpoints, store")
+            print("="*80)
+
+    except Exception as lakebase_setup_error:
+        print("="*80)
+        print(f"⚠️  LAKEBASE SETUP FAILED: {lakebase_setup_error}")
+        print("   Deployment will continue WITHOUT Lakebase.")
+        print("   The agent will use in-memory MemorySaver as a fallback at runtime.")
+        print("   To fix: check Lakebase availability and re-run this cell before re-deploying.")
+        print("="*80)
+        LAKEBASE_ENABLED = False
 
 # COMMAND ----------
 
@@ -374,9 +389,6 @@ resources = [
     DatabricksServingEndpoint(LLM_ENDPOINT_SUMMARIZE),
     DatabricksServingEndpoint(EMBEDDING_ENDPOINT),
     
-    # Lakebase for state management (CRITICAL!)
-    DatabricksLakebase(database_instance_name=LAKEBASE_INSTANCE_NAME),
-    
     # Vector Search Index
     DatabricksVectorSearchIndex(index_name=VECTOR_SEARCH_INDEX),
     
@@ -397,6 +409,14 @@ resources = [
     DatabricksFunction(function_name=f"{CATALOG}.{SCHEMA}.get_space_instructions"),
     DatabricksFunction(function_name=f"{CATALOG}.{SCHEMA}.get_space_details"),
 ]
+
+# Conditionally add Lakebase resource only when configured and setup succeeded
+if LAKEBASE_ENABLED and LAKEBASE_INSTANCE_NAME:
+    resources.append(DatabricksLakebase(database_instance_name=LAKEBASE_INSTANCE_NAME))
+    print(f"✓ Lakebase resource declared: {LAKEBASE_INSTANCE_NAME}")
+else:
+    print("⚠️  Lakebase resource omitted from deployment (not configured or setup failed).")
+    print("   Agent will use in-memory MemorySaver fallback at runtime.")
 
 # Input example for schema inference
 input_example = {
@@ -420,6 +440,7 @@ with mlflow.start_run():
     mlflow.set_tag("llm_diversification", "enabled")
     mlflow.set_tag("agent_config_version", "v2.0_modular")
     mlflow.set_tag("code_structure", "modular")
+    mlflow.set_tag("memory_backend", "lakebase" if LAKEBASE_ENABLED else "in_memory_fallback")
     
     # Log model with MODULAR CODE via code_paths
     logged_agent_info = mlflow.pyfunc.log_model(

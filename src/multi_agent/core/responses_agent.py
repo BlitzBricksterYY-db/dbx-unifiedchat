@@ -93,11 +93,190 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
         self.lakebase_instance_name = LAKEBASE_INSTANCE_NAME
         self._store = None
         self._memory_tools = None
-        print("✓ SuperAgentHybridResponsesAgent initialized with memory support")
-    
+        self._last_first_token_time = None
+        if self.lakebase_instance_name:
+            print("✓ SuperAgentHybridResponsesAgent initialized with Lakebase memory support")
+        else:
+            print("⚠️  SuperAgentHybridResponsesAgent initialized WITHOUT Lakebase - using in-memory MemorySaver fallback")
+            print("   Multi-turn memory will NOT be shared across Model Serving replicas.")
+
+    def _build_checkpointer(self):
+        """
+        Build a checkpointer for the workflow graph.
+
+        Returns (checkpointer, using_lakebase) where using_lakebase indicates
+        whether the returned checkpointer is a CheckpointSaver context manager
+        (True) or an in-memory MemorySaver (False).
+        """
+        if self.lakebase_instance_name:
+            try:
+                return CheckpointSaver(instance_name=self.lakebase_instance_name), True
+            except Exception as e:
+                logger.warning(f"Lakebase unavailable ({e}). Falling back to in-memory MemorySaver.")
+        from langgraph.checkpoint.memory import MemorySaver
+        logger.warning(
+            "Using in-memory MemorySaver. State will NOT persist across replicas or restarts."
+        )
+        return MemorySaver(), False
+
+    def _stream_workflow(self, checkpointer, initial_state, run_config, cc_msgs, workflow_start_time):
+        """
+        Compile the graph with the given checkpointer and stream all events.
+
+        This is a generator that yields ResponsesAgentStreamEvent objects.
+        After iteration completes, self._last_first_token_time is set so the
+        caller can compute TTFT.
+        """
+        first_message = True
+        seen_ids = set()
+        first_token_time = None
+
+        app = self.workflow.compile(checkpointer=checkpointer)
+        logger.info("Executing workflow with checkpointer")
+
+        for event in app.stream(initial_state, run_config, stream_mode=["updates", "messages", "custom", "tasks"]):
+            event_type = event[0]
+            event_data = event[1]
+
+            # Handle streaming text deltas (messages mode)
+            if event_type == "messages":
+                try:
+                    chunk = event_data[0] if isinstance(event_data, (list, tuple)) else event_data
+                    if isinstance(chunk, AIMessageChunk) and (content := chunk.content):
+                        if first_token_time is None:
+                            first_token_time = time.time()
+                            ttft = first_token_time - workflow_start_time
+                            _performance_metrics["workflow_metrics"]["ttft_seconds"].append(ttft)
+                            logger.info(f"TTFT: {ttft:.3f}s")
+                        yield ResponsesAgentStreamEvent(
+                            **self.create_text_delta(delta=content, item_id=chunk.id),
+                        )
+                except Exception as e:
+                    logger.warning(f"Error processing message chunk: {e}")
+
+            # Handle node updates (updates mode)
+            elif event_type == "updates":
+                events = event_data
+                new_msgs = [
+                    msg
+                    for v in events.values()
+                    for msg in v.get("messages", [])
+                    if hasattr(msg, 'id') and msg.id not in seen_ids
+                ]
+
+                if first_message:
+                    seen_ids.update(msg.id for msg in new_msgs[: len(cc_msgs)])
+                    new_msgs = new_msgs[len(cc_msgs) :]
+                    first_message = False
+                else:
+                    seen_ids.update(msg.id for msg in new_msgs)
+                    if events:
+                        node_name = tuple(events.keys())[0]
+                        node_update = events[node_name]
+                        updated_keys = [k for k in node_update.keys() if k != "messages"]
+
+                        step_text = f"🔹 Step: {node_name}"
+                        if updated_keys:
+                            step_text += f" | Keys updated: {', '.join(updated_keys)}"
+
+                        yield ResponsesAgentStreamEvent(
+                            type="response.output_item.done",
+                            item=self.create_text_output_item(text=step_text, id=str(uuid4())),
+                        )
+
+                        if "next_agent" in node_update:
+                            next_agent = node_update["next_agent"]
+                            yield ResponsesAgentStreamEvent(
+                                type="response.output_item.done",
+                                item=self.create_text_output_item(
+                                    text=f"🔀 Routing decision: Next agent = {next_agent}",
+                                    id=str(uuid4()),
+                                ),
+                            )
+
+                for msg in new_msgs:
+                    if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                        for tool_call in msg.tool_calls:
+                            try:
+                                yield ResponsesAgentStreamEvent(
+                                    type="response.output_item.done",
+                                    item=self.create_function_call_item(
+                                        id=str(uuid4()),
+                                        call_id=tool_call.get("id", str(uuid4())),
+                                        name=tool_call.get("name", "unknown"),
+                                        arguments=json.dumps(tool_call.get("args", {})),
+                                    ),
+                                )
+                            except Exception as e:
+                                logger.warning(f"Error emitting tool call: {e}")
+                    elif hasattr(msg, '__class__') and msg.__class__.__name__ == 'ToolMessage':
+                        try:
+                            tool_name = getattr(msg, 'name', 'unknown')
+                            tool_content = str(msg.content)[:200] if msg.content else "No content"
+                            yield ResponsesAgentStreamEvent(
+                                type="response.output_item.done",
+                                item=self.create_text_output_item(
+                                    text=f"🔨 Tool result ({tool_name}): {tool_content}...",
+                                    id=str(uuid4()),
+                                ),
+                            )
+                        except Exception as e:
+                            logger.warning(f"Error emitting tool result: {e}")
+                    else:
+                        yield from output_to_responses_items_stream([msg])
+
+            # Handle custom mode (agent-specific events)
+            elif event_type == "custom":
+                try:
+                    formatted_text = self.format_custom_event(event_data)
+                    yield ResponsesAgentStreamEvent(
+                        type="response.output_item.done",
+                        item=self.create_text_output_item(text=formatted_text, id=str(uuid4())),
+                    )
+                except Exception as e:
+                    logger.warning(f"Error processing custom event: {e}")
+
+            # Handle tasks mode (node lifecycle events)
+            elif event_type == "tasks":
+                try:
+                    task_event = event_data
+                    event_name = task_event.get("event", "unknown")
+                    node_name = task_event.get("name", "unknown")
+
+                    if event_name == "start":
+                        logger.debug(f"Task started: {node_name}")
+                    elif event_name == "end":
+                        duration = task_event.get("duration")
+                        if duration:
+                            logger.info(f"Task completed: {node_name} ({duration:.3f}s)")
+                            if "node_timings" not in _performance_metrics["workflow_metrics"]:
+                                _performance_metrics["workflow_metrics"]["node_timings"] = {}
+                            _performance_metrics["workflow_metrics"]["node_timings"][node_name] = duration
+                        else:
+                            logger.info(f"Task completed: {node_name}")
+                    elif event_name == "error":
+                        error = task_event.get("error", "Unknown error")
+                        logger.error(f"Task failed: {node_name} - {error}")
+                        yield ResponsesAgentStreamEvent(
+                            type="response.output_item.done",
+                            item=self.create_text_output_item(
+                                text=f"❌ Error in {node_name}: {error}",
+                                id=str(uuid4()),
+                            ),
+                        )
+                except Exception as e:
+                    logger.warning(f"Error processing task event: {e}")
+
+        self._last_first_token_time = first_token_time
+
     @property
     def store(self):
-        """Lazy initialization of DatabricksStore for long-term memory."""
+        """Lazy initialization of DatabricksStore for long-term memory.
+
+        Returns None if Lakebase is not configured.
+        """
+        if not self.lakebase_instance_name:
+            return None
         if self._store is None:
             logger.info(f"Initializing DatabricksStore with instance: {self.lakebase_instance_name}")
             self._store = DatabricksStore(
@@ -106,7 +285,7 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
                 embedding_dims=EMBEDDING_DIMS,
             )
             self._store.setup()  # Creates store table if not exists
-            logger.info("✓ DatabricksStore initialized")
+            logger.info("DatabricksStore initialized")
         return self._store
     
     @property
@@ -126,10 +305,12 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
                     query: The search query to find relevant memories
                     config: Runtime configuration containing user_id
                 """
+                if not self.store:
+                    return "Long-term memory not available - Lakebase is not configured."
                 user_id = config.get("configurable", {}).get("user_id")
                 if not user_id:
                     return "Memory not available - no user_id provided."
-                
+
                 namespace = ("user_memories", user_id.replace(".", "-"))
                 results = self.store.search(namespace, query=query, limit=5)
                 
@@ -152,10 +333,12 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
                         Example: '{"preferred_chart_type": "bar", "default_spaces": ["patient_data"]}'
                     config: Runtime configuration containing user_id
                 """
+                if not self.store:
+                    return "Long-term memory not available - Lakebase is not configured."
                 user_id = config.get("configurable", {}).get("user_id")
                 if not user_id:
                     return "Cannot save memory - no user_id provided."
-                
+
                 namespace = ("user_memories", user_id.replace(".", "-"))
                 
                 try:
@@ -178,10 +361,12 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
                     memory_key: The key of the memory to delete
                     config: Runtime configuration containing user_id
                 """
+                if not self.store:
+                    return "Long-term memory not available - Lakebase is not configured."
                 user_id = config.get("configurable", {}).get("user_id")
                 if not user_id:
                     return "Cannot delete memory - no user_id provided."
-                
+
                 namespace = ("user_memories", user_id.replace(".", "-"))
                 self.store.delete(namespace, memory_key)
                 return f"Successfully deleted memory with key '{memory_key}' for user"
@@ -507,201 +692,28 @@ Guidelines:
             initial_state["user_id"] = user_id
             initial_state["thread_id"] = thread_id
         
-        first_message = True
-        seen_ids = set()
-        
-        # Execute workflow with CheckpointSaver for distributed serving
-        # CRITICAL: CheckpointSaver as context manager ensures all instances share state
-        with CheckpointSaver(instance_name=self.lakebase_instance_name) as checkpointer:
-            # Compile graph with checkpointer at runtime
-            # This allows distributed Model Serving to access shared state
-            app = self.workflow.compile(checkpointer=checkpointer)
-            
-            logger.info(f"Executing workflow with checkpointer (thread: {thread_id})")
-            
-            # Stream the workflow execution with enhanced visibility modes
-            # CheckpointSaver will:
-            # 1. Restore previous state from thread_id (if exists) from Lakebase
-            # 2. Merge with initial_state (initial_state takes precedence)
-            # 3. Preserve conversation history across distributed instances
-            # Stream modes:
-            # - updates: State changes after each node
-            # - messages: LLM token-by-token streaming
-            # - custom: Agent-specific events (thinking, decisions, progress)
-            # - tasks: Task lifecycle events (start, finish, errors) for node execution tracking
-            for event in app.stream(initial_state, run_config, stream_mode=["updates", "messages", "custom", "tasks"]):
-                event_type = event[0]
-                event_data = event[1]
-                
-                # Handle streaming text deltas (messages mode)
-                if event_type == "messages":
-                    try:
-                        # Extract the message chunk
-                        chunk = event_data[0] if isinstance(event_data, (list, tuple)) else event_data
-                        
-                        # Stream text content as deltas for real-time visibility in Playground
-                        if isinstance(chunk, AIMessageChunk) and (content := chunk.content):
-                            # PHASE 3: Track TTFT (Time To First Token)
-                            if first_token_time is None:
-                                first_token_time = time.time()
-                                ttft = first_token_time - workflow_start_time
-                                _performance_metrics["workflow_metrics"]["ttft_seconds"].append(ttft)
-                                logger.info(f"⚡ TTFT: {ttft:.3f}s")
-                            
-                            yield ResponsesAgentStreamEvent(
-                                **self.create_text_delta(delta=content, item_id=chunk.id),
-                            )
-                    except Exception as e:
-                        logger.warning(f"Error processing message chunk: {e}")
-                
-                # Handle node updates (updates mode)
-                elif event_type == "updates":
-                    events = event_data
-                    new_msgs = [
-                        msg
-                        for v in events.values()
-                        for msg in v.get("messages", [])
-                        if hasattr(msg, 'id') and msg.id not in seen_ids
-                    ]
-                    
-                    if first_message:
-                        seen_ids.update(msg.id for msg in new_msgs[: len(cc_msgs)])
-                        new_msgs = new_msgs[len(cc_msgs) :]
-                        first_message = False
-                    else:
-                        seen_ids.update(msg.id for msg in new_msgs)
-                        # Emit node name as a step indicator with enhanced details
-                        if events:
-                            node_name = tuple(events.keys())[0]
-                            node_update = events[node_name]
-                            updated_keys = [k for k in node_update.keys() if k != "messages"]
-                            
-                            # Enhanced step indicator with state keys
-                            step_text = f"🔹 Step: {node_name}"
-                            if updated_keys:
-                                step_text += f" | Keys updated: {', '.join(updated_keys)}"
-                            
-                            yield ResponsesAgentStreamEvent(
-                                type="response.output_item.done",
-                                item=self.create_text_output_item(
-                                    text=step_text, id=str(uuid4())
-                                ),
-                            )
-                            
-                            # Emit routing decision if next_agent changed
-                            if "next_agent" in node_update:
-                                next_agent = node_update["next_agent"]
-                                yield ResponsesAgentStreamEvent(
-                                    type="response.output_item.done",
-                                    item=self.create_text_output_item(
-                                        text=f"🔀 Routing decision: Next agent = {next_agent}",
-                                        id=str(uuid4())
-                                    ),
-                                )
-                    
-                    # Process messages for tool calls, tool results, and final text
-                    for msg in new_msgs:
-                        # Check if message has tool calls
-                        if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                            # Emit function call items for tool invocations
-                            for tool_call in msg.tool_calls:
-                                try:
-                                    yield ResponsesAgentStreamEvent(
-                                        type="response.output_item.done",
-                                        item=self.create_function_call_item(
-                                            id=str(uuid4()),
-                                            call_id=tool_call.get("id", str(uuid4())),
-                                            name=tool_call.get("name", "unknown"),
-                                            arguments=json.dumps(tool_call.get("args", {})),
-                                        ),
-                                    )
-                                except Exception as e:
-                                    logger.warning(f"Error emitting tool call: {e}")
-                        # Handle ToolMessage for tool results
-                        elif hasattr(msg, '__class__') and msg.__class__.__name__ == 'ToolMessage':
-                            try:
-                                tool_name = getattr(msg, 'name', 'unknown')
-                                tool_content = str(msg.content)[:200] if msg.content else "No content"
-                                yield ResponsesAgentStreamEvent(
-                                    type="response.output_item.done",
-                                    item=self.create_text_output_item(
-                                        text=f"🔨 Tool result ({tool_name}): {tool_content}...",
-                                        id=str(uuid4())
-                                    ),
-                                )
-                            except Exception as e:
-                                logger.warning(f"Error emitting tool result: {e}")
-                        else:
-                            # Emit regular message content
-                            yield from output_to_responses_items_stream([msg])
-                
-                # Handle custom mode (agent-specific events)
-                elif event_type == "custom":
-                    try:
-                        custom_data = event_data
-                        formatted_text = self.format_custom_event(custom_data)
-                        yield ResponsesAgentStreamEvent(
-                            type="response.output_item.done",
-                            item=self.create_text_output_item(
-                                text=formatted_text,
-                                id=str(uuid4())
-                            ),
-                        )
-                    except Exception as e:
-                        logger.warning(f"Error processing custom event: {e}")
-                
-                # Handle tasks mode (node lifecycle events)
-                elif event_type == "tasks":
-                    try:
-                        task_event = event_data
-                        # Task events include: 'event' (start/finish/error), 'name', 'node', 'timestamp', etc.
-                        event_name = task_event.get("event", "unknown")
-                        node_name = task_event.get("name", "unknown")
-                        
-                        if event_name == "start":
-                            # Task started
-                            logger.debug(f"⏳ Task started: {node_name}")
-                            # Optionally emit to UI:
-                            # yield ResponsesAgentStreamEvent(
-                            #     type="response.output_item.done",
-                            #     item=self.create_text_output_item(
-                            #         text=f"⏳ Starting: {node_name}",
-                            #         id=str(uuid4())
-                            #     ),
-                            # )
-                        
-                        elif event_name == "end":
-                            # Task completed successfully
-                            duration = task_event.get("duration")
-                            if duration:
-                                logger.info(f"✅ Task completed: {node_name} ({duration:.3f}s)")
-                                # Track node execution times for performance metrics
-                                if "node_timings" not in _performance_metrics["workflow_metrics"]:
-                                    _performance_metrics["workflow_metrics"]["node_timings"] = {}
-                                _performance_metrics["workflow_metrics"]["node_timings"][node_name] = duration
-                            else:
-                                logger.info(f"✅ Task completed: {node_name}")
-                        
-                        elif event_name == "error":
-                            # Task failed with error
-                            error = task_event.get("error", "Unknown error")
-                            logger.error(f"❌ Task failed: {node_name} - {error}")
-                            # Emit error to UI
-                            yield ResponsesAgentStreamEvent(
-                                type="response.output_item.done",
-                                item=self.create_text_output_item(
-                                    text=f"❌ Error in {node_name}: {error}",
-                                    id=str(uuid4())
-                                ),
-                            )
-                    
-                    except Exception as e:
-                        logger.warning(f"Error processing task event: {e}")
-        
-        # PHASE 3: Track TTCL (Time To Completion)
+        # Build checkpointer: Lakebase (distributed, persistent) or MemorySaver (in-process fallback)
+        checkpointer, using_lakebase = self._build_checkpointer()
+        if using_lakebase:
+            # CheckpointSaver is a context manager that manages the Lakebase connection
+            with checkpointer:
+                yield from self._stream_workflow(
+                    checkpointer, initial_state, run_config, cc_msgs, workflow_start_time
+                )
+        else:
+            # MemorySaver is a plain object, no context manager needed
+            yield from self._stream_workflow(
+                checkpointer, initial_state, run_config, cc_msgs, workflow_start_time
+            )
+
+        # Track TTCL (Time To Completion)
         workflow_end_time = time.time()
         ttcl = workflow_end_time - workflow_start_time
         _performance_metrics["workflow_metrics"]["ttcl_seconds"].append(ttcl)
-        
+
+        first_token_time = self._last_first_token_time
         logger.info(f"Workflow execution completed (thread: {thread_id})")
-        logger.info(f"⏱️  Performance: TTFT={first_token_time - workflow_start_time if first_token_time else 'N/A'}s, TTCL={ttcl:.3f}s")
+        logger.info(
+            f"Performance: TTFT={first_token_time - workflow_start_time if first_token_time else 'N/A'}s, "
+            f"TTCL={ttcl:.3f}s"
+        )
