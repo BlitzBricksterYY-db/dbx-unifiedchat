@@ -8,35 +8,40 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from typing import Optional
 
-from ..core.state import AgentState
-from ..agents.clarification import unified_intent_context_clarification_node
+from ..core.state import AgentState, GraphInput
+from ..agents.clarification import ClarificationAgent
 from ..agents.planning import planning_node
 from ..agents.sql_synthesis import sql_synthesis_table_node, sql_synthesis_genie_node
 from ..agents.sql_execution import sql_execution_node
 from ..agents.summarize import summarize_node
 
 
-def create_super_agent_hybrid() -> StateGraph:
+def create_super_agent_hybrid(config=None) -> StateGraph:
     """
     Create the Hybrid Super Agent LangGraph workflow.
-    
-    Combines:
-    - Function-based agent nodes for flexibility
-    - Explicit state management for observability
-    - Conditional routing for dynamic workflows
-    
+
     Returns:
         StateGraph: Uncompiled LangGraph workflow
     """
-    print("\n" + "="*80)
-    print("🏗️ BUILDING HYBRID SUPER AGENT WORKFLOW")
-    print("="*80)
-    
-    # Create the graph with explicit state
-    workflow = StateGraph(AgentState)
-    
-    # Add nodes - SIMPLIFIED with unified node
-    workflow.add_node("unified_intent_context_clarification", unified_intent_context_clarification_node)
+    if config is None:
+        from .config import get_config
+        config = get_config()
+
+    table_name = (
+        f"{config.unity_catalog.catalog_name}"
+        f".{config.unity_catalog.schema_name}"
+        f".enriched_genie_docs_chunks"
+    )
+    clarification_agent = ClarificationAgent(
+        llm_endpoint=config.llm.clarification_endpoint,
+        table_name=table_name,
+    )
+
+    workflow = StateGraph(AgentState, input=GraphInput)
+
+    # The clarification subgraph shares AgentState so it is passed directly
+    # as a node per the LangGraph subgraph pattern — no wrapper needed.
+    workflow.add_node("unified_intent_context_clarification", clarification_agent.subgraph)
     workflow.add_node("planning", planning_node)
     workflow.add_node("sql_synthesis_table", sql_synthesis_table_node)
     workflow.add_node("sql_synthesis_genie", sql_synthesis_genie_node)
@@ -45,21 +50,16 @@ def create_super_agent_hybrid() -> StateGraph:
     
     # Define routing logic based on explicit state
     def route_after_unified(state: AgentState) -> str:
-        """Route after unified node: planning or END (clarification/meta-question/irrelevant)"""
-        # Check if irrelevant question - go directly to END with refusal
+        """Route after unified node: planning or END (meta-question/irrelevant).
+
+        Clarification no longer routes to END here — unclear queries pause inside
+        the subgraph via interrupt() and resume directly into planning.
+        """
         if state.get("is_irrelevant", False):
             return END
-        
-        # Check if meta-question - go directly to END with answer
         if state.get("is_meta_question", False):
             return END
-        
-        # Check if question is clear - proceed to planning
-        if state.get("question_clear", False):
-            return "planning"
-        
-        # Otherwise, end for clarification
-        return END
+        return "planning"
     
     def route_after_planning(state: AgentState) -> str:
         """Route after planning: determine SQL synthesis route or direct summarize"""
@@ -125,63 +125,43 @@ def create_super_agent_hybrid() -> StateGraph:
     # Summarize is the final node before END
     workflow.add_edge("summarize", END)
     
-    print("✓ Workflow nodes added:")
-    print("  1. Unified Intent+Context+Clarification Node")
-    print("  2. Planning Agent")
-    print("  3. SQL Synthesis Agent - Table Route")
-    print("  4. SQL Synthesis Agent - Genie Route")
-    print("  5. SQL Execution Agent")
-    print("  6. Result Summarize Agent - FINAL NODE")
-    print("\n✓ Conditional routing configured")
-    print("✓ All paths route to summarize node before END")
-    print("\n✅ Hybrid Super Agent workflow created successfully!")
-    print("="*80)
-    
     return workflow
 
 
 def create_agent_graph(config=None, with_checkpointer: bool = False):
     """
-    Create and optionally compile the agent graph.
-    
+    Create and compile the agent graph.
+
+    interrupt() requires a checkpointer to persist paused state. When
+    with_checkpointer=False (local dev), MemorySaver is used so interrupt()
+    works without Lakebase. When with_checkpointer=True (Databricks),
+    DatabricksCheckpointSaver is used for durable cross-request persistence.
+
     Args:
         config: Optional configuration object (uses default if None)
-        with_checkpointer: Whether to compile with checkpointer
-        
+        with_checkpointer: Use DatabricksCheckpointSaver instead of MemorySaver
+
     Returns:
-        StateGraph or CompiledStateGraph depending on with_checkpointer
+        CompiledStateGraph
     """
-    workflow = create_super_agent_hybrid()
-    
+    workflow = create_super_agent_hybrid(config)
+
     if with_checkpointer:
-        # Import checkpointer only if needed
-        from databricks_langchain.checkpoint import DatabricksCheckpointSaver
-        from databricks_langchain.store import DatabricksStore
         from databricks.sdk import WorkspaceClient
-        
-        # Get Lakebase instance name from config
-        if config:
-            lakebase_instance = config.lakebase.instance_name
-            embedding_endpoint = config.lakebase.embedding_endpoint
-            embedding_dims = config.lakebase.embedding_dims
-        else:
-            # Use defaults
+        from databricks_langchain.checkpoint import DatabricksCheckpointSaver
+
+        if config is None:
             from .config import get_config
-            cfg = get_config()
-            lakebase_instance = cfg.lakebase.instance_name
-            embedding_endpoint = cfg.lakebase.embedding_endpoint
-            embedding_dims = cfg.lakebase.embedding_dims
-        
-        # Create checkpointer
+            config = get_config()
+
         w = WorkspaceClient()
-        checkpointer = DatabricksCheckpointSaver(w.lakebase, database_instance_name=lakebase_instance)
-        
-        # Compile with checkpointer
-        return workflow.compile(checkpointer=checkpointer)
+        checkpointer = DatabricksCheckpointSaver(
+            w.lakebase, database_instance_name=config.lakebase.instance_name
+        )
     else:
-        # Return uncompiled workflow
-        return workflow
+        from langgraph.checkpoint.memory import MemorySaver
+        checkpointer = MemorySaver()
+
+    return workflow.compile(checkpointer=checkpointer)
 
 
-# For backwards compatibility
-super_agent_hybrid = create_super_agent_hybrid()
