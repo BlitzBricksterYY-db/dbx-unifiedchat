@@ -1,3 +1,8 @@
+# Databricks notebook source
+
+# COMMAND ----------
+
+# DBTITLE 1,helper functions
 """
 Table Metadata Enrichment Module
 
@@ -9,7 +14,18 @@ This module enriches table metadata with:
 - Multi-level chunks for vector search (table + column levels)
 
 Designed to run as a Databricks job with Spark SQL.
+TODO: 1. llm output only selected fields (enhanced_comment and classification) in json, not all fields.
+      2. optimize ai_query by running on a table over many rows at once.
+      Example:
 """
+# df_out = df.selectExpr("""
+#   ai_query(
+#     'databricks-meta-llama-3-3-70b-instruct',
+#     CONCAT('Please summarize: ', text),
+#     modelParameters => named_struct('max_tokens', 100, 'temperature', 0.7)
+#   ) AS summary
+# """)
+# df_out.write.mode("overwrite").saveAsTable("output_table")
 
 import json
 import pandas as pd
@@ -524,7 +540,7 @@ def create_table_chunks(enriched_tables: List[Dict]) -> List[Dict]:
         for col in enriched_columns:
             col_name = col.get('column_name')
             col_type = col.get('data_type')
-            enhanced_comment = col.get('enhanced_comment', col.get('comment', ''))
+            enhanced_comment = col.get('enhanced_comment') or col.get('comment') or ''
             classification = col.get('classification', '')
             print(col)
             
@@ -725,107 +741,110 @@ def save_to_unity_catalog(enriched_tables: List[Dict],
 # Entry Point for Databricks Job
 # ============================================================================
 
-if __name__ == "__main__":
-    # Get parameters from notebook widgets (Databricks notebook style)
-    # These are set when running as a notebook task via Jobs API
+# COMMAND ----------
+
+# DBTITLE 1,Create notebook widgets with default values
+# Create notebook widgets with default values
+dbutils.widgets.text("table_list_table", "serverless_dbx_unifiedchat_catalog.gold.temp_enrichment_tables_4cb71ab1", "Table List Table")
+dbutils.widgets.text("tables", "", "Tables (comma-separated FQNs)")
+dbutils.widgets.text("sample_size", "10", "Sample Size")
+dbutils.widgets.text("max_unique_values", "10", "Max Unique Values")
+dbutils.widgets.text("llm_endpoint", "databricks-gemini-3-1-flash-lite", "LLM Endpoint") # databricks-gemini-3-flash, databricks-claude-haiku-4-5, databricks-gpt-5-mini, databricks-gemini-3-1-flash-lite, databricks-gpt-oss-120b
+dbutils.widgets.text("metadata_table", "serverless_dbx_unifiedchat_catalog.gold.enriched_table_metadata", "Metadata Table")
+dbutils.widgets.text("chunks_table", "serverless_dbx_unifiedchat_catalog.gold.enriched_table_chunks", "Chunks Table")
+dbutils.widgets.text("write_mode", "overwrite", "Write Mode")
+
+# COMMAND ----------
+
+# DBTITLE 1,Parse and validate input parameters from notebook widge ...
+# Get parameters from notebook widgets
+table_list_table = dbutils.widgets.get("table_list_table").strip() or None
+table_fqns_str = dbutils.widgets.get("tables").strip() or None
+sample_size = int(dbutils.widgets.get("sample_size"))
+max_unique_values = int(dbutils.widgets.get("max_unique_values"))
+llm_endpoint = dbutils.widgets.get("llm_endpoint")
+metadata_table_full = dbutils.widgets.get("metadata_table")
+chunks_table_full = dbutils.widgets.get("chunks_table")
+write_mode = dbutils.widgets.get("write_mode")
+
+# Get table FQNs either from temp table or comma-separated string
+if table_list_table:
+    print(f"Reading table list from temp table: {table_list_table}")
     try:
-        # Try to use dbutils widgets (notebook mode)
-        # Support new table_list_table parameter (for large table lists) or legacy tables parameter
-        table_list_table = None
-        table_fqns_str = None
-        
-        try:
-            table_list_table = dbutils.widgets.get("table_list_table")
-        except:
-            pass
-        
-        if not table_list_table:
-            try:
-                table_fqns_str = dbutils.widgets.get("tables")
-            except:
-                pass
-        
-        sample_size = int(dbutils.widgets.get("sample_size"))
-        max_unique_values = int(dbutils.widgets.get("max_unique_values"))
-        llm_endpoint = dbutils.widgets.get("llm_endpoint")
-        metadata_table_full = dbutils.widgets.get("metadata_table")
-        chunks_table_full = dbutils.widgets.get("chunks_table")
-        write_mode = dbutils.widgets.get("write_mode")
-    except:
-        # Fallback to sys.argv for local testing
-        import sys
-        table_list_table = None
-        table_fqns_str = sys.argv[1] if len(sys.argv) > 1 else ""
-        sample_size = int(sys.argv[2]) if len(sys.argv) > 2 else 20
-        max_unique_values = int(sys.argv[3]) if len(sys.argv) > 3 else 50
-        llm_endpoint = sys.argv[4] if len(sys.argv) > 4 else "databricks-claude-sonnet-4-5"
-        metadata_table_full = sys.argv[5] if len(sys.argv) > 5 else "serverless_dbx_unifiedchat_catalog.gold.enriched_table_metadata"
-        chunks_table_full = sys.argv[6] if len(sys.argv) > 6 else "serverless_dbx_unifiedchat_catalog.gold.enriched_table_chunks"
-        write_mode = sys.argv[7] if len(sys.argv) > 7 else "overwrite"
-    
-    # Get table FQNs either from temp table or comma-separated string
-    if table_list_table:
-        print(f"Reading table list from temp table: {table_list_table}")
-        try:
-            df_tables = spark.sql(f"SELECT table_fqn FROM {table_list_table}")
-            table_fqns = [row.table_fqn for row in df_tables.collect()]
-            print(f"✓ Loaded {len(table_fqns)} tables from temp table")
-        except Exception as e:
-            print(f"Error reading temp table {table_list_table}: {str(e)}")
-            raise ValueError(f"Failed to read table list from {table_list_table}")
-    elif table_fqns_str:
-        # Parse comma-separated table FQNs (legacy method)
-        print(f"Reading table list from comma-separated parameter")
-        table_fqns = [fqn.strip() for fqn in table_fqns_str.split(',') if fqn.strip()]
-    else:
-        table_fqns = []
-    
-    if not table_fqns:
-        print("Error: No table FQNs provided")
-        print("Usage: Provide 'table_list_table' parameter with temp table name or 'tables' parameter with comma-separated FQNs")
-        raise ValueError("No table FQNs provided")
-    
-    # Parse destination table names (format: catalog.schema.table)
-    metadata_parts = metadata_table_full.split('.')
-    chunks_parts = chunks_table_full.split('.')
-    
-    if len(metadata_parts) != 3 or len(chunks_parts) != 3:
-        print(f"Error: Invalid table format. Expected 'catalog.schema.table'")
-        print(f"  Metadata table: {metadata_table_full}")
-        print(f"  Chunks table: {chunks_table_full}")
-        raise ValueError("Invalid table format")
-    
-    catalog_name = metadata_parts[0]
-    schema_name = metadata_parts[1]
-    metadata_table_name = metadata_parts[2]
-    chunks_table_name = chunks_parts[2]
-    
-    print(f"Parameters:")
-    print(f"  Tables: {len(table_fqns)}")
-    print(f"  Sample size: {sample_size}")
-    print(f"  Max unique values: {max_unique_values}")
-    print(f"  LLM endpoint: {llm_endpoint}")
+        df_tables = spark.sql(f"SELECT table_fqn FROM {table_list_table}")
+        table_fqns = [row.table_fqn for row in df_tables.collect()]
+        print(f"✓ Loaded {len(table_fqns)} tables from temp table")
+    except Exception as e:
+        print(f"Error reading temp table {table_list_table}: {str(e)}")
+        raise ValueError(f"Failed to read table list from {table_list_table}")
+elif table_fqns_str:
+    # Parse comma-separated table FQNs (legacy method)
+    print(f"Reading table list from comma-separated parameter")
+    table_fqns = [fqn.strip() for fqn in table_fqns_str.split(',') if fqn.strip()]
+else:
+    table_fqns = []
+
+if not table_fqns:
+    print("Error: No table FQNs provided")
+    print("Usage: Provide 'table_list_table' parameter with temp table name or 'tables' parameter with comma-separated FQNs")
+    raise ValueError("No table FQNs provided")
+
+# Parse destination table names (format: catalog.schema.table)
+metadata_parts = metadata_table_full.split('.')
+chunks_parts = chunks_table_full.split('.')
+
+if len(metadata_parts) != 3 or len(chunks_parts) != 3:
+    print(f"Error: Invalid table format. Expected 'catalog.schema.table'")
     print(f"  Metadata table: {metadata_table_full}")
     print(f"  Chunks table: {chunks_table_full}")
-    print(f"  Write mode: {write_mode}")
-    
-    # Run enrichment
-    enriched = enrich_tables(table_fqns, sample_size, max_unique_values, llm_endpoint)
-    
-    # Create chunks
-    chunks = create_table_chunks(enriched)
-    
-    # Save to Unity Catalog
-    save_to_unity_catalog(
-        enriched, 
-        chunks,
-        catalog_name=catalog_name,
-        schema_name=schema_name,
-        enriched_docs_table=metadata_table_name,
-        chunks_table=chunks_table_name,
-        write_mode=write_mode
-    )
-    
-    print("\n" + "="*80)
-    print("Enrichment job complete!")
-    print("="*80)
+    raise ValueError("Invalid table format")
+
+catalog_name = metadata_parts[0]
+schema_name = metadata_parts[1]
+metadata_table_name = metadata_parts[2]
+chunks_table_name = chunks_parts[2]
+
+print(f"Parameters:")
+print(f"  Tables: {len(table_fqns)}")
+print(f"  Sample size: {sample_size}")
+print(f"  Max unique values: {max_unique_values}")
+print(f"  LLM endpoint: {llm_endpoint}")
+print(f"  Metadata table: {metadata_table_full}")
+print(f"  Chunks table: {chunks_table_full}")
+print(f"  Write mode: {write_mode}")
+
+# COMMAND ----------
+
+# DBTITLE 1,Index and display all fully qualified table names
+for i, value in enumerate(table_fqns, 0):
+    print(i, value)
+
+# COMMAND ----------
+
+# DBTITLE 1,Enrich Selected Tables with LLM Endpoint and Parameters
+# Run enrichment
+enriched = enrich_tables(table_fqns, sample_size, max_unique_values, llm_endpoint)
+
+# COMMAND ----------
+
+# DBTITLE 1,Generate Table Data Chunks from Enriched Dataset
+# Create chunks
+chunks = create_table_chunks(enriched)
+
+# COMMAND ----------
+
+# DBTITLE 1,Save Enriched Data and Chunks to Unity Catalog
+# Save to Unity Catalog
+save_to_unity_catalog(
+    enriched, 
+    chunks,
+    catalog_name=catalog_name,
+    schema_name=schema_name,
+    enriched_docs_table=metadata_table_name,
+    chunks_table=chunks_table_name,
+    write_mode=write_mode
+)
+
+print("\n" + "="*80)
+print("Enrichment job complete!")
+print("="*80)
