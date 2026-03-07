@@ -1,3 +1,8 @@
+# Databricks notebook source
+
+# COMMAND ----------
+
+# DBTITLE 1,helper functions
 """
 Table Metadata Enrichment Module
 
@@ -9,7 +14,18 @@ This module enriches table metadata with:
 - Multi-level chunks for vector search (table + column levels)
 
 Designed to run as a Databricks job with Spark SQL.
+TODO: 1. llm output only selected fields (enhanced_comment and classification) in json, not all fields.
+      2. optimize ai_query by running on a table over many rows at once.
+      Example:
 """
+# df_out = df.selectExpr("""
+#   ai_query(
+#     'databricks-meta-llama-3-3-70b-instruct',
+#     CONCAT('Please summarize: ', text),
+#     modelParameters => named_struct('max_tokens', 100, 'temperature', 0.7)
+#   ) AS summary
+# """)
+# df_out.write.mode("overwrite").saveAsTable("output_table")
 
 import json
 import pandas as pd
@@ -196,6 +212,7 @@ def enrich_column_metadata(columns_metadata: pd.DataFrame, table_identifier: str
 def enhance_comments_with_llm(columns: List[Dict], llm_endpoint: str) -> List[Dict]:
     """
     Use LLM to enhance column comments with better descriptions.
+    Processes columns in batches to avoid token limits and JSON parsing issues.
     
     Args:
         columns: List of column dictionaries
@@ -204,52 +221,97 @@ def enhance_comments_with_llm(columns: List[Dict], llm_endpoint: str) -> List[Di
     Returns:
         List of columns with enhanced comments
     """
+    BATCH_SIZE = 50  # Process 50 columns at a time
+    
     # Helper to serialize dates and other objects
     def safe_json_default(obj):
         if hasattr(obj, 'isoformat'):
             return obj.isoformat()
         return str(obj)
     
-    # Prepare simplified version for LLM
-    simplified_cols = []
-    for col in columns:
-        simplified_cols.append({
-            'col_name': col['column_name'],
-            'data_type': col['data_type'],
-            'comment': col.get('comment', ''),
-            'sample_values': col.get('sample_values', [])[:10] if 'sample_values' in col else []
-        })
+    print(f"  → Processing {len(columns)} columns in batches of {BATCH_SIZE}")
     
-    prompt = (
-        "You will receive a list of database columns in JSON format. "
-        "Your task is to improve the 'comment' field for each column by:\n"
-        "1. Making it more descriptive and informative\n"
-        "2. Using the data_type and sample_values as context\n"
-        "3. Explaining what the column represents in plain English\n\n"
-        f"{json.dumps(simplified_cols, indent=2, default=safe_json_default)}\n\n"
-        "Return a JSON array with the same structure, but add an 'enhanced_comment' field "
-        "with your improved description. Only return valid JSON, no explanations."
-    )
+    total_batches = (len(columns) + BATCH_SIZE - 1) // BATCH_SIZE
+    successful_batches = 0
     
-    try:
-        llm_result = spark.sql(
-            f"SELECT ai_query('{llm_endpoint}', ?) as result", 
-            [prompt]
-        ).collect()[0]['result']
+    for batch_idx in range(0, len(columns), BATCH_SIZE):
+        batch = columns[batch_idx:batch_idx+BATCH_SIZE]
+        batch_num = (batch_idx // BATCH_SIZE) + 1
         
-        # Clean up response
-        llm_result_str = llm_result.replace('```json', '').replace('```', '').strip()
-        enhanced_cols = json.loads(llm_result_str)
+        print(f"    → Batch {batch_num}/{total_batches}: Processing columns {batch_idx+1}-{min(batch_idx+BATCH_SIZE, len(columns))}")
         
-        # Merge enhanced comments back
-        for i, col in enumerate(columns):
-            if i < len(enhanced_cols) and 'enhanced_comment' in enhanced_cols[i]:
-                col['enhanced_comment'] = enhanced_cols[i]['enhanced_comment']
+        # Prepare simplified version for this batch
+        simplified_cols = []
+        for col in batch:
+            simplified_cols.append({
+                'col_name': col['column_name'],
+                'data_type': col['data_type'],
+                'comment': col.get('comment', ''),
+                'sample_values': col.get('sample_values', [])[:5] if 'sample_values' in col else []
+            })
         
-        return columns
-    except Exception as e:
-        print(f"Error enhancing comments with LLM: {str(e)}")
-        return columns
+        prompt = (
+            f"You will receive {len(batch)} database columns in JSON format. "
+            "Your task is to improve the 'comment' field for each column by:\n"
+            "1. Making it more descriptive and informative\n"
+            "2. Using the data_type and sample_values as context\n"
+            "3. Explaining what the column represents in plain English\n"
+            "4. Classify the column into one of the following categories: categorical, measure, temporal, identifier, boolean, free_text, semi_structured, geospatial, foreign_key, or other\n\n"
+            f"{json.dumps(simplified_cols, indent=2, default=safe_json_default)}\n\n"
+            "Return a JSON array with the same structure, but add an 'enhanced_comment' field and a 'classification' field "
+            "with your improved description and classification. Only return valid JSON, no explanations."
+        )
+        
+        try:
+            llm_result = spark.sql(
+                f"SELECT ai_query('{llm_endpoint}', ?) as result", 
+                [prompt]
+            ).collect()[0]['result']
+            
+            # Clean up response - remove markdown code blocks
+            llm_result_str = llm_result.replace('```json', '').replace('```', '').strip()
+            
+            # Additional cleaning: find JSON array boundaries
+            start_idx = llm_result_str.find('[')
+            end_idx = llm_result_str.rfind(']')
+            
+            if start_idx >= 0 and end_idx > start_idx:
+                llm_result_str = llm_result_str[start_idx:end_idx+1]
+            
+            # Parse JSON
+            enhanced_cols = json.loads(llm_result_str)
+            
+            # Merge enhanced comments back into original batch
+            for orig_col, enhanced_col in zip(batch, enhanced_cols):
+                if isinstance(enhanced_col, dict):
+                    if 'enhanced_comment' in enhanced_col:
+                        orig_col['enhanced_comment'] = enhanced_col['enhanced_comment']
+                    else:
+                        orig_col['enhanced_comment'] = orig_col.get('comment', '')
+                    
+                    if 'classification' in enhanced_col:
+                        orig_col['classification'] = enhanced_col['classification']
+                else:
+                    # Fallback to original comment
+                    orig_col['enhanced_comment'] = orig_col.get('comment', '')
+            
+            successful_batches += 1
+            print(f"    ✓ Batch {batch_num}/{total_batches} completed")
+            
+        except json.JSONDecodeError as je:
+            print(f"    ✗ Batch {batch_num}/{total_batches} JSON parse error at line {je.lineno}, column {je.colno}")
+            print(f"      Error context: {je.msg}")
+            # Keep original comments for this batch
+            for col in batch:
+                col['enhanced_comment'] = col.get('comment', '')
+        except Exception as e:
+            print(f"    ✗ Batch {batch_num}/{total_batches} failed: {str(e)}")
+            # Keep original comments for this batch
+            for col in batch:
+                col['enhanced_comment'] = col.get('comment', '')
+    
+    print(f"  ✓ Column enhancement complete: {successful_batches}/{total_batches} batches successful")
+    return columns
 
 
 def synthesize_table_description(table_identifier: str, enriched_columns: List[Dict], llm_endpoint: str) -> str:
@@ -478,13 +540,15 @@ def create_table_chunks(enriched_tables: List[Dict]) -> List[Dict]:
         for col in enriched_columns:
             col_name = col.get('column_name')
             col_type = col.get('data_type')
-            enhanced_comment = col.get('enhanced_comment', col.get('comment', ''))
+            enhanced_comment = col.get('enhanced_comment') or col.get('comment') or ''
+            classification = col.get('classification', '')
+            print(col)
             
             # Truncate long descriptions for overview
             if len(enhanced_comment) > 300:
                 enhanced_comment = enhanced_comment[:300-3] + "..."
             
-            column_lines.append(f"• {col_name} ({col_type}): {enhanced_comment}")
+            column_lines.append(f"• {col_name} ({col_type}): {enhanced_comment} ({classification})")
             
             # Track categorical fields with top values
             if 'value_dictionary' in col and col['value_dictionary']:
@@ -513,9 +577,9 @@ Key Categorical Fields:
             'table_name': table_name,
             'column_name': None,
             'searchable_content': table_overview_text,
-            'is_categorical': any('value_dictionary' in c for c in enriched_columns),
-            'is_temporal': any(any(t in c.get('data_type', '').lower() for t in ['date', 'time', 'timestamp']) for c in enriched_columns),
-            'is_identifier': any(any(k in c['column_name'].lower() for k in ['_id', 'id_']) for c in enriched_columns),
+            'is_categorical': any('categorical' in c.get('classification', '').lower() if c.get('classification') else 'value_dictionary' in c for c in enriched_columns),
+            'is_temporal': any('temporal' in c.get('classification', '').lower() if c.get('classification') else any(t in c.get('data_type', '').lower() for t in ['date', 'time', 'timestamp']) for c in enriched_columns),
+            'is_identifier': any('identifier' in c.get('classification', '').lower() if c.get('classification') else any(k in c['column_name'].lower() for k in ['_id', 'id_']) for c in enriched_columns),
             'has_value_dictionary': any('value_dictionary' in c for c in enriched_columns),
             'metadata_json': json.dumps({
                 'table_fqn': table_fqn,
@@ -535,9 +599,11 @@ Key Categorical Fields:
             value_dict = col.get('value_dictionary', {})
             
             # Determine column characteristics
-            is_categorical = len(value_dict) > 0
-            is_temporal = any(t in col_type.lower() for t in ['date', 'time', 'timestamp'])
-            is_identifier = any(k in col_name.lower() for k in ['_id', 'id_'])
+            classification = col.get('classification', '').lower()
+            
+            is_categorical = 'categorical' in classification if classification else len(value_dict) > 0
+            is_temporal = 'temporal' in classification if classification else any(t in col_type.lower() for t in ['date', 'time', 'timestamp'])
+            is_identifier = 'identifier' in classification if classification else any(k in col_name.lower() for k in ['_id', 'id_'])
             has_value_dictionary = len(value_dict) > 0
             
             # Build column detail text
@@ -567,12 +633,15 @@ Top Values:
             
             # Add classification info
             characteristics = []
-            if is_categorical:
-                characteristics.append("categorical")
-            if is_temporal:
-                characteristics.append("temporal")
-            if is_identifier:
-                characteristics.append("identifier")
+            if classification:
+                characteristics.append(classification)
+            else:
+                if is_categorical:
+                    characteristics.append("categorical")
+                if is_temporal:
+                    characteristics.append("temporal")
+                if is_identifier:
+                    characteristics.append("identifier")
             
             if characteristics:
                 column_detail_text += f"""
@@ -672,107 +741,110 @@ def save_to_unity_catalog(enriched_tables: List[Dict],
 # Entry Point for Databricks Job
 # ============================================================================
 
-if __name__ == "__main__":
-    # Get parameters from notebook widgets (Databricks notebook style)
-    # These are set when running as a notebook task via Jobs API
+# COMMAND ----------
+
+# DBTITLE 1,Create notebook widgets with default values
+# Create notebook widgets with default values
+dbutils.widgets.text("table_list_table", "serverless_dbx_unifiedchat_catalog.gold.temp_enrichment_tables_4cb71ab1", "Table List Table")
+dbutils.widgets.text("tables", "", "Tables (comma-separated FQNs)")
+dbutils.widgets.text("sample_size", "10", "Sample Size")
+dbutils.widgets.text("max_unique_values", "10", "Max Unique Values")
+dbutils.widgets.text("llm_endpoint", "databricks-gemini-3-1-flash-lite", "LLM Endpoint") # databricks-gemini-3-flash, databricks-claude-haiku-4-5, databricks-gpt-5-mini, databricks-gemini-3-1-flash-lite, databricks-gpt-oss-120b
+dbutils.widgets.text("metadata_table", "serverless_dbx_unifiedchat_catalog.gold.enriched_table_metadata", "Metadata Table")
+dbutils.widgets.text("chunks_table", "serverless_dbx_unifiedchat_catalog.gold.enriched_table_chunks", "Chunks Table")
+dbutils.widgets.text("write_mode", "overwrite", "Write Mode")
+
+# COMMAND ----------
+
+# DBTITLE 1,Parse and validate input parameters from notebook widge ...
+# Get parameters from notebook widgets
+table_list_table = dbutils.widgets.get("table_list_table").strip() or None
+table_fqns_str = dbutils.widgets.get("tables").strip() or None
+sample_size = int(dbutils.widgets.get("sample_size"))
+max_unique_values = int(dbutils.widgets.get("max_unique_values"))
+llm_endpoint = dbutils.widgets.get("llm_endpoint")
+metadata_table_full = dbutils.widgets.get("metadata_table")
+chunks_table_full = dbutils.widgets.get("chunks_table")
+write_mode = dbutils.widgets.get("write_mode")
+
+# Get table FQNs either from temp table or comma-separated string
+if table_list_table:
+    print(f"Reading table list from temp table: {table_list_table}")
     try:
-        # Try to use dbutils widgets (notebook mode)
-        # Support new table_list_table parameter (for large table lists) or legacy tables parameter
-        table_list_table = None
-        table_fqns_str = None
-        
-        try:
-            table_list_table = dbutils.widgets.get("table_list_table")
-        except:
-            pass
-        
-        if not table_list_table:
-            try:
-                table_fqns_str = dbutils.widgets.get("tables")
-            except:
-                pass
-        
-        sample_size = int(dbutils.widgets.get("sample_size"))
-        max_unique_values = int(dbutils.widgets.get("max_unique_values"))
-        llm_endpoint = dbutils.widgets.get("llm_endpoint")
-        metadata_table_full = dbutils.widgets.get("metadata_table")
-        chunks_table_full = dbutils.widgets.get("chunks_table")
-        write_mode = dbutils.widgets.get("write_mode")
-    except:
-        # Fallback to sys.argv for local testing
-        import sys
-        table_list_table = None
-        table_fqns_str = sys.argv[1] if len(sys.argv) > 1 else ""
-        sample_size = int(sys.argv[2]) if len(sys.argv) > 2 else 20
-        max_unique_values = int(sys.argv[3]) if len(sys.argv) > 3 else 50
-        llm_endpoint = sys.argv[4] if len(sys.argv) > 4 else "databricks-claude-sonnet-4-5"
-        metadata_table_full = sys.argv[5] if len(sys.argv) > 5 else "serverless_dbx_unifiedchat_catalog.gold.enriched_table_metadata"
-        chunks_table_full = sys.argv[6] if len(sys.argv) > 6 else "serverless_dbx_unifiedchat_catalog.gold.enriched_table_chunks"
-        write_mode = sys.argv[7] if len(sys.argv) > 7 else "overwrite"
-    
-    # Get table FQNs either from temp table or comma-separated string
-    if table_list_table:
-        print(f"Reading table list from temp table: {table_list_table}")
-        try:
-            df_tables = spark.sql(f"SELECT table_fqn FROM {table_list_table}")
-            table_fqns = [row.table_fqn for row in df_tables.collect()]
-            print(f"✓ Loaded {len(table_fqns)} tables from temp table")
-        except Exception as e:
-            print(f"Error reading temp table {table_list_table}: {str(e)}")
-            raise ValueError(f"Failed to read table list from {table_list_table}")
-    elif table_fqns_str:
-        # Parse comma-separated table FQNs (legacy method)
-        print(f"Reading table list from comma-separated parameter")
-        table_fqns = [fqn.strip() for fqn in table_fqns_str.split(',') if fqn.strip()]
-    else:
-        table_fqns = []
-    
-    if not table_fqns:
-        print("Error: No table FQNs provided")
-        print("Usage: Provide 'table_list_table' parameter with temp table name or 'tables' parameter with comma-separated FQNs")
-        raise ValueError("No table FQNs provided")
-    
-    # Parse destination table names (format: catalog.schema.table)
-    metadata_parts = metadata_table_full.split('.')
-    chunks_parts = chunks_table_full.split('.')
-    
-    if len(metadata_parts) != 3 or len(chunks_parts) != 3:
-        print(f"Error: Invalid table format. Expected 'catalog.schema.table'")
-        print(f"  Metadata table: {metadata_table_full}")
-        print(f"  Chunks table: {chunks_table_full}")
-        raise ValueError("Invalid table format")
-    
-    catalog_name = metadata_parts[0]
-    schema_name = metadata_parts[1]
-    metadata_table_name = metadata_parts[2]
-    chunks_table_name = chunks_parts[2]
-    
-    print(f"Parameters:")
-    print(f"  Tables: {len(table_fqns)}")
-    print(f"  Sample size: {sample_size}")
-    print(f"  Max unique values: {max_unique_values}")
-    print(f"  LLM endpoint: {llm_endpoint}")
+        df_tables = spark.sql(f"SELECT table_fqn FROM {table_list_table}")
+        table_fqns = [row.table_fqn for row in df_tables.collect()]
+        print(f"✓ Loaded {len(table_fqns)} tables from temp table")
+    except Exception as e:
+        print(f"Error reading temp table {table_list_table}: {str(e)}")
+        raise ValueError(f"Failed to read table list from {table_list_table}")
+elif table_fqns_str:
+    # Parse comma-separated table FQNs (legacy method)
+    print(f"Reading table list from comma-separated parameter")
+    table_fqns = [fqn.strip() for fqn in table_fqns_str.split(',') if fqn.strip()]
+else:
+    table_fqns = []
+
+if not table_fqns:
+    print("Error: No table FQNs provided")
+    print("Usage: Provide 'table_list_table' parameter with temp table name or 'tables' parameter with comma-separated FQNs")
+    raise ValueError("No table FQNs provided")
+
+# Parse destination table names (format: catalog.schema.table)
+metadata_parts = metadata_table_full.split('.')
+chunks_parts = chunks_table_full.split('.')
+
+if len(metadata_parts) != 3 or len(chunks_parts) != 3:
+    print(f"Error: Invalid table format. Expected 'catalog.schema.table'")
     print(f"  Metadata table: {metadata_table_full}")
     print(f"  Chunks table: {chunks_table_full}")
-    print(f"  Write mode: {write_mode}")
-    
-    # Run enrichment
-    enriched = enrich_tables(table_fqns, sample_size, max_unique_values, llm_endpoint)
-    
-    # Create chunks
-    chunks = create_table_chunks(enriched)
-    
-    # Save to Unity Catalog
-    save_to_unity_catalog(
-        enriched, 
-        chunks,
-        catalog_name=catalog_name,
-        schema_name=schema_name,
-        enriched_docs_table=metadata_table_name,
-        chunks_table=chunks_table_name,
-        write_mode=write_mode
-    )
-    
-    print("\n" + "="*80)
-    print("Enrichment job complete!")
-    print("="*80)
+    raise ValueError("Invalid table format")
+
+catalog_name = metadata_parts[0]
+schema_name = metadata_parts[1]
+metadata_table_name = metadata_parts[2]
+chunks_table_name = chunks_parts[2]
+
+print(f"Parameters:")
+print(f"  Tables: {len(table_fqns)}")
+print(f"  Sample size: {sample_size}")
+print(f"  Max unique values: {max_unique_values}")
+print(f"  LLM endpoint: {llm_endpoint}")
+print(f"  Metadata table: {metadata_table_full}")
+print(f"  Chunks table: {chunks_table_full}")
+print(f"  Write mode: {write_mode}")
+
+# COMMAND ----------
+
+# DBTITLE 1,Index and display all fully qualified table names
+for i, value in enumerate(table_fqns, 0):
+    print(i, value)
+
+# COMMAND ----------
+
+# DBTITLE 1,Enrich Selected Tables with LLM Endpoint and Parameters
+# Run enrichment
+enriched = enrich_tables(table_fqns, sample_size, max_unique_values, llm_endpoint)
+
+# COMMAND ----------
+
+# DBTITLE 1,Generate Table Data Chunks from Enriched Dataset
+# Create chunks
+chunks = create_table_chunks(enriched)
+
+# COMMAND ----------
+
+# DBTITLE 1,Save Enriched Data and Chunks to Unity Catalog
+# Save to Unity Catalog
+save_to_unity_catalog(
+    enriched, 
+    chunks,
+    catalog_name=catalog_name,
+    schema_name=schema_name,
+    enriched_docs_table=metadata_table_name,
+    chunks_table=chunks_table_name,
+    write_mode=write_mode
+)
+
+print("\n" + "="*80)
+print("Enrichment job complete!")
+print("="*80)
