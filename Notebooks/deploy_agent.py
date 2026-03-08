@@ -352,6 +352,7 @@ KEY CHANGE: Uses code_paths parameter to package src/multi_agent/ code.
 """
 
 import mlflow
+from uuid import uuid4
 from mlflow.models.resources import (
     DatabricksServingEndpoint,
     DatabricksLakebase,
@@ -400,10 +401,15 @@ resources = [
 
 # Input example for schema inference
 input_example = {
-    "input": [{"role": "user", "content": "What is the average medical cost of diabetes patients? Use Genie route"}],
-    "custom_inputs": {"thread_id": "example-123"},
+    "input": [{"role": "user", "content": "What is the average medical cost of diabetes patients? Use Table route"}],
+    "custom_inputs": {"thread_id": f"test-streaming-{str(uuid4())[:8]}"},
     "context": {"conversation_id": "sess-001", "user_id": "user@example.com"}
 }
+
+# Setup experiment path to be non-git folder with experiment ACLs and folder ACLs in place
+os.makedirs("/Workspace/Shared/dbx-unifiedchat/", exist_ok=True)
+mlflow.set_tracking_uri("databricks")  # usually already true in Databricks
+mlflow.set_experiment("/Shared/dbx-unifiedchat/prod-traces")
 
 # Deploy with MLflow
 with mlflow.start_run():
@@ -486,10 +492,6 @@ print("  ✓ Easier to maintain (<500 lines per module)")
 print("  ✓ Better testing (test individual components)")
 print("  ✓ MLflow native support via code_paths parameter")
 print("="*80)
-
-# COMMAND ----------
-
-endpoint_status = w.serving_endpoints.get(name=deployment_info.endpoint_name)
 
 # COMMAND ----------
 
