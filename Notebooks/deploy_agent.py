@@ -579,17 +579,27 @@ if elapsed_time >= max_wait_time:
     print("Check Model Serving UI for details.")
     raise TimeoutError(f"Endpoint not ready after {max_wait_time}s")
 
+# COMMAND ----------
+
+# DBTITLE 1,Test Deployed Endpoint with Sample Query
+
+from mlflow.deployments import get_deploy_client
+from uuid import uuid4
+
 print("\nTesting endpoint with sample query...")
+
+client = get_deploy_client("databricks")
+
 test_input = {
-    "input": [{"role": "user", "content": "How many total patients are there? Give me patient demographics distribution."}],
-    "custom_inputs": {"thread_id": "test-123"}
+    "input": [{"role": "user", "content": "What is the average medical cost of diabetes patients? Use Genie route"}],
+    "custom_inputs": {"thread_id": f"test-streaming-{str(uuid4())[:8]}"},
+    "context": {"conversation_id": "sess-001", "user_id": "user@example.com"}
 }
 
 try:
-    # Use dataframe_records for MLflow pyfunc models
-    response = w.serving_endpoints.query(
-        name=deployment_info.endpoint_name,
-        dataframe_records=[test_input]
+    response = client.predict(
+        endpoint=deployment_info.endpoint_name,
+        inputs=test_input,
     )
     print("\n✓ Endpoint responding successfully")
     print(f"Response preview: {str(response)[:500]}...")
