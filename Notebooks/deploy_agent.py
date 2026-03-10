@@ -609,7 +609,7 @@ except Exception as e:
 
 # COMMAND ----------
 
-response.predictions
+response
 
 # COMMAND ----------
 

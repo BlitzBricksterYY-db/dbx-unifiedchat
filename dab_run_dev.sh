@@ -39,7 +39,7 @@ echo ""
 #          build_vector_search_index → deploy_agent → validate_agent
 #   Use when: full refresh of data + redeploy + smoke test in one shot
 # ---------------------------------------------------------------------------
-## JOB="full_pipeline"
+JOB="full_pipeline"
 
 # ---------------------------------------------------------------------------
 # Option 2 — ETL only (no agent deploy)
@@ -53,7 +53,7 @@ echo ""
 #   Tasks: deploy_agent → validate_agent
 #   Use when: agent code changed, vector index is already up to date
 # ---------------------------------------------------------------------------
-JOB="agent_deploy"
+#JOB="agent_deploy"
 
 # ---------------------------------------------------------------------------
 # Option 4 — Integration test only (no deploy)
