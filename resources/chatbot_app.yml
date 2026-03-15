@@ -6,8 +6,27 @@
 # Deploy:
 #   databricks bundle deploy          # dev (default)
 #   databricks bundle deploy -t prod  # prod
+#
+# ---------------------------------------------------------------------------
+# Optional Enhancements (uncomment to enable):
+#
+#   1. PERSISTENT CHAT HISTORY (Lakebase):
+#      - Uncomment the "database" binding below
+#      - In app.yaml, change the command to include db:migrate
+#      - Redeploy
+#
+#   2. USER FEEDBACK TRACKING (MLflow experiment — requires database first):
+#      - Enable the database (step 1 above)
+#      - Uncomment the "experiment" binding below
+#      - In app.yaml, uncomment the MLFLOW_EXPERIMENT_ID env var
+#      - Redeploy
+# ---------------------------------------------------------------------------
 
 resources:
+  experiments:
+    agent_traces:
+      name: ${var.mlflow_experiment_path}
+
   apps:
     chatbot_app:
       name: ${var.chatbot_app_name}
@@ -19,3 +38,17 @@ resources:
           serving_endpoint:
             name: ${var.endpoint_name}
             permission: CAN_QUERY
+        # ENHANCEMENT 1: Persistent chat history via Lakebase
+        # Reuses the existing agent-state Lakebase instance (separate ai_chatbot schema).
+        - name: database
+          description: "Lakebase instance for persistent chat history"
+          database:
+            database_name: databricks_postgres
+            instance_name: ${var.lakebase_instance_name}
+            permission: CAN_CONNECT_AND_CREATE
+        # ENHANCEMENT 2: User feedback tracking via MLflow (requires database above)
+        - name: experiment
+          description: "MLflow experiment for user feedback tracking"
+          experiment:
+            experiment_id: ${resources.experiments.agent_traces.id}
+            permission: CAN_EDIT

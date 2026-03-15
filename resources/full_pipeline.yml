@@ -118,6 +118,7 @@ resources:
               endpoint_name: ${var.endpoint_name}
               workload_size: ${var.workload_size}
               scale_to_zero: ${var.scale_to_zero}
+              mlflow_experiment_path: ${var.mlflow_experiment_path}
           timeout_seconds: 2400
 
         # -------------------------------------------------------------------
@@ -152,4 +153,5 @@ resources:
               lakebase_instance_name: ${var.lakebase_instance_name}
               lakebase_embedding_endpoint: ${var.lakebase_embedding_endpoint}
               lakebase_embedding_dims: ${var.lakebase_embedding_dims}
+              mlflow_experiment_path: ${var.mlflow_experiment_path}
           timeout_seconds: 1200

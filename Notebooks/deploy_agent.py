@@ -51,6 +51,7 @@ _WIDGET_KEYS = [
     "vs_endpoint_name", "embedding_model",
     "lakebase_instance_name", "lakebase_embedding_endpoint", "lakebase_embedding_dims",
     "model_name", "endpoint_name", "workload_size", "scale_to_zero",
+    "mlflow_experiment_path",
 ]
 
 for k in _WIDGET_KEYS:
@@ -411,11 +412,10 @@ input_example = {
     "context": {"conversation_id": "sess-001", "user_id": "user@example.com"}
 }
 
-# Setup experiment path — derive target from endpoint name suffix
-_target = "dev" if ENDPOINT_NAME.endswith("-dev") else "prod"
+# Setup experiment path — sourced from databricks.yml via mlflow_experiment_path variable
 os.makedirs("/Workspace/Shared/dbx-unifiedchat/", exist_ok=True)
 mlflow.set_tracking_uri("databricks")
-mlflow.set_experiment(f"/Shared/dbx-unifiedchat/{_target}-traces")
+mlflow.set_experiment(widget_params["mlflow_experiment_path"])
 
 # Deploy with MLflow
 with mlflow.start_run():

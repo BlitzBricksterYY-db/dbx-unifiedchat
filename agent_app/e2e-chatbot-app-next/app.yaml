@@ -1,9 +1,12 @@
-command: ["bash", "-c", "npm run build:client && npm run build:server && npm run start"]
+# WITH DATABASE: builds client + server, runs db:migrate, then starts
+command: ["bash", "-c", "npm run build && npm run start"]
+# EPHEMERAL (no database): comment out the line above and uncomment below
+# command: ["bash", "-c", "npm run build:client && npm run build:server && npm run start"]
 runtime: nodejs20
 
 env:
   - name: DATABRICKS_SERVING_ENDPOINT
     valueFrom: serving-endpoint
-  # FEEDBACK RESOURCE: Uncomment to enable the feedback UI (requires experiment resource in databricks.yml)
-  # - name: MLFLOW_EXPERIMENT_ID
-  #   valueFrom: experiment
+  # FEEDBACK: enabled — writes thumbs up/down as MLflow assessments
+  - name: MLFLOW_EXPERIMENT_ID
+    valueFrom: experiment

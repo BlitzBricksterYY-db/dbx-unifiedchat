@@ -129,6 +129,11 @@ variables:
     description: Databricks App name for the chatbot UI
     default: multi-agent-genie-chatbot
 
+  # ---- MLflow Experiment ----
+  mlflow_experiment_path:
+    description: MLflow experiment path for agent traces and feedback
+    default: /Shared/dbx-unifiedchat/prod-traces
+
 # ---------------------------------------------------------------------------
 # Targets — dev & prod
 # ---------------------------------------------------------------------------
@@ -146,6 +151,7 @@ targets:
       model_name: super_agent_hybrid
       endpoint_name: multi-agent-genie-endpoint-dev
       chatbot_app_name: multi-agent-genie-chatbot-dev
+      mlflow_experiment_path: /Shared/dbx-unifiedchat/dev-traces
 
   prod:
     workspace:
@@ -158,6 +164,7 @@ targets:
       model_name: super_agent_hybrid
       endpoint_name: multi-agent-genie-endpoint
       chatbot_app_name: multi-agent-genie-chatbot
+      mlflow_experiment_path: /Shared/dbx-unifiedchat/prod-traces
 
 sync:
   exclude:
