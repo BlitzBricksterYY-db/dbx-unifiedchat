@@ -1,0 +1,9 @@
+resources:
+  apps:
+    agent_chat_app:
+      name: multi-agent-genie-chat-${bundle.target}
+      description: >-
+        Gradio chat interface for the Multi-Agent Genie system.
+        Connects to the deployed model serving endpoint for interactive
+        multi-turn Q&A across Genie spaces.
+      source_code_path: ../agent_app

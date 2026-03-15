@@ -137,7 +137,7 @@ targets:
       catalog_name: serverless_dbx_unifiedchat_dev_catalog
       schema_name: multi_agent_genie
       sql_warehouse_id: 78ad038820b88d95
-      genie_space_ids: "01f11b27d1121e2bb00d6ecd846b1988,01f11b27d23a1ab195fa7ba8efc06d13,01f11b27d3ea149694cf608c3d278673"
+      genie_space_ids: "01f11d5f8f281c96a7f116124ed3bdce,01f11d5fb6d41e41a645c6659944a249,01f11d5f79e415d98b5fe07b40e9e0f9"
       model_name: super_agent_hybrid
       endpoint_name: multi-agent-genie-endpoint-dev
 
@@ -148,7 +148,7 @@ targets:
       catalog_name: serverless_dbx_unifiedchat_catalog
       schema_name: multi_agent_genie
       sql_warehouse_id: a4ed2ccbda385db9
-      genie_space_ids: "01f106e1239d14b28d6ab46f9c15e540,01f106e121e7173d8cf84bb80e842d6c,01f106e120b718e084598e92dcf14d4e"
+      genie_space_ids: "01f11ffe784a13a1a0c69f02e3145b6f,01f11ffe8e0a1b5c8fa1e96a81cb8c32,01f11ffea0e01023b4768d0697e7cacb"
       model_name: super_agent_hybrid
       endpoint_name: multi-agent-genie-endpoint
 

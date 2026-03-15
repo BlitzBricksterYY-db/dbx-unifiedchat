@@ -1,0 +1,3 @@
+requests
+databricks-sdk
+python-dotenv
