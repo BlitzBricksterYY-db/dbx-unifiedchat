@@ -1,0 +1,21 @@
+# Chatbot App — Chat UI for the Multi-Agent Genie serving endpoint
+#
+# Deploys the e2e-chatbot-app-next (Express + React) as a Databricks App.
+# The app connects to the model serving endpoint defined by ${var.endpoint_name}.
+#
+# Deploy:
+#   databricks bundle deploy          # dev (default)
+#   databricks bundle deploy -t prod  # prod
+
+resources:
+  apps:
+    chatbot_app:
+      name: ${var.chatbot_app_name}
+      description: "Chat UI for the multi-agent genie system"
+      source_code_path: ../agent_app/e2e-chatbot-app-next
+      resources:
+        - name: serving-endpoint
+          description: "Model serving endpoint for the multi-agent genie system"
+          serving_endpoint:
+            name: ${var.endpoint_name}
+            permission: CAN_QUERY

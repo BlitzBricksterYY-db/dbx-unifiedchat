@@ -79,7 +79,7 @@ genie_exports/
 logs/
 
 # node modules
-**/src/tables_genies/ui/node_modules/
+**/node_modules/
 
 # assets for icons
 assets/

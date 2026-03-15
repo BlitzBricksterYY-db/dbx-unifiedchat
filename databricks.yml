@@ -124,6 +124,11 @@ variables:
     description: Whether to enable scale-to-zero on the endpoint
     default: "false"
 
+  # ---- Chatbot App ----
+  chatbot_app_name:
+    description: Databricks App name for the chatbot UI
+    default: multi-agent-genie-chatbot
+
 # ---------------------------------------------------------------------------
 # Targets — dev & prod
 # ---------------------------------------------------------------------------
@@ -140,6 +145,7 @@ targets:
       genie_space_ids: "01f11b27d1121e2bb00d6ecd846b1988,01f11b27d23a1ab195fa7ba8efc06d13,01f11b27d3ea149694cf608c3d278673"
       model_name: super_agent_hybrid
       endpoint_name: multi-agent-genie-endpoint-dev
+      chatbot_app_name: multi-agent-genie-chatbot-dev
 
   prod:
     workspace:
@@ -151,9 +157,14 @@ targets:
       genie_space_ids: "01f106e1239d14b28d6ab46f9c15e540,01f106e121e7173d8cf84bb80e842d6c,01f106e120b718e084598e92dcf14d4e"
       model_name: super_agent_hybrid
       endpoint_name: multi-agent-genie-endpoint
+      chatbot_app_name: multi-agent-genie-chatbot
 
 sync:
   exclude:
     - ./.venv/**
     - ./data/**
     - /__pycache__/*
+    - **/node_modules/**
+    - agent_app/e2e-chatbot-app-next/.env
+    - agent_app/e2e-chatbot-app-next/client/dist/**
+    - agent_app/e2e-chatbot-app-next/server/dist/**
