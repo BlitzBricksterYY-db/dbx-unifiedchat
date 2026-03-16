@@ -64,108 +64,46 @@ class ResultSummarizeAgent:
     
     def generate_summary(self, state: AgentState) -> str:
         """
-        Generate a natural language summary of the workflow execution.
+        Generate the narrative text summary only.
         
-        Args:
-            state: The complete workflow state
-            
-        Returns:
-            String containing natural language summary
+        Charts and download sections are appended by summarize_node(),
+        not by this method.
         """
-        # Build context from state
         summary_prompt = self._build_summary_prompt(state)
         
-        # Stream LLM response for immediate first token emission
-        print("🤖 Streaming summary generation...")
+        print("Streaming summary generation...")
         summary = ""
         for chunk in self.llm.stream(summary_prompt):
             if chunk.content:
                 summary += chunk.content
         
         summary = summary.strip()
-        print(f"✓ Summary stream complete ({len(summary)} chars)")
-        
-        # Append Option B downloadable tables if query execution was successful
-        # Support multiple results
-        execution_results = state.get('execution_results', [])
-        exec_result = state.get('execution_result', {})
-        
-        if not execution_results and exec_result:
-            execution_results = [exec_result]
-        
-        for idx, result_item in enumerate(execution_results):
-            if result_item and result_item.get('success'):
-                columns = result_item.get('columns', [])
-                result = result_item.get('result', [])
-                
-                if columns and result:
-                    label_suffix = f" (Query {idx + 1})" if len(execution_results) > 1 else ""
-                    option_b_tables = self._format_option_b_tables(columns, result, display_rows=100)
-                    if len(execution_results) > 1:
-                        option_b_tables = option_b_tables.replace("## 📥 Downloadable Results", f"## 📥 Downloadable Results{label_suffix}")
-                    summary += option_b_tables
-                    print(f"✓ Appended Option B downloadable tables{label_suffix} ({len(option_b_tables)} chars)")
-        
+        print(f"Summary stream complete ({len(summary)} chars)")
         return summary
     
-    def _format_option_b_tables(
-        self,
-        columns: List[str],
-        data: List[Dict[str, Any]],
-        display_rows: int = 100
-    ) -> str:
+    @staticmethod
+    def format_sql_download(sql_queries: List[str]) -> str:
         """
-        Generate Option B downloadable table formats for Databricks Playground:
-        - Single scrollable markdown table (all rows in one table)
-        - Full JSON export (all rows in collapsible section)
+        Generate collapsible SQL section with data URI download.
         
-        Args:
-            columns: List of column names
-            data: List of row dictionaries
-            display_rows: Number of rows to display (default 100)
-            
-        Returns:
-            Formatted markdown string with collapsible sections
+        SQL is always small so a data URI is safe here.
+        CSV downloads are handled on the frontend (Blob URL on click).
         """
-        if not data or not columns:
+        import base64
+        
+        if not sql_queries:
             return ""
         
-        # Limit to display_rows
-        display_data = data[:display_rows]
-        total_rows = len(data)
+        combined_sql = "\n\n-- Query Separator --\n\n".join(sql_queries)
+        encoded = base64.b64encode(combined_sql.encode("utf-8")).decode("ascii")
         
-        markdown = "\n\n---\n\n## 📥 Downloadable Results\n\n"
-        
-        # Part 1: Single Scrollable Markdown Table
-        markdown += "### Markdown Table (Scrollable)\n\n"
-        markdown += f"<details>\n<summary>📄 View Full Table ({len(display_data)} rows) - Click to expand</summary>\n\n"
-        
-        # Generate single markdown table with all rows
-        markdown += "| " + " | ".join(columns) + " |\n"
-        markdown += "| " + " | ".join(["---"] * len(columns)) + " |\n"
-        
-        for row in display_data:
-            row_values = [str(row.get(col, "")) for col in columns]
-            markdown += "| " + " | ".join(row_values) + " |\n"
-        
-        markdown += "\n</details>\n\n"
-        
-        # Part 2: Full JSON Export
-        markdown += "### JSON Format (All Rows)\n\n"
-        markdown += "<details>\n<summary>📋 JSON Export (click to expand)</summary>\n\n"
-        markdown += "```json\n"
-        markdown += self._safe_json_dumps({
-            "columns": columns,
-            "data": display_data,
-            "row_count": len(display_data)
-        }, indent=2)
-        markdown += "\n```\n\n"
-        markdown += "</details>\n\n"
-        
-        if total_rows > display_rows:
-            markdown += f"*Note: Showing top {display_rows} of {total_rows} total rows in downloadable format above.*\n"
-        
-        return markdown
+        md = "\n\n---\n\n<details><summary>Show SQL</summary>\n\n"
+        md += "```sql\n"
+        md += combined_sql
+        md += "\n```\n\n"
+        md += f'<a href="data:text/sql;base64,{encoded}" download="query.sql">Download SQL</a>\n\n'
+        md += "</details>\n"
+        return md
     
     def _build_summary_prompt(self, state: AgentState) -> str:
         """Build the prompt for summary generation based on state."""
@@ -362,33 +300,28 @@ class ResultSummarizeAgent:
 """
         
         prompt += """
-**Task:** Generate a comprehensive summary in natural language that:
-1. Describes what the user asked for
-2. Explains what the system did (planning, SQL generation, execution)
-3. For multi-part questions with multiple queries:
-   - Explain each sub-question that was addressed
-   - Show each SQL query in its own code block with a clear label
-   - Present each query's results in a clear, readable format (preferably as a markdown table)
-   - Provide insights and analysis for each result
-   - Synthesize an overall conclusion combining insights from all queries
-4. For single queries:
-   - Print out SQL synthesis explanation if any SQL was generated
-   - Print out the SQL query in a code block
-   - Print out the result in a readable format (preferably as a markdown table)
-   - Provide insights and analysis for the result
-5. **Code Annotation for Human Readability:**
-   - For each result table, scan the columns for raw codes (e.g., diagnosis_code, procedure_code, ICD codes, CPT codes, not limited to medical domain)
-   - If you find columns containing raw codes WITHOUT corresponding human-readable description columns:
-     * Add a new column with a descriptive name like "{code_column}_description" 
-     * Populate it with human-readable descriptions/meanings of those codes
-     * Use your knowledge base to translate common codes (ICD-10, CPT, etc.) into plain language
-     * Example: diagnosis_code "I10" → diagnosis_code_description "Essential (primary) hypertension"
-     * Example: procedure_code "99213" → procedure_code_description "Office visit, established patient, 20-29 minutes"
-   - Present the enhanced table with both the original codes and the new description columns
-   - This makes the results more interpretable for non-technical users
-6. States the outcome (success with X rows, error, needs clarification, etc.)
+**Task:** Generate a clean, well-formatted summary. Follow these rules strictly:
 
-Use markdown formatting for readability. Keep it clear and user-friendly. 
+**DO NOT include:**
+- SQL queries (they will be added separately in a collapsible section)
+- Workflow execution details or "System Approach" sections
+- Technical process descriptions (planning, SQL generation steps)
+
+**DO include:**
+1. A concise title as a ## heading summarizing the analysis
+2. A brief narrative (2-3 sentences) explaining what was analyzed
+3. Results as a well-formatted markdown table:
+   - Format currency values as $X,XXX,XXX.XX (e.g., $5,969,134.05)
+   - Format large counts with commas (e.g., 29,152)
+   - Format percentages with % symbol
+4. **Code Annotation for Human Readability:**
+   - For columns containing raw codes (diagnosis_code, procedure_code, ICD, CPT, etc.) WITHOUT description columns:
+     * Add a "{code_column}_description" column with human-readable descriptions
+     * Example: "I10" → "Essential (primary) hypertension"
+5. A "### Key Insights" section with 3-5 bullet points highlighting notable patterns
+6. A brief outcome statement (e.g., "7 rows returned successfully")
+
+Use markdown formatting. Keep it concise and user-friendly.
 """
         
         return prompt

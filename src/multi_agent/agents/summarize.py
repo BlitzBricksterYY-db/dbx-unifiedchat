@@ -305,23 +305,20 @@ class _SimpleSummarizeAgent:
 """
         
         prompt += """
-**Task:** Generate a comprehensive summary in natural language that:
-1. Describes what the user asked for
-2. Explains what the system did (planning, SQL generation, execution)
-3. For multi-part questions with multiple queries:
-   - Explain each sub-question that was addressed
-   - Show each SQL query in its own code block with a clear label
-   - Present each query's results in a clear, readable format (preferably as a markdown table)
-   - Provide insights and analysis for each result
-   - Synthesize an overall conclusion combining insights from all queries
-4. For single queries:
-   - Print out SQL synthesis explanation if any SQL was generated
-   - Print out the SQL query in a code block
-   - Print out the result in a readable format (preferably as a markdown table)
-   - Provide insights and analysis for the result
-5. States the outcome (success with X rows, error, needs clarification, etc.)
+**Task:** Generate a clean, well-formatted summary. Follow these rules strictly:
 
-Use markdown formatting for readability. Keep it clear and user-friendly. 
+**DO NOT include:**
+- SQL queries (they will be added separately in a collapsible section)
+- Workflow execution details or "System Approach" sections
+
+**DO include:**
+1. A concise title as a ## heading
+2. A brief narrative (2-3 sentences)
+3. Results as a well-formatted markdown table ($X,XXX,XXX.XX for currency, commas for counts)
+4. A "### Key Insights" section with 3-5 bullet points
+5. A brief outcome statement
+
+Use markdown formatting. Keep it concise and user-friendly.
 """
         
         return prompt
@@ -330,127 +327,103 @@ Use markdown formatting for readability. Keep it clear and user-friendly.
 @measure_node_time("summarize")
 def summarize_node(state: AgentState) -> dict:
     """
-    Result summarize node wrapping ResultSummarizeAgent class.
-    
-    This is the final node that all workflow paths go through.
-    Generates a natural language summary AND preserves all workflow data.
-    
-    OPTIMIZED: Uses minimal state extraction to reduce token usage
-    
-    Returns: Dictionary with only the state updates (for clean MLflow traces)
+    Result summarize node: text summary + chart specs + SQL download.
+
+    1. Generates narrative summary via LLM (streams to user)
+    2. For each result set, generates an echarts-chart code block via ChartGenerator
+    3. Appends collapsible SQL section with download link
     """
     writer = get_stream_writer()
-    
+
     print("\n" + "="*80)
-    print("📝 RESULT SUMMARIZE AGENT (Token Optimized)")
+    print("RESULT SUMMARIZE AGENT (Clean Output)")
     print("="*80)
-    
-    # OPTIMIZATION: Extract only minimal context needed for summarization
+
     context = extract_summarize_context(state)
-    print(f"📊 State optimization: Using {len(context)} fields (vs {len([k for k in state.keys() if state.get(k) is not None])} in full state)")
-    
-    # Emit summary start event
-    writer({"type": "summary_start", "content": "Generating comprehensive summary..."})
-    
-    # OPTIMIZATION: Use cached agent instance
+    writer({"type": "summary_start", "content": "Generating summary..."})
+
     summarize_agent = get_cached_summarize_agent()
     config = get_config()
     track_agent_model_usage("summarize", config.llm.summarize_endpoint)
-    
-    # Add original_query to context if not present (needed for summary)
+
     if 'original_query' not in context:
         context['original_query'] = state.get('original_query', 'N/A')
-    
+
+    # 1. LLM narrative summary (streams tokens to user via messages mode)
     summary = summarize_agent(context)
-    
-    # Display what's being returned
-    print(f"\n📦 State Fields Being Returned:")
-    print(f"  ✓ final_summary: {len(summary)} chars")
-    if context.get("sql_query"):
-        print(f"  ✓ sql_query: {len(context['sql_query'])} chars")
-    if context.get("execution_result"):
-        exec_result = context["execution_result"]
-        if exec_result.get("success"):
-            print(f"  ✓ execution_result: {exec_result.get('row_count', 0)} rows")
-        else:
-            print(f"  ✓ execution_result: Failed - {exec_result.get('error', 'Unknown')[:50]}...")
-    if context.get("sql_synthesis_explanation"):
-        print(f"  ✓ sql_synthesis_explanation: {len(context['sql_synthesis_explanation'])} chars")
-    if state.get("execution_plan"):
-        print(f"  ✓ execution_plan: {state['execution_plan'][:80]}...")
-    if state.get("synthesis_error"):
-        print(f"  ⚠ synthesis_error: {state['synthesis_error'][:50]}...")
-    if state.get("execution_error"):
-        print(f"  ⚠ execution_error: {state['execution_error'][:50]}...")
-    
-    print("="*80)
-    
-    # Emit summary completion event
-    writer({"type": "summary_complete", "content": f"✅ Summary generated ({len(summary)} chars)"})
-    
-    # Build a concise final message for AIMessage (avoid duplication with final_summary)
-    # Only include execution results and errors (summary goes to final_summary field)
-    final_message_parts = []
-    
-    # 1. Execution Results (if available)
-    exec_result = state.get("execution_result")
-    if exec_result and exec_result.get("success"):
-        results = exec_result.get("result", [])
-        if results:
+
+    # Collect execution results
+    execution_results = state.get('execution_results', [])
+    exec_result = state.get('execution_result', {})
+    if not execution_results and exec_result:
+        execution_results = [exec_result]
+
+    # 2. Generate charts for each result set
+    chart_generator = _get_chart_generator(config)
+    original_query = state.get('original_query', '')
+
+    for idx, result_item in enumerate(execution_results):
+        if not result_item or not result_item.get('success'):
+            continue
+
+        columns = result_item.get('columns', [])
+        data = result_item.get('result', [])
+        if not columns or not data:
+            continue
+
+        if chart_generator:
             try:
-                import pandas as pd
-                df = pd.DataFrame(results)
-                
-                # Display DataFrame
-                print("\n" + "="*80)
-                print("📊 QUERY RESULTS (Pandas DataFrame)")
-                print("="*80)
-                try:
-                    # Try to use display() if available (Databricks notebook)
-                    display(df)
-                except NameError:
-                    # Fallback to string representation
-                    print(df.to_string())
-                print("="*80 + "\n")
-                
-                # Add compact results info to message
-                final_message_parts.append(f"\n📊 **Query Results:** {df.shape[0]} rows × {df.shape[1]} columns")
-                
-                # Show top 100 rows in markdown table format
-                display_rows = min(100, df.shape[0])
-                df_preview = df.head(display_rows)
-                
-                # Convert to markdown table
-                markdown_table = df_preview.to_markdown(index=False)
-                
-                final_message_parts.append(f"\n### Results Table (Top {display_rows} rows)\n\n{markdown_table}")
-                
-                # Add note if more rows exist
-                if df.shape[0] > display_rows:
-                    final_message_parts.append(f"\n*Showing {display_rows} of {df.shape[0]} total rows*")
-                
+                chart_spec = chart_generator.generate_chart(columns, data, original_query)
+                if chart_spec:
+                    chart_json = chart_generator._safe_json_dumps(chart_spec)
+                    summary += f"\n\n```echarts-chart\n{chart_json}\n```\n"
+                    print(f"Chart generated for result set {idx + 1} ({len(chart_json)} bytes)")
             except Exception as e:
-                final_message_parts.append(f"\n⚠️ Could not format results: {e}")
-                final_message_parts.append(f"Raw results (first 3): {results[:3]}")
-    
-    # 2. Error messages (if any)
+                print(f"Chart generation failed for result set {idx + 1}: {e}")
+
+    # 3. Append collapsible SQL download section
+    sql_queries = state.get('sql_queries', [])
+    single_sql = state.get('sql_query')
+    if not sql_queries and single_sql:
+        sql_queries = [single_sql]
+
+    if sql_queries:
+        from .summarize_agent import ResultSummarizeAgent
+        summary += ResultSummarizeAgent.format_sql_download(sql_queries)
+
+    # 4. Append error messages if any
     if state.get("synthesis_error"):
-        final_message_parts.append(f"\n❌ **SQL Synthesis Error:** {state['synthesis_error']}")
+        summary += f"\n\n**SQL Synthesis Error:** {state['synthesis_error']}"
     if state.get("execution_error"):
-        final_message_parts.append(f"\n❌ **Execution Error:** {state['execution_error']}")
-    
-    # Combine into final message (results/errors only - summary in final_summary field)
-    # If no results or errors, use a simple completion message
-    final_message = "\n".join(final_message_parts) if final_message_parts else "✅ Execution complete"
-    
-    print(f"\n✅ AIMessage created with results/errors ({len(final_message)} chars)")
-    print(f"✅ Summary stored in final_summary field ({len(summary)} chars)")
-    
-    # Route to END via fixed edge (summarize → END)
-    # Return: final_summary (displayed once) + AIMessage (results/errors only)
+        summary += f"\n\n**Execution Error:** {state['execution_error']}"
+
+    print(f"Final summary: {len(summary)} chars")
+    print("="*80)
+
+    writer({"type": "summary_complete", "content": f"Summary generated ({len(summary)} chars)"})
+
     return {
         "final_summary": summary,
-        "messages": [
-            AIMessage(content=final_message)
-        ]
+        "messages": [AIMessage(content=summary)]
     }
+
+
+def _get_chart_generator(config):
+    """Get or create cached ChartGenerator instance."""
+    if not hasattr(_get_chart_generator, "_cached"):
+        try:
+            from databricks_langchain import ChatDatabricks
+            from .chart_generator import ChartGenerator
+
+            llm = ChatDatabricks(
+                endpoint=config.llm.chart_endpoint,
+                temperature=0.0,
+                max_tokens=1000,
+            )
+            _get_chart_generator._cached = ChartGenerator(llm)
+            print(f"ChartGenerator created (endpoint: {config.llm.chart_endpoint})")
+        except Exception as e:
+            print(f"ChartGenerator unavailable: {e}")
+            _get_chart_generator._cached = None
+
+    return _get_chart_generator._cached

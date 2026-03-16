@@ -293,6 +293,37 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
         except Exception:
             return f"<{type(obj).__name__}>"
     
+    @staticmethod
+    def _custom_event_to_progress(custom_data: dict) -> str:
+        """Convert a custom event to a short progress description for the collapsible block."""
+        evt_type = custom_data.get("type", "unknown")
+        try:
+            mapping = {
+                "agent_start": lambda d: f"Started {d.get('agent', 'agent')}",
+                "agent_thinking": lambda d: f"{d.get('agent', 'Agent')}: analyzing",
+                "intent_detection": lambda d: f"Intent: {d.get('result', 'unknown')}",
+                "intent_detected": lambda d: f"Intent: {d.get('intent_type', 'unknown')} ({d.get('confidence', 0):.0%} confidence)",
+                "clarity_analysis": lambda d: f"Query {'clear' if d.get('clear') else 'needs clarification'}",
+                "vector_search_start": lambda d: "Searching knowledge base",
+                "vector_search_results": lambda d: f"Found {d.get('count', 0)} relevant spaces",
+                "plan_formulation": lambda d: f"Plan: {d.get('strategy', 'unknown')} strategy",
+                "sql_generated": lambda d: "SQL query generated",
+                "sql_validation_start": lambda d: "Validating SQL",
+                "sql_execution_start": lambda d: "Executing SQL query",
+                "sql_execution_complete": lambda d: f"Query complete: {d.get('rows', 0)} rows, {len(d.get('columns', []))} columns",
+                "sql_synthesis_start": lambda d: f"SQL synthesis via {d.get('route', 'unknown')} route",
+                "summary_start": lambda d: "Generating summary",
+                "summary_complete": lambda d: "Summary complete",
+                "genie_agent_call": lambda d: f"Calling Genie for space {d.get('space_id', 'unknown')[:20]}",
+                "tools_available": lambda d: f"Tools ready: {', '.join(d.get('tools', [])[:3])}",
+            }
+            formatter = mapping.get(evt_type)
+            if formatter:
+                return formatter(custom_data)
+        except Exception:
+            pass
+        return ""
+    
     def format_custom_event(self, custom_data: dict) -> str:
         """
         Format custom streaming events for user-friendly display.
@@ -510,51 +541,48 @@ Guidelines:
         first_message = True
         seen_ids = set()
         
+        # Clean output: track state to suppress intermediate events
+        current_node = None
+        progress_steps = []
+        details_emitted = False
+        
+        # Event types that should always be yielded directly to the user
+        PASSTHROUGH_EVENTS = {"meta_answer_content", "clarification_content"}
+        
         # Execute workflow with CheckpointSaver for distributed serving
-        # CRITICAL: CheckpointSaver as context manager ensures all instances share state
         with CheckpointSaver(instance_name=self.lakebase_instance_name) as checkpointer:
-            # Compile graph with checkpointer at runtime
-            # This allows distributed Model Serving to access shared state
             app = self.workflow.compile(checkpointer=checkpointer)
             
             logger.info(f"Executing workflow with checkpointer (thread: {thread_id})")
             
-            # Stream the workflow execution with enhanced visibility modes
-            # CheckpointSaver will:
-            # 1. Restore previous state from thread_id (if exists) from Lakebase
-            # 2. Merge with initial_state (initial_state takes precedence)
-            # 3. Preserve conversation history across distributed instances
-            # Stream modes:
-            # - updates: State changes after each node
-            # - messages: LLM token-by-token streaming
-            # - custom: Agent-specific events (thinking, decisions, progress)
-            # - tasks: Task lifecycle events (start, finish, errors) for node execution tracking
             for event in app.stream(initial_state, run_config, stream_mode=["updates", "messages", "custom", "tasks"]):
                 event_type = event[0]
                 event_data = event[1]
                 
                 # Handle streaming text deltas (messages mode)
+                # Only stream tokens from the summarize node to keep output clean
                 if event_type == "messages":
                     try:
-                        # Extract the message chunk
                         chunk = event_data[0] if isinstance(event_data, (list, tuple)) else event_data
                         
-                        # Stream text content as deltas for real-time visibility in Playground
                         if isinstance(chunk, AIMessageChunk) and (content := chunk.content):
-                            # PHASE 3: Track TTFT (Time To First Token)
-                            if first_token_time is None:
-                                first_token_time = time.time()
-                                ttft = first_token_time - workflow_start_time
-                                _performance_metrics["workflow_metrics"]["ttft_seconds"].append(ttft)
-                                logger.info(f"⚡ TTFT: {ttft:.3f}s")
-                            
-                            yield ResponsesAgentStreamEvent(
-                                **self.create_text_delta(delta=content, item_id=chunk.id),
-                            )
+                            if current_node == "summarize":
+                                if first_token_time is None:
+                                    first_token_time = time.time()
+                                    ttft = first_token_time - workflow_start_time
+                                    _performance_metrics["workflow_metrics"]["ttft_seconds"].append(ttft)
+                                    logger.info(f"⚡ TTFT: {ttft:.3f}s")
+                                
+                                yield ResponsesAgentStreamEvent(
+                                    **self.create_text_delta(delta=content, item_id=chunk.id),
+                                )
+                            else:
+                                logger.debug(f"Suppressed LLM token from node: {current_node}")
                     except Exception as e:
                         logger.warning(f"Error processing message chunk: {e}")
                 
                 # Handle node updates (updates mode)
+                # Suppress step indicators and routing text; collect as progress steps
                 elif event_type == "updates":
                     events = event_data
                     new_msgs = [
@@ -570,130 +598,106 @@ Guidelines:
                         first_message = False
                     else:
                         seen_ids.update(msg.id for msg in new_msgs)
-                        # Emit node name as a step indicator with enhanced details
                         if events:
                             node_name = tuple(events.keys())[0]
                             node_update = events[node_name]
                             updated_keys = [k for k in node_update.keys() if k != "messages"]
                             
-                            # Enhanced step indicator with state keys
-                            step_text = f"🔹 Step: {node_name}"
+                            step_text = f"Step: {node_name}"
                             if updated_keys:
-                                step_text += f" | Keys updated: {', '.join(updated_keys)}"
+                                step_text += f" ({', '.join(updated_keys)})"
+                            progress_steps.append(step_text)
+                            logger.info(f"Progress: {step_text}")
                             
-                            yield ResponsesAgentStreamEvent(
-                                type="response.output_item.done",
-                                item=self.create_text_output_item(
-                                    text=step_text, id=str(uuid4())
-                                ),
-                            )
-                            
-                            # Emit routing decision if next_agent changed
                             if "next_agent" in node_update:
                                 next_agent = node_update["next_agent"]
-                                yield ResponsesAgentStreamEvent(
-                                    type="response.output_item.done",
-                                    item=self.create_text_output_item(
-                                        text=f"🔀 Routing decision: Next agent = {next_agent}",
-                                        id=str(uuid4())
-                                    ),
-                                )
+                                progress_steps.append(f"Routing to {next_agent}")
                     
-                    # Process messages for tool calls, tool results, and final text
+                    # Still process final AIMessage content from updates
                     for msg in new_msgs:
-                        # Check if message has tool calls
                         if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                            # Emit function call items for tool invocations
                             for tool_call in msg.tool_calls:
                                 try:
-                                    yield ResponsesAgentStreamEvent(
-                                        type="response.output_item.done",
-                                        item=self.create_function_call_item(
-                                            id=str(uuid4()),
-                                            call_id=tool_call.get("id", str(uuid4())),
-                                            name=tool_call.get("name", "unknown"),
-                                            arguments=json.dumps(tool_call.get("args", {})),
-                                        ),
-                                    )
+                                    progress_steps.append(f"Tool call: {tool_call.get('name', 'unknown')}")
                                 except Exception as e:
-                                    logger.warning(f"Error emitting tool call: {e}")
-                        # Handle ToolMessage for tool results
+                                    logger.warning(f"Error processing tool call: {e}")
                         elif hasattr(msg, '__class__') and msg.__class__.__name__ == 'ToolMessage':
-                            try:
-                                tool_name = getattr(msg, 'name', 'unknown')
-                                tool_content = str(msg.content)[:200] if msg.content else "No content"
-                                yield ResponsesAgentStreamEvent(
-                                    type="response.output_item.done",
-                                    item=self.create_text_output_item(
-                                        text=f"🔨 Tool result ({tool_name}): {tool_content}...",
-                                        id=str(uuid4())
-                                    ),
-                                )
-                            except Exception as e:
-                                logger.warning(f"Error emitting tool result: {e}")
+                            logger.debug(f"Tool result from {getattr(msg, 'name', 'unknown')}")
                         else:
-                            # Emit regular message content
                             yield from output_to_responses_items_stream([msg])
                 
                 # Handle custom mode (agent-specific events)
+                # Only yield passthrough events; collect the rest as progress
                 elif event_type == "custom":
                     try:
                         custom_data = event_data
-                        formatted_text = self.format_custom_event(custom_data)
-                        yield ResponsesAgentStreamEvent(
-                            type="response.output_item.done",
-                            item=self.create_text_output_item(
-                                text=formatted_text,
-                                id=str(uuid4())
-                            ),
-                        )
+                        evt_type = custom_data.get("type", "unknown")
+                        
+                        if evt_type in PASSTHROUGH_EVENTS:
+                            formatted_text = self.format_custom_event(custom_data)
+                            yield ResponsesAgentStreamEvent(
+                                type="response.output_item.done",
+                                item=self.create_text_output_item(
+                                    text=formatted_text,
+                                    id=str(uuid4())
+                                ),
+                            )
+                        else:
+                            progress_desc = self._custom_event_to_progress(custom_data)
+                            if progress_desc:
+                                progress_steps.append(progress_desc)
+                            logger.debug(f"Collected custom event: {evt_type}")
                     except Exception as e:
                         logger.warning(f"Error processing custom event: {e}")
                 
                 # Handle tasks mode (node lifecycle events)
+                # Track current_node; emit progress block before summarize
                 elif event_type == "tasks":
                     try:
                         task_event = event_data
-                        # Task events include: 'event' (start/finish/error), 'name', 'node', 'timestamp', etc.
                         event_name = task_event.get("event", "unknown")
                         node_name = task_event.get("name", "unknown")
                         
                         if event_name == "start":
-                            # Task started
-                            logger.debug(f"⏳ Task started: {node_name}")
-                            # Optionally emit to UI:
-                            # yield ResponsesAgentStreamEvent(
-                            #     type="response.output_item.done",
-                            #     item=self.create_text_output_item(
-                            #         text=f"⏳ Starting: {node_name}",
-                            #         id=str(uuid4())
-                            #     ),
-                            # )
+                            current_node = node_name
+                            logger.debug(f"Node started: {node_name}")
+                            
+                            # Emit collapsible progress block before summarize streams
+                            if node_name == "summarize" and not details_emitted:
+                                progress_md = "<details>\n<summary>Processing Steps</summary>\n\n"
+                                for step in progress_steps:
+                                    progress_md += f"- {step}\n"
+                                progress_md += "\n</details>\n\n"
+                                yield ResponsesAgentStreamEvent(
+                                    type="response.output_item.done",
+                                    item=self.create_text_output_item(
+                                        text=progress_md, id=str(uuid4())
+                                    ),
+                                )
+                                details_emitted = True
                         
                         elif event_name == "end":
-                            # Task completed successfully
                             duration = task_event.get("duration")
                             if duration:
-                                logger.info(f"✅ Task completed: {node_name} ({duration:.3f}s)")
-                                # Track node execution times for performance metrics
+                                logger.info(f"Node completed: {node_name} ({duration:.3f}s)")
                                 if "node_timings" not in _performance_metrics["workflow_metrics"]:
                                     _performance_metrics["workflow_metrics"]["node_timings"] = {}
                                 _performance_metrics["workflow_metrics"]["node_timings"][node_name] = duration
                             else:
-                                logger.info(f"✅ Task completed: {node_name}")
+                                logger.info(f"Node completed: {node_name}")
+                            current_node = None
                         
                         elif event_name == "error":
-                            # Task failed with error
                             error = task_event.get("error", "Unknown error")
-                            logger.error(f"❌ Task failed: {node_name} - {error}")
-                            # Emit error to UI
+                            logger.error(f"Node failed: {node_name} - {error}")
                             yield ResponsesAgentStreamEvent(
                                 type="response.output_item.done",
                                 item=self.create_text_output_item(
-                                    text=f"❌ Error in {node_name}: {error}",
+                                    text=f"Error in {node_name}: {error}",
                                     id=str(uuid4())
                                 ),
                             )
+                            current_node = None
                     
                     except Exception as e:
                         logger.warning(f"Error processing task event: {e}")

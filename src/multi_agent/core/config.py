@@ -106,6 +106,7 @@ class LLMConfig:
     sql_synthesis_genie_endpoint: str
     execution_endpoint: str
     summarize_endpoint: str
+    chart_endpoint: str
     
     @classmethod
     def from_env(cls) -> 'LLMConfig':
@@ -118,6 +119,7 @@ class LLMConfig:
             sql_synthesis_genie_endpoint=os.getenv("LLM_ENDPOINT_SQL_SYNTHESIS_GENIE", d),
             execution_endpoint=os.getenv("LLM_ENDPOINT_EXECUTION", d),
             summarize_endpoint=os.getenv("LLM_ENDPOINT_SUMMARIZE", d),
+            chart_endpoint=os.getenv("LLM_ENDPOINT_CHART", d),
         )
 
     @classmethod
@@ -131,6 +133,7 @@ class LLMConfig:
             sql_synthesis_genie_endpoint=_mc_get(mc, "llm_endpoint_sql_synthesis_genie", d),
             execution_endpoint=_mc_get(mc, "llm_endpoint_execution", d),
             summarize_endpoint=_mc_get(mc, "llm_endpoint_summarize", d),
+            chart_endpoint=_mc_get(mc, "llm_endpoint_chart", d),
         )
 
 
@@ -378,6 +381,7 @@ class AgentConfig:
         print(f"  SQL Synthesis (Genie) Agent: {self.llm.sql_synthesis_genie_endpoint}")
         print(f"  SQL Execution Agent: {self.llm.execution_endpoint}")
         print(f"  Summarize Agent: {self.llm.summarize_endpoint}")
+        print(f"  Chart Generator: {self.llm.chart_endpoint}")
         print(f"\nVector Search:")
         print(f"  Function: {self.vector_search.function_name}")
         print(f"  Endpoint: {self.vector_search.endpoint_name}")
