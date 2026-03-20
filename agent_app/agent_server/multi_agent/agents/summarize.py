@@ -150,17 +150,17 @@ class _SimpleSummarizeAgent:
         self.name = "ResultSummarize"
         self.llm = llm
     
-    def __call__(self, state: dict) -> str:
+    def __call__(self, state: dict, writer=None) -> str:
         """Generate summary from state."""
-        # Build prompt from state
         prompt = self._build_summary_prompt(state)
         
-        # Stream LLM response
         print("🤖 Streaming summary generation...")
         summary = ""
         for chunk in self.llm.stream(prompt):
             if chunk.content:
                 summary += chunk.content
+                if writer:
+                    writer({"type": "text_delta", "content": chunk.content})
         
         summary = summary.strip()
         print(f"✓ Summary stream complete ({len(summary)} chars)")
@@ -367,8 +367,11 @@ def summarize_node(state: AgentState) -> dict:
     if "original_query" not in context:
         context["original_query"] = state.get("original_query", "N/A")
 
-    # --- 1. LLM text summary (streams to user) ---
-    summary = summarize_agent(context)
+    # --- 1. LLM text summary (streams to user via writer deltas) ---
+    if hasattr(summarize_agent, "generate_summary"):
+        summary = summarize_agent.generate_summary(context, writer=writer)
+    else:
+        summary = summarize_agent(context, writer=writer)
 
     # --- 2. Chart generation per result set ---
     execution_results = state.get("execution_results", [])

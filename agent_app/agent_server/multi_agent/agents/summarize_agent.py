@@ -62,10 +62,12 @@ class ResultSummarizeAgent:
         
         return json.dumps(obj, indent=indent, default=default_handler)
     
-    def generate_summary(self, state: AgentState) -> str:
+    def generate_summary(self, state: AgentState, writer=None) -> str:
         """
         Generate a clean natural language summary (no SQL, no workflow sections).
         Chart blocks and SQL downloads are appended by summarize_node().
+        When *writer* is provided, each token chunk is emitted as a text_delta
+        custom event for real-time streaming to the frontend.
         """
         summary_prompt = self._build_summary_prompt(state)
 
@@ -74,6 +76,8 @@ class ResultSummarizeAgent:
         for chunk in self.llm.stream(summary_prompt):
             if chunk.content:
                 summary += chunk.content
+                if writer:
+                    writer({"type": "text_delta", "content": chunk.content})
 
         summary = summary.strip()
         print(f"✓ Summary stream complete ({len(summary)} chars)")

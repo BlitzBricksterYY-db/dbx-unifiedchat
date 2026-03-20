@@ -569,41 +569,25 @@ CRITICAL:
     try:
         print("🤖 Streaming unified LLM response for immediate markdown display...")
         
-        # Use stream for immediate user feedback on markdown content
-        # Hybrid format: markdown FIRST (streamed), then JSON (parsed)
         accumulated_content = ""
         markdown_section = ""
         in_json_block = False
-        streamed_markdown = False
         
         for chunk in llm.stream(unified_prompt):
             if chunk.content:
                 accumulated_content += chunk.content
                 
-                # Detect if we've hit the JSON block
                 if "```json" in accumulated_content and not in_json_block:
                     in_json_block = True
-                    # Extract and stream any remaining markdown before JSON block
-                    if not streamed_markdown:
-                        parts = accumulated_content.split("```json")
-                        markdown_section = parts[0].strip()
-                        if markdown_section:
-                            # Stream the markdown we've accumulated
-                            # Note: This will be picked up by ResponseAgent's "messages" stream mode
-                            print(f"  📄 Streaming markdown section ({len(markdown_section)} chars)...")
-                            streamed_markdown = True
+                    parts = accumulated_content.split("```json")
+                    markdown_section = parts[0].strip()
                 
-                # Stream markdown chunks if we haven't hit JSON yet
                 if not in_json_block and chunk.content.strip():
                     markdown_section += chunk.content
-                    # Emit as AIMessageChunk for ResponseAgent to stream
-                    # The ResponseAgent's predict_stream already handles AIMessageChunk via "messages" mode
         
-        content = accumulated_content  # Full content for JSON parsing
+        content = accumulated_content
         
         print(f"✓ Stream complete ({len(content)} chars total)")
-        if streamed_markdown:
-            print(f"  ✓ Streamed {len(markdown_section)} chars of markdown to UI")
         
         # Parse JSON response from hybrid format
         # Extract JSON from code block after markdown (if present)

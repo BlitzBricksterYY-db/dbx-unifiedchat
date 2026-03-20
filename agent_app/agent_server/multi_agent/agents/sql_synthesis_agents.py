@@ -42,10 +42,47 @@ import json
 import re
 from typing import Dict, List, Any, Optional
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.runnables import Runnable, RunnableLambda, RunnableParallel
 from langchain_core.tools import StructuredTool
 from langchain.agents import create_agent
 from pydantic import BaseModel, Field
+
+
+class _ProgressCallbackHandler(BaseCallbackHandler):
+    """Emits real-time progress events for tool calls within SQL synthesis agents."""
+
+    def __init__(self, writer, agent_label: str = "sql_synthesis"):
+        self._writer = writer
+        self._agent = agent_label
+        self._tool_round = 0
+
+    def on_tool_start(self, serialized, input_str, **kwargs):
+        self._tool_round += 1
+        name = serialized.get("name", "unknown_tool")
+        short_name = name.split("__")[-1] if "__" in name else name
+        self._writer({
+            "type": "tool_call_start",
+            "agent": self._agent,
+            "tool": short_name,
+            "content": f"🔧 Calling {short_name}...",
+        })
+
+    def on_tool_end(self, output, **kwargs):
+        size = len(str(output)) if output else 0
+        self._writer({
+            "type": "tool_call_end",
+            "agent": self._agent,
+            "content": f"✅ Tool returned ({size} chars)",
+        })
+
+    def on_chat_model_start(self, serialized, messages, **kwargs):
+        if self._tool_round > 0:
+            self._writer({
+                "type": "agent_thinking",
+                "agent": self._agent,
+                "content": "🤔 Analyzing tool results...",
+            })
 
 from databricks_langchain import (
     DatabricksFunctionClient,
@@ -214,12 +251,13 @@ class SQLSynthesisTableAgent:
             )
         )
     
-    def synthesize_sql(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+    def synthesize_sql(self, plan: Dict[str, Any], writer=None) -> Dict[str, Any]:
         """
         Synthesize SQL query based on execution plan.
         
         Args:
             plan: Execution plan from planning agent
+            writer: Optional LangGraph stream writer for real-time progress events
             
         Returns:
             Dictionary with:
@@ -228,7 +266,6 @@ class SQLSynthesisTableAgent:
             - has_sql: bool - Whether SQL was successfully extracted
         """
         plan_result = plan
-        # Invoke agent
         agent_message = {
             "messages": [
                 {
@@ -243,7 +280,10 @@ Use your available UC function tools to gather metadata intelligently.
             ]
         }
         
-        result = self.agent.invoke(agent_message)
+        config = {}
+        if writer:
+            config["callbacks"] = [_ProgressCallbackHandler(writer, "sql_synthesis_table")]
+        result = self.agent.invoke(agent_message, config=config)
         
         # Extract SQL and explanation from response
         if result and "messages" in result:
@@ -291,9 +331,9 @@ Use your available UC function tools to gather metadata intelligently.
         else:
             raise Exception("No response from agent")
     
-    def __call__(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+    def __call__(self, plan: Dict[str, Any], writer=None) -> Dict[str, Any]:
         """Make agent callable."""
-        return self.synthesize_sql(plan)
+        return self.synthesize_sql(plan, writer=writer)
 
 
 # ==============================================================================
@@ -779,7 +819,8 @@ OUTPUT REQUIREMENTS:
     
     def synthesize_sql(
         self, 
-        plan: Dict[str, Any]
+        plan: Dict[str, Any],
+        writer=None,
     ) -> Dict[str, Any]:
         """
         Synthesize SQL using Genie agents with intelligent tool selection.
@@ -839,11 +880,10 @@ Then combine them into a final SQL query.
         }
         
         try:
-            # MLflow autologging is enabled globally at agent initialization
-            # No need to call it again here to avoid context issues
-            
-            # Invoke the agent
-            result = self.sql_synthesis_agent.invoke(agent_message)
+            config = {}
+            if writer:
+                config["callbacks"] = [_ProgressCallbackHandler(writer, "sql_synthesis_genie")]
+            result = self.sql_synthesis_agent.invoke(agent_message, config=config)
             
             # Extract SQL from agent result
             # The agent returns {"messages": [...]}
@@ -918,7 +958,8 @@ Then combine them into a final SQL query.
     
     def __call__(
         self, 
-        plan: Dict[str, Any]
+        plan: Dict[str, Any],
+        writer=None,
     ) -> Dict[str, Any]:
         """Make agent callable with plan dictionary."""
-        return self.synthesize_sql(plan)
+        return self.synthesize_sql(plan, writer=writer)

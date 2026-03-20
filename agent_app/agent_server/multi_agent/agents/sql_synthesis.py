@@ -269,21 +269,15 @@ def sql_synthesis_table_node(state: AgentState) -> dict:
     try:
         print("🤖 Invoking SQL synthesis agent...")
         
-        # Emit detailed start event
         writer({"type": "agent_thinking", "agent": "sql_synthesis_table", "content": "🧠 Starting SQL synthesis using UC function tools..."})
         writer({"type": "agent_step", "agent": "sql_synthesis_table", "step": "analyzing_plan", "content": f"📋 Analyzing execution plan for {len(relevant_space_ids)} relevant spaces"})
         
         uc_functions = config.unity_catalog.uc_function_names
         writer({"type": "tools_available", "agent": "sql_synthesis_table", "tools": uc_functions, "content": f"🔧 Available UC functions: {', '.join(uc_functions)}"})
         
-        # Emit query strategy
         writer({"type": "agent_thinking", "agent": "sql_synthesis_table", "content": f"🎯 Strategy: Query metadata for spaces {relevant_space_ids} then synthesize SQL"})
         
-        # Call the agent
-        result = sql_agent(plan)
-        
-        # Emit tool completion event
-        writer({"type": "agent_step", "agent": "sql_synthesis_table", "step": "metadata_gathered", "content": "✅ Metadata collection complete, synthesizing SQL query..."})
+        result = sql_agent(plan, writer=writer)
         
         # Extract SQL and explanation
         sql_query = result.get("sql")
@@ -434,11 +428,7 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
         # Emit execution strategy
         writer({"type": "agent_thinking", "agent": "sql_synthesis_genie", "content": "⚡ Executing Genie agents in parallel for optimal performance..."})
         
-        # Call the agent
-        result = sql_agent(plan)
-        
-        # Emit completion event
-        writer({"type": "agent_step", "agent": "sql_synthesis_genie", "step": "combining_results", "content": "🔄 All Genie agents responded, combining SQL fragments..."})
+        result = sql_agent(plan, writer=writer)
         
         # Extract SQL and explanation
         sql_query = result.get("sql")
