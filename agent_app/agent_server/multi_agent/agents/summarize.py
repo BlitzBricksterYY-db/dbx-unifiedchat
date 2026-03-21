@@ -346,10 +346,11 @@ def _get_cached_chart_generator():
 @measure_node_time("summarize")
 def summarize_node(state: AgentState) -> dict:
     """
-    Orchestrates: LLM summary -> chart generation -> SQL download.
+    Orchestrates: LLM summary -> chart generation -> SQL download -> code enrichment.
     This is the final node that all workflow paths go through.
     """
     import json as _json
+    import concurrent.futures
 
     writer = get_stream_writer()
 
@@ -357,8 +358,49 @@ def summarize_node(state: AgentState) -> dict:
     print("RESULT SUMMARIZE NODE")
     print("=" * 80)
 
+    # --- 0. Kick off code enrichment in background (parallel with summary) ---
+    execution_results = state.get("execution_results", [])
+    exec_result = state.get("execution_result")
+    if not execution_results and exec_result:
+        execution_results = [exec_result]
+
+    enrichment_future = None
+    enrichment_pool = None
+    first_result = next(
+        (r for r in execution_results if r and r.get("success") and r.get("columns")),
+        None,
+    )
+    if first_result:
+        try:
+            from ..tools.web_search import enrich_codes
+            from databricks_langchain import ChatDatabricks
+            config = get_config()
+            enrich_llm = ChatDatabricks(
+                endpoint=config.llm.detect_code_lookup_endpoint,
+                temperature=0,
+                max_tokens=500,
+            )
+            enrichment_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            enrichment_future = enrichment_pool.submit(
+                enrich_codes,
+                first_result["columns"],
+                first_result["result"],
+                enrich_llm,
+            )
+            print("⚡ Code enrichment submitted to background thread")
+        except Exception as e:
+            print(f"⚠ Code enrichment setup failed: {e}")
+            enrichment_future = None
+
+    # --- Sub-steps visible in Processing Steps ---
+    successful_results = [r for r in execution_results if r and r.get("success")]
+    total_rows = sum(r.get("row_count", len(r.get("result", []))) for r in successful_results)
+    writer({
+        "type": "summarize_step",
+        "content": f"SUMMARIZE: Preparing context ({len(successful_results)} result set(s), {total_rows} rows)",
+    })
+
     context = extract_summarize_context(state)
-    writer({"type": "summary_start", "content": "Generating summary..."})
 
     summarize_agent = get_cached_summarize_agent()
     config = get_config()
@@ -367,18 +409,19 @@ def summarize_node(state: AgentState) -> dict:
     if "original_query" not in context:
         context["original_query"] = state.get("original_query", "N/A")
 
+    writer({
+        "type": "summarize_step",
+        "content": f"SUMMARIZE: Streaming summary (model: {config.llm.summarize_endpoint})...",
+    })
+    writer({"type": "summary_start", "content": "Generating summary..."})
+
     # --- 1. LLM text summary (streams to user via writer deltas) ---
     if hasattr(summarize_agent, "generate_summary"):
         summary = summarize_agent.generate_summary(context, writer=writer)
     else:
         summary = summarize_agent(context, writer=writer)
 
-    # --- 2. Chart generation per result set ---
-    execution_results = state.get("execution_results", [])
-    exec_result = state.get("execution_result")
-    if not execution_results and exec_result:
-        execution_results = [exec_result]
-
+    # --- 2. Chart generation per result set (streamed as deltas) ---
     chart_gen = _get_cached_chart_generator()
     original_query = state.get("original_query", "")
 
@@ -395,12 +438,14 @@ def summarize_node(state: AgentState) -> dict:
                 payload = chart_gen.generate_chart(columns, data, original_query)
                 if payload:
                     chart_json = _json.dumps(payload, default=str)
-                    summary += f"\n\n```echarts-chart\n{chart_json}\n```\n"
+                    chart_block = f"\n\n```echarts-chart\n{chart_json}\n```\n"
+                    summary += chart_block
+                    writer({"type": "text_delta", "content": chart_block})
                     print(f"✓ Chart block inserted for result {idx} ({len(chart_json)} bytes)")
             except Exception as e:
                 print(f"⚠ Chart generation failed for result {idx}: {e}")
 
-    # --- 3. SQL download (collapsible) ---
+    # --- 3. SQL download (collapsible, streamed as delta) ---
     sql_queries = state.get("sql_queries", [])
     if not sql_queries and state.get("sql_query"):
         sql_queries = [state["sql_query"]]
@@ -408,7 +453,22 @@ def summarize_node(state: AgentState) -> dict:
 
     if sql_queries:
         from .summarize_agent import ResultSummarizeAgent
-        summary += ResultSummarizeAgent.format_sql_download(sql_queries, labels)
+        sql_block = ResultSummarizeAgent.format_sql_download(sql_queries, labels)
+        summary += sql_block
+        writer({"type": "text_delta", "content": sql_block})
+
+    # --- 4. Collect code enrichment result (likely already done by now) ---
+    if enrichment_future:
+        try:
+            enriched_table = enrichment_future.result(timeout=20)
+            if enriched_table:
+                writer({"type": "code_enrichment", "enriched_table": enriched_table})
+                print(f"✓ Code enrichment sent ({len(enriched_table)} chars)")
+        except Exception as e:
+            print(f"⚠ Code enrichment skipped: {e}")
+        finally:
+            if enrichment_pool:
+                enrichment_pool.shutdown(wait=False)
 
     writer({"type": "summary_complete", "content": f"Summary generated ({len(summary)} chars)"})
 

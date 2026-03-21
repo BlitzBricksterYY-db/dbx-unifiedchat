@@ -180,6 +180,8 @@ _CUSTOM_FORMATTERS = {
     "agent_result": lambda d: d.get("content", f"Result: {d.get('result', '')}"),
     "tools_available": lambda d: d.get("content", "Tools loaded"),
     "sql_synthesis_start": lambda d: f"SQL synthesis starting ({d.get('route', 'unknown')} route)",
+    "summarize_step": lambda d: d.get("content", "Summarize step"),
+    "summary_complete": lambda d: d.get("content", "Summary complete"),
 }
 
 
@@ -390,6 +392,9 @@ Guidelines:
                 if et == "text_delta":
                     delta_content = event_data.get("content", "")
                     if delta_content:
+                        if not text_deltas_emitted:
+                            for ev in _finalize_progress():
+                                yield ev
                         if first_token_time is None:
                             first_token_time = time.time()
                             logger.info(f"TTFT: {first_token_time - workflow_start_time:.3f}s")
@@ -407,12 +412,26 @@ Guidelines:
                         type="response.output_item.done",
                         item=_create_text_output_item(text=_format_custom_event(event_data), id=str(uuid4())),
                     )
+                elif et == "code_enrichment":
+                    enriched_table = event_data.get("enriched_table", "")
+                    if enriched_table:
+                        sentinel = f"ENRICHED_TABLE_REPLACE\n{enriched_table}"
+                        yield ResponsesAgentStreamEvent(
+                            type="response.output_item.done",
+                            item=_create_text_output_item(text=sentinel, id=str(uuid4())),
+                        )
+                elif et == "code_enrichment_progress":
+                    step_text = event_data.get("content", "")
+                    if step_text:
+                        progress_steps.append(step_text)
+                        for ev in _emit_progress_step(step_text):
+                            yield ev
                 elif et == "summary_start":
                     in_summarize = True
-                    for ev in _finalize_progress():
-                        yield ev
                     streaming_item_id = str(uuid4())
                     text_deltas_emitted = False
+                elif et == "summary_complete":
+                    pass
                 else:
                     step_text = _format_custom_event(event_data)
                     progress_steps.append(step_text)
@@ -463,16 +482,7 @@ Guidelines:
             if is_final_node:
                 for ev in _finalize_progress():
                     yield ev
-                if text_deltas_emitted:
-                    for msg in new_msgs:
-                        if isinstance(msg, AIMessage):
-                            yield ResponsesAgentStreamEvent(
-                                type="response.output_item.done",
-                                item=_create_text_output_item(
-                                    text=msg.content, id=streaming_item_id
-                                ),
-                            )
-                else:
+                if not text_deltas_emitted:
                     for msg in new_msgs:
                         if isinstance(msg, AIMessage):
                             for se in output_to_responses_items_stream([msg]):

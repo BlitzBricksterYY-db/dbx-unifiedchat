@@ -32,6 +32,8 @@ resources:
             value: "databricks-claude-haiku-4-5"
           - name: LLM_ENDPOINT_SUMMARIZE
             value: "databricks-claude-haiku-4-5"
+          - name: LLM_ENDPOINT_DETECT_CODE_LOOKUP
+            value: "databricks-claude-haiku-4-5"
           - name: EMBEDDING_MODEL
             value: "databricks-gte-large-en"
           - name: VS_ENDPOINT_NAME
