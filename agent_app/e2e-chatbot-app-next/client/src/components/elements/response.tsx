@@ -6,7 +6,9 @@ import {
   lazy,
   memo,
   Suspense,
+  useCallback,
   useMemo,
+  useState,
 } from 'react';
 import { DatabricksMessageCitationStreamdownIntegration } from '../databricks-message-citation';
 import { Streamdown } from 'streamdown';
@@ -15,8 +17,47 @@ const InteractiveChart = lazy(() =>
   import('./interactive-chart').then((m) => ({ default: m.InteractiveChart })),
 );
 
+function SqlCodeBlock({ sql, filename, b64 }: { sql: string; filename: string; b64: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(sql).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }, [sql]);
+
+  return (
+    <div className="my-1 overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-700">
+      <div className="flex items-center justify-between bg-zinc-100 px-3 py-1.5 dark:bg-zinc-800">
+        <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">SQL</span>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="rounded px-2 py-0.5 text-xs font-medium text-zinc-600 hover:bg-zinc-200 dark:text-zinc-300 dark:hover:bg-zinc-700"
+          >
+            {copied ? '✓ Copied' : 'Copy'}
+          </button>
+          <a
+            href={`data:text/sql;base64,${b64}`}
+            download={filename}
+            className="rounded px-2 py-0.5 text-xs font-medium text-zinc-600 hover:bg-zinc-200 dark:text-zinc-300 dark:hover:bg-zinc-700"
+          >
+            Download
+          </a>
+        </div>
+      </div>
+      <pre className="overflow-x-auto bg-zinc-50 p-3 text-xs leading-relaxed text-zinc-800 dark:bg-zinc-900 dark:text-zinc-200">
+        <code>{sql}</code>
+      </pre>
+    </div>
+  );
+}
+
 function EChartsCodeBlock(props: { className?: string; children?: string }) {
   const { className, children } = props;
+
   if (className === 'language-echarts-chart' && children) {
     try {
       const spec = JSON.parse(children);
@@ -31,6 +72,18 @@ function EChartsCodeBlock(props: { className?: string; children?: string }) {
       // fall through to default code block
     }
   }
+
+  // sql-download:<filename>:<base64> — render with copy + download buttons
+  if (className?.startsWith('language-sql-download:') && children) {
+    const meta = className.slice('language-sql-download:'.length);
+    const colonIdx = meta.indexOf(':');
+    if (colonIdx !== -1) {
+      const filename = meta.substring(0, colonIdx);
+      const b64 = meta.substring(colonIdx + 1);
+      return <SqlCodeBlock sql={children} filename={filename} b64={b64} />;
+    }
+  }
+
   return (
     <pre>
       <code className={className}>{children}</code>
@@ -131,18 +184,20 @@ export const Response = memo(
           }
         }
 
-        // Auto-collapse <details open> when there is content after it (summary started)
+        // Auto-collapse the Processing Steps <details open> when summary content follows.
+        // Use indexOf (first </details>) — the Processing Steps block — not lastIndexOf
+        // which would find the SQL <details> block at the end (nothing follows it).
         const closeTag = '</details>';
-        const lastClose = text.lastIndexOf(closeTag);
-        if (lastClose !== -1) {
-          const afterDetails = text
-            .substring(lastClose + closeTag.length)
+        const firstClose = text.indexOf(closeTag);
+        if (firstClose !== -1) {
+          const afterProcessingSteps = text
+            .substring(firstClose + closeTag.length)
             .trim();
-          if (afterDetails.length > 0) {
+          if (afterProcessingSteps.length > 0) {
             text = text.replace(/<details open>/g, '<details>');
-            const before = text.substring(0, lastClose);
-            const after = text.substring(lastClose + closeTag.length);
-            text = before + closeTag + '\n\n---\n\n' + after;
+            const before = text.substring(0, firstClose + closeTag.length);
+            const after = text.substring(firstClose + closeTag.length);
+            text = before + '\n\n---\n\n' + after.trimStart();
           }
         }
 

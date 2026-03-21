@@ -92,12 +92,14 @@ class ResultSummarizeAgent:
 
         parts: list[str] = ["\n\n---\n\n<details><summary>Show SQL</summary>\n"]
         for idx, sql in enumerate(sql_queries):
-            if labels and idx < len(labels) and labels[idx]:
-                parts.append(f"\n**{labels[idx]}**\n")
-            parts.append(f"\n```sql\n{sql}\n```\n")
-            encoded = base64.b64encode(sql.encode()).decode()
+            label = (labels[idx] if labels and idx < len(labels) and labels[idx] else "")
             fname = f"query{'_' + str(idx + 1) if len(sql_queries) > 1 else ''}.sql"
-            parts.append(f'\n<a href="data:text/sql;base64,{encoded}" download="{fname}">Download {fname}</a>\n')
+            encoded = base64.b64encode(sql.encode()).decode()
+            # Use a custom language tag so the frontend renders copy+download buttons.
+            # Format: ```sql-download:filename:base64data\n{sql}\n```
+            meta = f"{fname}:{encoded}"
+            parts.append(f"\n{'**' + label + '**' + chr(10) if label else ''}"
+                         f"```sql-download:{meta}\n{sql}\n```\n")
         parts.append("\n</details>\n")
         return "".join(parts)
     

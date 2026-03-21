@@ -11,7 +11,10 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
-from duckduckgo_search import DDGS
+try:
+    from ddgs import DDGS  # new package name
+except ImportError:
+    from duckduckgo_search import DDGS  # type: ignore[no-redef]
 
 
 _SEARCH_TIMEOUT = 5
@@ -81,6 +84,14 @@ def detect_code_columns(
         return []
 
 
+import ssl
+import urllib.request
+
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode = ssl.CERT_NONE
+
+
 def _sanitize_for_markdown_table(text: str) -> str:
     """Escape characters that break markdown table cells."""
     text = re.sub(r"<[^>]+>", "", text)
@@ -89,20 +100,95 @@ def _sanitize_for_markdown_table(text: str) -> str:
     return text.strip()
 
 
-def _lookup_code(code_type: str, value: str) -> tuple[str, str]:
-    """Search for a single code value and return (value, description)."""
-    query = f"{code_type} {value} description"
+def _http_get_json(url: str, timeout: int = 5) -> dict:
+    """Simple HTTP GET returning parsed JSON."""
+    with urllib.request.urlopen(url, timeout=timeout, context=_SSL_CTX) as resp:
+        return json.loads(resp.read())
+
+
+def _lookup_ndc(value: str) -> str:
+    """Look up an NDC drug code via the RxNorm/NLM API."""
     try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=2))
-        if results:
-            snippet = results[0].get("body", "")
-            if len(snippet) > 150:
-                snippet = snippet[:147] + "..."
-            return (value, _sanitize_for_markdown_table(snippet))
+        d = _http_get_json(
+            f"https://rxnav.nlm.nih.gov/REST/ndcstatus.json?ndc={value}"
+        )
+        name = d.get("ndcStatus", {}).get("conceptName", "")
+        if name:
+            return name.title()
     except Exception:
         pass
-    return (value, "—")
+    return ""
+
+
+def _lookup_icd(value: str) -> str:
+    """Look up an ICD-10 diagnosis code via the NLM Clinical Tables API."""
+    try:
+        d = _http_get_json(
+            f"https://clinicaltables.nlm.nih.gov/api/icd10cm/v3/search"
+            f"?sf=code,name&terms={value}&maxList=1"
+        )
+        if d and len(d) >= 4 and d[3]:
+            return d[3][0][1]  # [[code, description], ...]
+    except Exception:
+        pass
+    return ""
+
+
+def _lookup_cpt(value: str) -> str:
+    """Look up a CPT/HCPCS procedure code via the NLM Clinical Tables API."""
+    try:
+        d = _http_get_json(
+            f"https://clinicaltables.nlm.nih.gov/api/hcpcs/v3/search"
+            f"?sf=code,display&terms={value}&maxList=1"
+        )
+        if d and len(d) >= 4 and d[3]:
+            return d[3][0][1]
+    except Exception:
+        pass
+    return ""
+
+
+def _lookup_via_ddg(code_type: str, value: str) -> str:
+    """Fallback: DuckDuckGo search. Returns a title-first snippet."""
+    try:
+        query = f"{value} {code_type} meaning"
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=3))
+        skip_phrases = [
+            "lookup tool", "look up tool", "code lookup", "search by",
+            "code database", "lookup service", "find code",
+        ]
+        for result in results:
+            title = _sanitize_for_markdown_table(result.get("title", ""))
+            body = _sanitize_for_markdown_table(result.get("body", ""))
+            combined = (title + " " + body).lower()
+            if any(p in combined for p in skip_phrases):
+                continue
+            if title and (value.lower() in title.lower() or len(title) < 120):
+                return title
+            if body:
+                return body[:120] + ("..." if len(body) > 120 else "")
+    except Exception:
+        pass
+    return ""
+
+
+def _lookup_code(code_type: str, value: str) -> tuple[str, str]:
+    """Dispatch to the right API based on code type, fall back to DuckDuckGo."""
+    ct = code_type.upper()
+    desc = ""
+
+    if "NDC" in ct:
+        desc = _lookup_ndc(value)
+    elif "ICD" in ct:
+        desc = _lookup_icd(value)
+    elif "CPT" in ct or "HCPCS" in ct:
+        desc = _lookup_cpt(value)
+
+    if not desc:
+        desc = _lookup_via_ddg(code_type, value)
+
+    return (value, _sanitize_for_markdown_table(desc) if desc else "—")
 
 
 def enrich_codes(

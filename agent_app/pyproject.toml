@@ -17,7 +17,8 @@ dependencies = [
     "litellm",
     "python-dotenv>=1.2.1",
     "pyyaml>=6.0",
-    "duckduckgo-search>=7.0",
+    "ddgs>=0.1",
+    "ddgs>=9.11.4",
 ]
 
 [tool.uv]
