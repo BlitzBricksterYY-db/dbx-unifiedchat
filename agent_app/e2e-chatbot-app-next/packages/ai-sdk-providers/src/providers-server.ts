@@ -327,14 +327,14 @@ export class OAuthAwareProvider implements SmartProvider {
     const provider = await getOrCreateDatabricksProvider();
 
     const model = await (async () => {
+      if (id === 'title-model' || id === 'artifact-model') {
+        return provider.chatCompletions(
+          'databricks-gpt-5-4-nano',
+        );
+      }
       if (API_PROXY) {
         // For API proxy we always use the responses agent
         return provider.responses(id);
-      }
-      if (id === 'title-model' || id === 'artifact-model') {
-        return provider.chatCompletions(
-          'databricks-meta-llama-3-3-70b-instruct',
-        );
       }
       // Server-side environment validation
       if (!process.env.DATABRICKS_SERVING_ENDPOINT) {
