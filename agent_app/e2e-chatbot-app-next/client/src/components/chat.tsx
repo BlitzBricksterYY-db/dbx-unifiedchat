@@ -27,6 +27,7 @@ import { softNavigateToChatId } from '@/lib/navigation';
 import { useAppConfig } from '@/contexts/AppConfigContext';
 import {
   AgentSettingsPanel,
+  getPersistedAgentSettings,
   type AgentSettings,
   useAgentSettings,
 } from './agent-settings';
@@ -64,10 +65,12 @@ export function Chat({
   const [_usage, setUsage] = useState<LanguageModelUsage | undefined>(
     initialLastContext,
   );
-  const { settings: agentSettings, update: updateAgentSettings } =
+  const {
+    settings: agentSettings,
+    settingsRef: agentSettingsRef,
+    update: updateAgentSettings,
+  } =
     useAgentSettings(initialAgentSettings);
-  const agentSettingsRef = useRef(agentSettings);
-  agentSettingsRef.current = agentSettings;
 
   const [lastPart, setLastPart] = useState<UIMessageChunk | undefined>();
   const lastPartRef = useRef<UIMessageChunk | undefined>(lastPart);
@@ -133,7 +136,9 @@ export function Chat({
       prepareSendMessagesRequest({ messages, id, body }) {
         const lastMessage = messages.at(-1);
         const isUserMessage = lastMessage?.role === 'user';
-        const currentAgentSettings = agentSettingsRef.current;
+        const currentAgentSettings = getPersistedAgentSettings(
+          agentSettingsRef.current,
+        );
 
         // For continuations (non-user messages like tool results), we must always
         // send previousMessages because the tool result only exists client-side

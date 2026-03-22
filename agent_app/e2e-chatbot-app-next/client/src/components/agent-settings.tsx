@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 export type ExecutionMode = 'parallel' | 'sequential';
 export type SynthesisRoute = 'auto' | 'table_route' | 'genie_route';
@@ -32,26 +32,49 @@ function loadSettings(initialSettings?: Partial<AgentSettings>): AgentSettings {
   };
 }
 
+export function getPersistedAgentSettings(
+  fallback?: Partial<AgentSettings>,
+): AgentSettings {
+  if (typeof window === 'undefined') {
+    return {
+      executionMode: fallback?.executionMode ?? 'parallel',
+      synthesisRoute: fallback?.synthesisRoute ?? 'auto',
+    };
+  }
+
+  return {
+    executionMode:
+      (localStorage.getItem(LS_EXEC_MODE) as ExecutionMode) ||
+      fallback?.executionMode ||
+      'parallel',
+    synthesisRoute:
+      (localStorage.getItem(LS_SYNTH_ROUTE) as SynthesisRoute) ||
+      fallback?.synthesisRoute ||
+      'auto',
+  };
+}
+
 export function useAgentSettings(initialSettings?: Partial<AgentSettings>) {
   const [settings, setSettings] = useState<AgentSettings>(() =>
     loadSettings(initialSettings),
   );
+  const settingsRef = useRef(settings);
 
   useEffect(() => {
-    if (!initialSettings) return;
-    setSettings(loadSettings(initialSettings));
-  }, [initialSettings?.executionMode, initialSettings?.synthesisRoute]);
+    settingsRef.current = settings;
+    localStorage.setItem(LS_EXEC_MODE, settings.executionMode);
+    localStorage.setItem(LS_SYNTH_ROUTE, settings.synthesisRoute);
+  }, [settings]);
 
   const update = useCallback((patch: Partial<AgentSettings>) => {
     setSettings((prev) => {
       const next = { ...prev, ...patch };
-      localStorage.setItem(LS_EXEC_MODE, next.executionMode);
-      localStorage.setItem(LS_SYNTH_ROUTE, next.synthesisRoute);
+      settingsRef.current = next;
       return next;
     });
   }, []);
 
-  return { settings, update };
+  return { settings, settingsRef, update };
 }
 
 const routeLabels: Record<SynthesisRoute, string> = {
@@ -68,6 +91,13 @@ export function AgentSettingsPanel({
   onUpdate: (patch: Partial<AgentSettings>) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const applyUpdate = useCallback(
+    (patch: Partial<AgentSettings>) => {
+      onUpdate(patch);
+      setOpen(false);
+    },
+    [onUpdate],
+  );
 
   return (
     <div className="relative">
@@ -76,6 +106,9 @@ export function AgentSettingsPanel({
         onClick={() => setOpen((o) => !o)}
         className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-zinc-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
         title="Agent settings"
+        data-testid="agent-settings-trigger"
+        aria-expanded={open}
+        aria-controls="agent-settings-panel"
       >
         <svg
           xmlns="http://www.w3.org/2000/svg"
@@ -95,7 +128,11 @@ export function AgentSettingsPanel({
       </button>
 
       {open && (
-        <div className="absolute bottom-full left-0 z-50 mb-2 w-64 rounded-lg border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+        <div
+          id="agent-settings-panel"
+          data-testid="agent-settings-panel"
+          className="absolute bottom-full left-0 z-50 mb-2 w-64 rounded-lg border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+        >
           <div className="mb-3 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
             Agent Settings
           </div>
@@ -109,13 +146,17 @@ export function AgentSettingsPanel({
               <button
                 type="button"
                 onClick={() =>
-                  onUpdate({
+                  applyUpdate({
                     executionMode:
                       settings.executionMode === 'parallel'
                         ? 'sequential'
                         : 'parallel',
                   })
                 }
+                role="switch"
+                aria-label="Execution mode"
+                aria-checked={settings.executionMode === 'sequential'}
+                data-testid="execution-mode-toggle"
                 className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
                   settings.executionMode === 'sequential'
                     ? 'bg-blue-600'
@@ -130,7 +171,10 @@ export function AgentSettingsPanel({
                   }`}
                 />
               </button>
-              <span className="text-xs text-zinc-600 dark:text-zinc-300">
+              <span
+                data-testid="execution-mode-value"
+                className="text-xs text-zinc-600 dark:text-zinc-300"
+              >
                 {settings.executionMode === 'sequential'
                   ? 'Sequential'
                   : 'Parallel'}
@@ -153,7 +197,9 @@ export function AgentSettingsPanel({
                 <button
                   key={route}
                   type="button"
-                  onClick={() => onUpdate({ synthesisRoute: route })}
+                  onClick={() => applyUpdate({ synthesisRoute: route })}
+                  data-testid={`synthesis-route-${route}`}
+                  aria-pressed={settings.synthesisRoute === route}
                   className={`flex-1 px-2 py-1 text-xs font-medium transition-colors first:rounded-l-md last:rounded-r-md ${
                     settings.synthesisRoute === route
                       ? 'bg-blue-600 text-white'
