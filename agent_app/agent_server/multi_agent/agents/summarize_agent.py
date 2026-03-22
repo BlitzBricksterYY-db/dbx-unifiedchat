@@ -104,17 +104,70 @@ class ResultSummarizeAgent:
         return "".join(parts)
 
     @staticmethod
-    def format_sql_explanation(explanation: str, labels: List[str] | None = None) -> str:
-        """Collapsible SQL explanation section with query labels for easy tracking."""
-        if not explanation:
+    def _normalize_markdown_block(text: str) -> str:
+        import re
+
+        normalized = (text or "").replace("\r\n", "\n").strip()
+        normalized = re.sub(r"^\s*---\s*$", "", normalized, flags=re.MULTILINE)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        normalized = re.sub(r"[ \t]+\n", "\n", normalized)
+        return normalized.strip()
+
+    @staticmethod
+    def _format_attempt_context(entry: dict, attempt_number: int) -> str:
+        route = entry.get("route", "unknown")
+        loop_reason = entry.get("loop_reason")
+        retry_count = entry.get("retry_count", 0)
+        sequential_step = entry.get("sequential_step", 0)
+        synthesis_error = entry.get("synthesis_error")
+        query_labels = entry.get("query_labels") or []
+
+        route_label = "Table Route" if route == "table" else "Genie Route" if route == "genie" else route.title()
+        mode_label = "Initial synthesis"
+        if loop_reason == "retry":
+            mode_label = f"Retry attempt {retry_count + 1}"
+        elif loop_reason == "sequential_next":
+            mode_label = f"Sequential step {sequential_step + 1}"
+
+        lines = [f"### Attempt {attempt_number}", "", f"- **Route:** {route_label}", f"- **Context:** {mode_label}"]
+        if query_labels:
+            lines.append(f"- **Queries:** {', '.join(label for label in query_labels if label)}")
+        if synthesis_error:
+            lines.append(f"- **Status:** Synthesis issue detected")
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_sql_explanation(
+        explanation: str = "",
+        explanation_entries: List[dict] | None = None,
+        labels: List[str] | None = None,
+    ) -> str:
+        """Collapsible SQL explanation section with clean markdown formatting."""
+        entries = [entry for entry in (explanation_entries or []) if entry.get("explanation")]
+        if not entries and explanation:
+            entries = [{"explanation": explanation, "query_labels": labels or []}]
+        if not entries:
             return ""
+
         parts: list[str] = ['\n\n<details name="sql-accordion"><summary>SQL Explanation</summary>\n\n<div class="accordion-content">\n\n']
-        if labels:
-            for idx, label in enumerate(labels):
-                if label:
-                    parts.append(f"**{idx + 1}. {label}**\n\n")
-            parts.append("---\n\n")
-        parts.append(explanation)
+
+        if len(entries) == 1:
+            entry = entries[0]
+            query_labels = entry.get("query_labels") or labels or []
+            if query_labels:
+                rendered_labels = [f"- {label}" for label in query_labels if label]
+                if rendered_labels:
+                    parts.append("**Queries covered**\n\n")
+                    parts.append("\n".join(rendered_labels))
+                    parts.append("\n\n")
+            parts.append(ResultSummarizeAgent._normalize_markdown_block(entry.get("explanation", "")))
+        else:
+            for idx, entry in enumerate(entries, 1):
+                parts.append(ResultSummarizeAgent._format_attempt_context(entry, idx))
+                parts.append("\n\n")
+                parts.append(ResultSummarizeAgent._normalize_markdown_block(entry.get("explanation", "")))
+                parts.append("\n\n")
+
         parts.append("\n\n</div>\n</details>\n")
         return "".join(parts)
 

@@ -182,6 +182,7 @@ class AgentState(TypedDict):
     sql_queries: Optional[List[str]]  # Multi-part question: list of all SQL queries
     sql_query_labels: Optional[List[str]]  # Multi-part question: per-query labels
     sql_synthesis_explanation: Optional[str]
+    sql_synthesis_explanations: Optional[List[Dict[str, Any]]]
     synthesis_error: Optional[str]
     has_sql: Optional[bool]  # Whether SQL was successfully extracted
     
@@ -257,6 +258,7 @@ def get_reset_state_template() -> Dict[str, Any]:
         "sql_queries": None,
         "sql_query_labels": None,
         "sql_synthesis_explanation": None,
+        "sql_synthesis_explanations": [],
         "synthesis_error": None,
         "has_sql": None,
         

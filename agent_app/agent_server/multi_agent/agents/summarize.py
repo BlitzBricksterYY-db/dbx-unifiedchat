@@ -69,6 +69,7 @@ def extract_summarize_context(state: AgentState) -> dict:
         "execution_results": state.get("execution_results", []),
         "execution_error": state.get("execution_error"),
         "sql_synthesis_explanation": state.get("sql_synthesis_explanation"),
+        "sql_synthesis_explanations": state.get("sql_synthesis_explanations", []),
         "synthesis_error": state.get("synthesis_error"),
         # For logging: track original size
         "_original_message_count": len(messages)
@@ -364,13 +365,14 @@ def summarize_node(state: AgentState) -> dict:
     if not execution_results and exec_result:
         execution_results = [exec_result]
 
-    enrichment_future = None
+    enrichment_futures = []
     enrichment_pool = None
-    first_result = next(
-        (r for r in execution_results if r and r.get("success") and r.get("columns")),
-        None,
-    )
-    if first_result:
+    enrichable_results = [
+        (idx, result_item)
+        for idx, result_item in enumerate(execution_results)
+        if result_item and result_item.get("success") and result_item.get("columns")
+    ]
+    if enrichable_results:
         try:
             from ..tools.web_search import enrich_codes
             from databricks_langchain import ChatDatabricks
@@ -380,17 +382,35 @@ def summarize_node(state: AgentState) -> dict:
                 temperature=0,
                 max_tokens=1500,
             )
-            enrichment_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            enrichment_future = enrichment_pool.submit(
-                enrich_codes,
-                first_result["columns"],
-                first_result["result"],
-                enrich_llm,
+            enrichment_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(4, len(enrichable_results))
             )
-            print("⚡ Code enrichment submitted to background thread")
+            labels = state.get("sql_query_labels", [])
+            for idx, result_item in enrichable_results:
+                section_title = (
+                    labels[idx]
+                    if idx < len(labels) and labels[idx]
+                    else f"Query {idx + 1}"
+                )
+                enrichment_futures.append(
+                    (
+                        idx,
+                        section_title,
+                        enrichment_pool.submit(
+                            enrich_codes,
+                            result_item["columns"],
+                            result_item["result"],
+                            enrich_llm,
+                            None,
+                            section_title,
+                            False,
+                        ),
+                    )
+                )
+            print(f"⚡ Code enrichment submitted for {len(enrichment_futures)} result set(s)")
         except Exception as e:
             print(f"⚠ Code enrichment setup failed: {e}")
-            enrichment_future = None
+            enrichment_futures = []
 
     # --- Sub-steps visible in Processing Steps ---
     successful_results = [r for r in execution_results if r and r.get("success")]
@@ -476,13 +496,16 @@ def summarize_node(state: AgentState) -> dict:
         summary += table_block
         writer({"type": "text_delta", "content": table_block})
 
-    # --- 3. SQL download (collapsible, streamed as delta) ---
+    # --- 3. SQL download / explanation / plan (collapsible, streamed as delta) ---
     sql_queries = state.get("sql_queries", [])
     if not sql_queries and state.get("sql_query"):
         sql_queries = [state["sql_query"]]
+    explanation = state.get("sql_synthesis_explanation", "")
+    explanation_entries = state.get("sql_synthesis_explanations", []) or []
+    plan = state.get("plan")
 
     has_accordion = False
-    if sql_queries or explanation or plan or enrichment_future:
+    if sql_queries or explanation_entries or explanation or plan or enrichment_futures:
         writer({"type": "text_delta", "content": "\n\n<div class=\"accordion-group\">\n\n"})
         has_accordion = True
 
@@ -493,15 +516,17 @@ def summarize_node(state: AgentState) -> dict:
         writer({"type": "text_delta", "content": sql_block})
 
     # --- 3b. SQL Explanation (collapsible, streamed as delta) ---
-    explanation = state.get("sql_synthesis_explanation", "")
-    if explanation:
+    if explanation_entries or explanation:
         from .summarize_agent import ResultSummarizeAgent
-        explanation_block = ResultSummarizeAgent.format_sql_explanation(explanation, labels)
+        explanation_block = ResultSummarizeAgent.format_sql_explanation(
+            explanation=explanation,
+            explanation_entries=explanation_entries,
+            labels=labels,
+        )
         summary += explanation_block
         writer({"type": "text_delta", "content": explanation_block})
 
     # --- 3c. Plan Executed (collapsible, streamed as delta) ---
-    plan = state.get("plan")
     if plan:
         from .summarize_agent import ResultSummarizeAgent
         plan_block = ResultSummarizeAgent.format_plan_executed(plan)
@@ -509,13 +534,23 @@ def summarize_node(state: AgentState) -> dict:
         writer({"type": "text_delta", "content": plan_block})
 
     # --- 4. Collect code enrichment result (likely already done by now) ---
-    if enrichment_future:
+    if enrichment_futures:
         try:
-            enriched_ref = enrichment_future.result(timeout=20)
-            if enriched_ref:
-                summary += enriched_ref
-                writer({"type": "text_delta", "content": enriched_ref})
-                print(f"✓ Code reference appended ({len(enriched_ref)} chars)")
+            sections = []
+            for _idx, _section_title, future in enrichment_futures:
+                enriched_ref = future.result(timeout=20)
+                if enriched_ref:
+                    sections.append(enriched_ref.strip())
+            if sections:
+                combined_ref = (
+                    "\n\n<details name=\"sql-accordion\"><summary>Code Reference</summary>\n\n"
+                    "<div class=\"accordion-content\">\n\n"
+                    + "\n\n".join(sections)
+                    + "\n\n</div>\n</details>\n"
+                )
+                summary += combined_ref
+                writer({"type": "text_delta", "content": combined_ref})
+                print(f"✓ Code reference appended ({len(sections)} section(s))")
         except Exception as e:
             print(f"⚠ Code enrichment skipped: {e}")
         finally:

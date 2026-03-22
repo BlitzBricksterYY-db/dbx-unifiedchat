@@ -278,6 +278,51 @@ def _check_no_more_queries(result: dict) -> bool:
     return "NO_MORE_QUERIES" in raw
 
 
+def _build_synthesis_explanation_entry(
+    *,
+    route: str,
+    state: AgentState,
+    explanation: str,
+    query_labels: Optional[List[str]] = None,
+    has_sql: bool = False,
+    synthesis_error: Optional[str] = None,
+) -> dict:
+    """Build a structured explanation entry for later UI rendering."""
+    return {
+        "route": route,
+        "loop_reason": state.get("loop_reason"),
+        "retry_count": state.get("sql_retry_count", 0),
+        "sequential_step": state.get("sequential_step", 0),
+        "has_sql": has_sql,
+        "synthesis_error": synthesis_error,
+        "query_labels": query_labels or [],
+        "explanation": explanation or "",
+    }
+
+
+def _append_synthesis_explanation(
+    state: AgentState,
+    *,
+    route: str,
+    explanation: str,
+    query_labels: Optional[List[str]] = None,
+    has_sql: bool = False,
+    synthesis_error: Optional[str] = None,
+) -> List[dict]:
+    existing = list(state.get("sql_synthesis_explanations") or [])
+    existing.append(
+        _build_synthesis_explanation_entry(
+            route=route,
+            state=state,
+            explanation=explanation,
+            query_labels=query_labels,
+            has_sql=has_sql,
+            synthesis_error=synthesis_error,
+        )
+    )
+    return existing
+
+
 @measure_node_time("sql_synthesis_table")
 def sql_synthesis_table_node(state: AgentState) -> dict:
     """
@@ -361,6 +406,13 @@ def sql_synthesis_table_node(state: AgentState) -> dict:
                 "sql_query": sql_queries[0],
                 "has_sql": True,
                 "sql_synthesis_explanation": explanation,
+                "sql_synthesis_explanations": _append_synthesis_explanation(
+                    state,
+                    route="table",
+                    explanation=explanation,
+                    query_labels=query_labels,
+                    has_sql=True,
+                ),
                 "next_agent": "sql_execution",
                 "messages": [
                     AIMessage(content=f"SQL Synthesis (Table Route):\n{explanation}")
@@ -376,6 +428,14 @@ def sql_synthesis_table_node(state: AgentState) -> dict:
                 **_preserved_as_execution_results(state),
                 "synthesis_error": "Cannot generate SQL query",
                 "sql_synthesis_explanation": explanation,
+                "sql_synthesis_explanations": _append_synthesis_explanation(
+                    state,
+                    route="table",
+                    explanation=explanation,
+                    query_labels=query_labels,
+                    has_sql=False,
+                    synthesis_error="Cannot generate SQL query",
+                ),
                 "next_agent": "summarize",
                 "messages": [
                     AIMessage(content=f"SQL Synthesis Failed (Table Route):\n{explanation}")
@@ -389,6 +449,13 @@ def sql_synthesis_table_node(state: AgentState) -> dict:
             **_preserved_as_execution_results(state),
             "synthesis_error": error_msg,
             "sql_synthesis_explanation": error_msg,
+            "sql_synthesis_explanations": _append_synthesis_explanation(
+                state,
+                route="table",
+                explanation=error_msg,
+                has_sql=False,
+                synthesis_error=error_msg,
+            ),
             "messages": [
                 AIMessage(content=f"SQL Synthesis Failed (Table Route):\n{error_msg}")
             ]
@@ -548,6 +615,13 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                 "sql_query": sql_queries[0],
                 "has_sql": True,
                 "sql_synthesis_explanation": explanation,
+                "sql_synthesis_explanations": _append_synthesis_explanation(
+                    state,
+                    route="genie",
+                    explanation=explanation,
+                    query_labels=query_labels,
+                    has_sql=True,
+                ),
                 "next_agent": "sql_execution",
                 "messages": [
                     AIMessage(content=f"SQL Synthesis (Genie Route):\n{explanation}")
@@ -563,6 +637,14 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
                 **_preserved_as_execution_results(state),
                 "synthesis_error": "Cannot generate SQL query from Genie agent fragments",
                 "sql_synthesis_explanation": explanation,
+                "sql_synthesis_explanations": _append_synthesis_explanation(
+                    state,
+                    route="genie",
+                    explanation=explanation,
+                    query_labels=query_labels,
+                    has_sql=False,
+                    synthesis_error="Cannot generate SQL query from Genie agent fragments",
+                ),
                 "next_agent": "summarize",
                 "messages": [
                     AIMessage(content=f"SQL Synthesis Failed (Genie Route):\n{explanation}")
@@ -576,6 +658,13 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
             **_preserved_as_execution_results(state),
             "synthesis_error": error_msg,
             "sql_synthesis_explanation": error_msg,
+            "sql_synthesis_explanations": _append_synthesis_explanation(
+                state,
+                route="genie",
+                explanation=error_msg,
+                has_sql=False,
+                synthesis_error=error_msg,
+            ),
             "messages": [
                 AIMessage(content=f"SQL Synthesis Failed (Genie Route):\n{error_msg}")
             ]

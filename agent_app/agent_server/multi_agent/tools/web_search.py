@@ -188,6 +188,8 @@ def enrich_codes(
     data: list[dict],
     llm: Any,
     writer: Optional[Any] = None,
+    section_title: Optional[str] = None,
+    wrap_in_details: bool = True,
 ) -> Optional[str]:
     """Detect coded columns then look up descriptions for unique code values.
 
@@ -252,8 +254,16 @@ def enrich_codes(
     if not sections:
         return None
 
-    result = "\n\n<details name=\"sql-accordion\"><summary>Code Reference</summary>\n\n<div class=\"accordion-content\">\n\n"
+    result = ""
+    if section_title:
+        result += f"\n### {section_title}\n\n"
     result += "\n".join(sections)
-    result += "\n\n</div>\n</details>\n"
+
+    if wrap_in_details:
+        result = (
+            "\n\n<details name=\"sql-accordion\"><summary>Code Reference</summary>\n\n<div class=\"accordion-content\">\n\n"
+            + result
+            + "\n\n</div>\n</details>\n"
+        )
     print(f"✓ Code reference built ({len(sections)} code type sections)")
     return result
