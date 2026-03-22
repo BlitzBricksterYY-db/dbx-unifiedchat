@@ -297,4 +297,106 @@ test.describe('Agent Settings', () => {
 
     await secondPage.close();
   });
+
+  test('should discard draft changes on cancel', async ({ adaContext }) => {
+    const chatPage = new ChatPage(adaContext.page);
+
+    await chatPage.createNewChat();
+    await chatPage.openAgentSettings();
+    await chatPage.setExecutionMode('sequential');
+    await chatPage.setSynthesisRoute('genie_route');
+    await chatPage.cancelAgentSettings();
+
+    await chatPage.openAgentSettings();
+    await expect(adaContext.page.getByTestId('execution-mode-value')).toHaveText(
+      'Parallel',
+    );
+    await expect(
+      adaContext.page.getByTestId('synthesis-route-auto'),
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  test('should show updated settings after leaving and reopening a thread once', async ({
+    adaContext,
+  }) => {
+    const { page } = adaContext;
+    const chatPage = new ChatPage(page);
+    const chatId = crypto.randomUUID();
+    const userId = 'test-user-id';
+    let chatSettings = {
+      executionMode: 'parallel' as const,
+      synthesisRoute: 'auto' as const,
+    };
+
+    await page.route(`**/api/chat/${chatId}`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: chatId,
+          createdAt: new Date().toISOString(),
+          title: 'Existing thread',
+          userId,
+          visibility: 'private',
+          executionMode: chatSettings.executionMode,
+          synthesisRoute: chatSettings.synthesisRoute,
+          lastContext: null,
+        }),
+      });
+    });
+
+    await page.route(`**/api/messages/${chatId}`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          {
+            id: crypto.randomUUID(),
+            chatId,
+            role: 'assistant',
+            parts: [{ type: 'text', text: 'Existing response' }],
+            attachments: [],
+            createdAt: new Date().toISOString(),
+            traceId: null,
+          },
+        ]),
+      });
+    });
+
+    await page.route(`**/api/feedback/chat/${chatId}`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({}),
+      });
+    });
+
+    await page.route(`**/api/chat/${chatId}/settings`, async (route) => {
+      const nextSettings = route.request().postDataJSON() as typeof chatSettings;
+      chatSettings = nextSettings;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true }),
+      });
+    });
+
+    await page.goto(`/chat/${chatId}`);
+    await page.waitForLoadState('networkidle');
+
+    await chatPage.configureAgentSettings('sequential', 'genie_route');
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+    await page.goto(`/chat/${chatId}`);
+    await page.waitForLoadState('networkidle');
+
+    await chatPage.openAgentSettings();
+    await expect(page.getByTestId('execution-mode-value')).toHaveText(
+      'Sequential',
+    );
+    await expect(
+      page.getByTestId('synthesis-route-genie_route'),
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
 });

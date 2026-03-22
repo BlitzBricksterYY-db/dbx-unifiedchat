@@ -52,19 +52,39 @@ export function AgentSettingsPanel({
   onUpdate: (patch: Partial<AgentSettings>) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const applyUpdate = useCallback(
-    (patch: Partial<AgentSettings>) => {
-      onUpdate(patch);
-      setOpen(false);
-    },
-    [onUpdate],
-  );
+  const [draftSettings, setDraftSettings] = useState(settings);
+
+  useEffect(() => {
+    if (!open) {
+      setDraftSettings(settings);
+    }
+  }, [open, settings]);
+
+  const handleOpenChange = useCallback(() => {
+    setOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        setDraftSettings(settings);
+      }
+      return next;
+    });
+  }, [settings]);
+
+  const handleCancel = useCallback(() => {
+    setDraftSettings(settings);
+    setOpen(false);
+  }, [settings]);
+
+  const handleConfirm = useCallback(() => {
+    onUpdate(draftSettings);
+    setOpen(false);
+  }, [draftSettings, onUpdate]);
 
   return (
     <div className="relative">
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={handleOpenChange}
         className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-zinc-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
         title="Agent settings"
         data-testid="agent-settings-trigger"
@@ -107,26 +127,27 @@ export function AgentSettingsPanel({
               <button
                 type="button"
                 onClick={() =>
-                  applyUpdate({
+                  setDraftSettings((prev) => ({
+                    ...prev,
                     executionMode:
-                      settings.executionMode === 'parallel'
+                      prev.executionMode === 'parallel'
                         ? 'sequential'
                         : 'parallel',
-                  })
+                  }))
                 }
                 role="switch"
                 aria-label="Execution mode"
-                aria-checked={settings.executionMode === 'sequential'}
+                aria-checked={draftSettings.executionMode === 'sequential'}
                 data-testid="execution-mode-toggle"
                 className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                  settings.executionMode === 'sequential'
+                  draftSettings.executionMode === 'sequential'
                     ? 'bg-blue-600'
                     : 'bg-zinc-200 dark:bg-zinc-700'
                 }`}
               >
                 <span
                   className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
-                    settings.executionMode === 'sequential'
+                    draftSettings.executionMode === 'sequential'
                       ? 'translate-x-4'
                       : 'translate-x-0'
                   }`}
@@ -136,7 +157,7 @@ export function AgentSettingsPanel({
                 data-testid="execution-mode-value"
                 className="text-xs text-zinc-600 dark:text-zinc-300"
               >
-                {settings.executionMode === 'sequential'
+                {draftSettings.executionMode === 'sequential'
                   ? 'Sequential'
                   : 'Parallel'}
               </span>
@@ -158,11 +179,16 @@ export function AgentSettingsPanel({
                 <button
                   key={route}
                   type="button"
-                  onClick={() => applyUpdate({ synthesisRoute: route })}
+                  onClick={() =>
+                    setDraftSettings((prev) => ({
+                      ...prev,
+                      synthesisRoute: route,
+                    }))
+                  }
                   data-testid={`synthesis-route-${route}`}
-                  aria-pressed={settings.synthesisRoute === route}
+                  aria-pressed={draftSettings.synthesisRoute === route}
                   className={`flex-1 px-2 py-1 text-xs font-medium transition-colors first:rounded-l-md last:rounded-r-md ${
-                    settings.synthesisRoute === route
+                    draftSettings.synthesisRoute === route
                       ? 'bg-blue-600 text-white'
                       : 'text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800'
                   }`}
@@ -175,6 +201,25 @@ export function AgentSettingsPanel({
               Auto lets the planner decide; Table uses UC functions; Genie uses
               Genie agents
             </p>
+          </div>
+
+          <div className="mt-3 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={handleCancel}
+              data-testid="agent-settings-cancel"
+              className="rounded-md border border-zinc-200 px-2 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirm}
+              data-testid="agent-settings-confirm"
+              className="rounded-md bg-blue-600 px-2 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-700"
+            >
+              Confirm
+            </button>
           </div>
         </div>
       )}

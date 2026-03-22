@@ -31,6 +31,15 @@ import {
   useAgentSettings,
 } from './agent-settings';
 
+type ChatDataCache = {
+  chat: {
+    executionMode: AgentSettings['executionMode'];
+    synthesisRoute: AgentSettings['synthesisRoute'];
+  };
+  messages: ChatMessage[];
+  feedback: FeedbackMap;
+};
+
 export function Chat({
   id,
   initialMessages,
@@ -280,6 +289,27 @@ export function Chat({
     [id],
   );
 
+  const syncChatSettingsCache = useCallback(
+    (settings: AgentSettings) => {
+      void mutate(
+        `/chat/${id}`,
+        (currentData?: ChatDataCache | null) =>
+          currentData
+            ? {
+                ...currentData,
+                chat: {
+                  ...currentData.chat,
+                  executionMode: settings.executionMode,
+                  synthesisRoute: settings.synthesisRoute,
+                },
+              }
+            : currentData,
+        false,
+      );
+    },
+    [id, mutate],
+  );
+
   const handleUpdateAgentSettings = useCallback(
     (patch: Partial<AgentSettings>) => {
       const nextSettings = { ...agentSettingsRef.current, ...patch };
@@ -289,10 +319,11 @@ export function Chat({
       // Persist to the chat once the thread exists server-side.
       // New unsaved chats keep the current in-memory settings for the first turn.
       if (messages.length > 0) {
+        syncChatSettingsCache(nextSettings);
         void persistAgentSettings(nextSettings);
       }
     },
-    [messages.length, persistAgentSettings, updateAgentSettings],
+    [messages.length, persistAgentSettings, syncChatSettingsCache, updateAgentSettings],
   );
 
   const [searchParams] = useSearchParams();

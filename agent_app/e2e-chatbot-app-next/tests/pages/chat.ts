@@ -51,6 +51,14 @@ export class ChatPage {
       .or(this.page.getByRole('button', { name: routeLabel }));
   }
 
+  private settingsCancelButton(): Locator {
+    return this.page.getByTestId('agent-settings-cancel');
+  }
+
+  private settingsConfirmButton(): Locator {
+    return this.page.getByTestId('agent-settings-confirm');
+  }
+
   async createNewChat() {
     await this.page.goto('/');
     await this.page.waitForLoadState('networkidle');
@@ -80,8 +88,6 @@ export class ChatPage {
 
     if (currentMode !== mode) {
       await this.executionModeToggle().click();
-      await expect(this.agentSettingsPanel()).toBeHidden();
-      await this.openAgentSettings();
     }
 
     await expect(value).toHaveText(mode === 'parallel' ? 'Parallel' : 'Sequential');
@@ -92,8 +98,6 @@ export class ChatPage {
 
     const routeButton = this.synthesisRouteButton(route);
     await routeButton.click();
-    await expect(this.agentSettingsPanel()).toBeHidden();
-    await this.openAgentSettings();
     const ariaPressed = await routeButton.getAttribute('aria-pressed');
 
     if (ariaPressed !== null) {
@@ -110,6 +114,14 @@ export class ChatPage {
   ) {
     await this.setExecutionMode(executionMode);
     await this.setSynthesisRoute(synthesisRoute);
+    await this.settingsConfirmButton().click();
+    await expect(this.agentSettingsPanel()).toBeHidden();
+  }
+
+  async cancelAgentSettings() {
+    await this.openAgentSettings();
+    await this.settingsCancelButton().click();
+    await expect(this.agentSettingsPanel()).toBeHidden();
   }
 
   async isGenerationComplete() {
