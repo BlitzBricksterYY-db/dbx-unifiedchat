@@ -13,20 +13,34 @@ export interface AgentSettings {
 const LS_EXEC_MODE = 'agent:execution-mode';
 const LS_SYNTH_ROUTE = 'agent:synthesis-route';
 
-function loadSettings(): AgentSettings {
+function loadSettings(initialSettings?: Partial<AgentSettings>): AgentSettings {
   if (typeof window === 'undefined') {
-    return { executionMode: 'parallel', synthesisRoute: 'auto' };
+    return {
+      executionMode: initialSettings?.executionMode ?? 'parallel',
+      synthesisRoute: initialSettings?.synthesisRoute ?? 'auto',
+    };
   }
   return {
     executionMode:
-      (localStorage.getItem(LS_EXEC_MODE) as ExecutionMode) || 'parallel',
+      initialSettings?.executionMode ||
+      (localStorage.getItem(LS_EXEC_MODE) as ExecutionMode) ||
+      'parallel',
     synthesisRoute:
-      (localStorage.getItem(LS_SYNTH_ROUTE) as SynthesisRoute) || 'auto',
+      initialSettings?.synthesisRoute ||
+      (localStorage.getItem(LS_SYNTH_ROUTE) as SynthesisRoute) ||
+      'auto',
   };
 }
 
-export function useAgentSettings() {
-  const [settings, setSettings] = useState<AgentSettings>(loadSettings);
+export function useAgentSettings(initialSettings?: Partial<AgentSettings>) {
+  const [settings, setSettings] = useState<AgentSettings>(() =>
+    loadSettings(initialSettings),
+  );
+
+  useEffect(() => {
+    if (!initialSettings) return;
+    setSettings(loadSettings(initialSettings));
+  }, [initialSettings?.executionMode, initialSettings?.synthesisRoute]);
 
   const update = useCallback((patch: Partial<AgentSettings>) => {
     setSettings((prev) => {

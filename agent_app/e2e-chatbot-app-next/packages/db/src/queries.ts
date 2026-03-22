@@ -97,11 +97,15 @@ export async function saveChat({
   userId,
   title,
   visibility,
+  executionMode = 'parallel',
+  synthesisRoute = 'auto',
 }: {
   id: string;
   userId: string;
   title: string;
   visibility: VisibilityType;
+  executionMode?: 'parallel' | 'sequential';
+  synthesisRoute?: 'auto' | 'table_route' | 'genie_route';
 }) {
   if (!isDatabaseAvailable()) {
     console.log('[saveChat] Database not available, skipping persistence');
@@ -115,6 +119,8 @@ export async function saveChat({
       userId,
       title,
       visibility,
+      executionMode,
+      synthesisRoute,
     });
   } catch (error) {
     console.error('[saveChat] Error saving chat:', error);
@@ -408,6 +414,36 @@ export async function updateChatVisiblityById({
     throw new ChatSDKError(
       'bad_request:database',
       'Failed to update chat visibility by id',
+    );
+  }
+}
+
+
+export async function updateChatAgentSettingsById({
+  chatId,
+  executionMode,
+  synthesisRoute,
+}: {
+  chatId: string;
+  executionMode: 'parallel' | 'sequential';
+  synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+}) {
+  if (!isDatabaseAvailable()) {
+    console.log(
+      '[updateChatAgentSettingsById] Database not available, skipping update',
+    );
+    return;
+  }
+
+  try {
+    return await (await ensureDb())
+      .update(chat)
+      .set({ executionMode, synthesisRoute })
+      .where(eq(chat.id, chatId));
+  } catch (_error) {
+    throw new ChatSDKError(
+      'bad_request:database',
+      'Failed to update chat agent settings by id',
     );
   }
 }

@@ -22,6 +22,13 @@
       "when": 1772346540471,
       "tag": "0002_polite_red_hulk",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1774070400000,
+      "tag": "0003_chat_agent_settings",
+      "breakpoints": true
     }
   ]
 }

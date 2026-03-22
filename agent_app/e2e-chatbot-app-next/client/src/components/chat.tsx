@@ -27,6 +27,7 @@ import { softNavigateToChatId } from '@/lib/navigation';
 import { useAppConfig } from '@/contexts/AppConfigContext';
 import {
   AgentSettingsPanel,
+  type AgentSettings,
   useAgentSettings,
 } from './agent-settings';
 
@@ -35,6 +36,7 @@ export function Chat({
   initialMessages,
   initialChatModel,
   initialVisibilityType,
+  initialAgentSettings,
   isReadonly,
   initialLastContext,
   feedback = {},
@@ -43,6 +45,7 @@ export function Chat({
   initialMessages: ChatMessage[];
   initialChatModel: string;
   initialVisibilityType: VisibilityType;
+  initialAgentSettings?: AgentSettings;
   isReadonly: boolean;
   session: ClientSession;
   initialLastContext?: LanguageModelUsage;
@@ -62,7 +65,9 @@ export function Chat({
     initialLastContext,
   );
   const { settings: agentSettings, update: updateAgentSettings } =
-    useAgentSettings();
+    useAgentSettings(initialAgentSettings);
+  const agentSettingsRef = useRef(agentSettings);
+  agentSettingsRef.current = agentSettings;
 
   const [lastPart, setLastPart] = useState<UIMessageChunk | undefined>();
   const lastPartRef = useRef<UIMessageChunk | undefined>(lastPart);
@@ -128,6 +133,7 @@ export function Chat({
       prepareSendMessagesRequest({ messages, id, body }) {
         const lastMessage = messages.at(-1);
         const isUserMessage = lastMessage?.role === 'user';
+        const currentAgentSettings = agentSettingsRef.current;
 
         // For continuations (non-user messages like tool results), we must always
         // send previousMessages because the tool result only exists client-side
@@ -148,7 +154,7 @@ export function Chat({
                     : messages,
                 }
               : {}),
-            agentSettings,
+            agentSettings: currentAgentSettings,
             ...body,
           },
         };
@@ -251,6 +257,42 @@ export function Chat({
     },
   });
 
+  const persistAgentSettings = useCallback(
+    async (settings: AgentSettings) => {
+      try {
+        const response = await fetch(`/api/chat/${id}/settings`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(settings),
+        });
+
+        if (!response.ok && response.status !== 404) {
+          throw new Error('Failed to persist chat settings');
+        }
+      } catch (error) {
+        console.warn('[Chat] Unable to persist per-chat agent settings:', error);
+      }
+    },
+    [id],
+  );
+
+  const handleUpdateAgentSettings = useCallback(
+    (patch: Partial<AgentSettings>) => {
+      const nextSettings = { ...agentSettingsRef.current, ...patch };
+      agentSettingsRef.current = nextSettings;
+      updateAgentSettings(patch);
+
+      // Persist to the chat once the thread exists server-side.
+      // New unsaved chats still use localStorage defaults for the first turn.
+      if (messages.length > 0) {
+        void persistAgentSettings(nextSettings);
+      }
+    },
+    [messages.length, persistAgentSettings, updateAgentSettings],
+  );
+
   const [searchParams] = useSearchParams();
   const query = searchParams.get('query');
 
@@ -293,7 +335,7 @@ export function Chat({
               <div className="flex justify-end">
                 <AgentSettingsPanel
                   settings={agentSettings}
-                  onUpdate={updateAgentSettings}
+                  onUpdate={handleUpdateAgentSettings}
                 />
               </div>
               <MultimodalInput
