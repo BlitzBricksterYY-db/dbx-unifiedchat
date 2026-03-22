@@ -12,6 +12,47 @@ from typing import Any, Optional
 
 
 _MAX_CODES_TO_LOOKUP = 30
+_AGGREGATE_COLUMN_TOKENS = (
+    "count",
+    "total",
+    "avg",
+    "average",
+    "amount",
+    "cost",
+    "price",
+    "sum",
+    "rows",
+    "days",
+    "units",
+    "quantity",
+    "rank",
+    "score",
+    "ratio",
+    "percent",
+    "pct",
+)
+_CODE_HINT_TOKENS = (
+    "code",
+    "id",
+    "ndc",
+    "icd",
+    "cpt",
+    "hcpcs",
+    "npi",
+    "taxonomy",
+    "zip",
+    "state",
+    "qual",
+    "type",
+    "ticker",
+    "symbol",
+    "fips",
+    "cusip",
+    "isin",
+    "naics",
+    "sic",
+    "mcc",
+)
 
 import ssl
 import urllib.request
@@ -88,6 +129,34 @@ def web_search(query: str, max_results: int = 3) -> str:
         return f"Search failed: {e}"
 
 
+def _is_numeric_like(value: Any) -> bool:
+    text = str(value).strip()
+    if not text:
+        return False
+    return bool(re.fullmatch(r"[-+]?\d+(?:\.\d+)?", text))
+
+
+def _should_skip_code_column(column: str, sample_rows: list[dict]) -> bool:
+    """Filter out obvious aggregate or metric columns before enrichment."""
+    lower = column.lower()
+    if any(token in lower for token in _AGGREGATE_COLUMN_TOKENS):
+        return True
+
+    values = [row.get(column) for row in sample_rows if row.get(column) is not None]
+    if not values:
+        return False
+
+    has_code_hint = any(token in lower for token in _CODE_HINT_TOKENS)
+    if has_code_hint:
+        return False
+
+    # Pure numeric columns without identifier hints are usually metrics, not codes.
+    if all(_is_numeric_like(value) for value in values):
+        return True
+
+    return False
+
+
 def detect_code_columns(
     columns: list[str],
     sample_data: list[dict],
@@ -110,7 +179,9 @@ def detect_code_columns(
         "CPT/HCPCS (procedures), NAICS/SIC (industry), FIPS (geography), "
         "ticker symbols (stocks), currency codes, zip codes with names, etc.\n\n"
         "Do NOT flag columns that are already human-readable (names, descriptions, "
-        "dates, counts, amounts) or generic auto-increment IDs.\n\n"
+        "dates, counts, amounts) or generic auto-increment IDs.\n"
+        "Do NOT flag aggregate metric columns such as *_count, *_cost, *_amount, "
+        "coverage_days, total_rows, procedure_units, averages, or ranks.\n\n"
         f"Columns: {columns}\n\n"
         f"Sample rows:\n{sample_str}\n\n"
         "Return ONLY a JSON array. Each element: "
@@ -124,7 +195,12 @@ def detect_code_columns(
         text = response.content.strip()
         match = re.search(r"\[.*\]", text, re.DOTALL)
         if match:
-            return json.loads(match.group())
+            detected = json.loads(match.group())
+            return [
+                item for item in detected
+                if item.get("column") in columns
+                and not _should_skip_code_column(item["column"], sample_rows)
+            ]
         return []
     except Exception as e:
         print(f"⚠ detect_code_columns failed: {e}")

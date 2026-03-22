@@ -62,6 +62,9 @@ def extract_summarize_context(state: AgentState) -> dict:
     
     return {
         "messages": truncate_message_history(messages, max_turns=5),
+        "original_query": state.get("original_query"),
+        "question_clear": state.get("question_clear", False),
+        "pending_clarification": state.get("pending_clarification"),
         "sql_query": state.get("sql_query"),
         "sql_queries": state.get("sql_queries") or [],
         "sql_query_labels": state.get("sql_query_labels") or [],
@@ -74,6 +77,45 @@ def extract_summarize_context(state: AgentState) -> dict:
         # For logging: track original size
         "_original_message_count": len(messages)
     }
+
+
+def _result_label(result_item: Dict[str, Any], idx: int, fallback_labels: List[str]) -> str | None:
+    """Resolve the display label for a result set."""
+    label = result_item.get("query_label")
+    if label:
+        return label
+    if idx < len(fallback_labels) and fallback_labels[idx]:
+        return fallback_labels[idx]
+    return None
+
+
+def _build_artifact_entries(state: AgentState) -> List[Dict[str, Any]]:
+    """Build normalized result/sql/label entries for downstream rendering."""
+    execution_results = list(state.get("execution_results") or [])
+    exec_result = state.get("execution_result")
+    if not execution_results and exec_result:
+        execution_results = [exec_result]
+
+    fallback_sql_queries = list(state.get("sql_queries") or [])
+    if not fallback_sql_queries and state.get("sql_query"):
+        fallback_sql_queries = [state["sql_query"]]
+    fallback_labels = list(state.get("sql_query_labels") or [])
+
+    entries: List[Dict[str, Any]] = []
+    for idx, result_item in enumerate(execution_results):
+        if not result_item:
+            continue
+        entries.append(
+            {
+                "index": idx,
+                "label": _result_label(result_item, idx, fallback_labels),
+                "sql": result_item.get("sql") or (
+                    fallback_sql_queries[idx] if idx < len(fallback_sql_queries) else None
+                ),
+                "result": result_item,
+            }
+        )
+    return entries
 
 
 def get_cached_summarize_agent():
@@ -360,10 +402,8 @@ def summarize_node(state: AgentState) -> dict:
     print("=" * 80)
 
     # --- 0. Kick off code enrichment in background (parallel with summary) ---
-    execution_results = state.get("execution_results") or []
-    exec_result = state.get("execution_result")
-    if not execution_results and exec_result:
-        execution_results = [exec_result]
+    artifact_entries = _build_artifact_entries(state)
+    execution_results = [entry["result"] for entry in artifact_entries]
 
     enrichment_futures = []
     enrichment_pool = None
@@ -385,11 +425,11 @@ def summarize_node(state: AgentState) -> dict:
             enrichment_pool = concurrent.futures.ThreadPoolExecutor(
                 max_workers=min(4, len(enrichable_results))
             )
-            labels = state.get("sql_query_labels") or []
             for idx, result_item in enrichable_results:
+                entry = artifact_entries[idx] if idx < len(artifact_entries) else {}
                 section_title = (
-                    labels[idx]
-                    if idx < len(labels) and labels[idx]
+                    entry.get("label")
+                    if entry.get("label")
                     else f"Query {idx + 1}"
                 )
                 enrichment_futures.append(
@@ -426,9 +466,6 @@ def summarize_node(state: AgentState) -> dict:
     config = get_config()
     track_agent_model_usage("summarize", config.llm.summarize_endpoint)
 
-    if "original_query" not in context:
-        context["original_query"] = state.get("original_query", "N/A")
-
     MAX_PREVIEW_ROWS = 200
 
     writer({
@@ -447,7 +484,9 @@ def summarize_node(state: AgentState) -> dict:
     chart_gen = _get_cached_chart_generator()
     original_query = state.get("original_query", "")
 
-    for idx, result_item in enumerate(execution_results):
+    for entry in artifact_entries:
+        idx = entry["index"]
+        result_item = entry["result"]
         if not result_item or not result_item.get("success"):
             continue
         columns = result_item.get("columns", [])
@@ -459,6 +498,10 @@ def summarize_node(state: AgentState) -> dict:
             try:
                 payload = chart_gen.generate_chart(columns, data, original_query)
                 if payload:
+                    label = entry.get("label")
+                    if label:
+                        payload.setdefault("config", {})
+                        payload["config"]["title"] = label
                     chart_json = _json.dumps(payload, default=str)
                     chart_block = f"\n\n```echarts-chart\n{chart_json}\n```\n"
                     summary += chart_block
@@ -469,8 +512,9 @@ def summarize_node(state: AgentState) -> dict:
 
     # --- 3. Downloadable paginated tables (rendered after charts) ---
     import base64
-    labels = state.get("sql_query_labels") or []
-    for idx, result_item in enumerate(execution_results):
+    for entry in artifact_entries:
+        idx = entry["index"]
+        result_item = entry["result"]
         if not result_item or not result_item.get("success"):
             continue
         columns = result_item.get("columns", [])
@@ -483,7 +527,7 @@ def summarize_node(state: AgentState) -> dict:
             "rows": data[:MAX_PREVIEW_ROWS],
             "totalRows": result_item.get("row_count", len(data)),
             "filename": f"results_{idx + 1}.csv" if len(execution_results) > 1 else "results.csv",
-            "title": labels[idx] if idx < len(labels) and labels[idx] else None,
+            "title": entry.get("label"),
         }
         table_json = _json.dumps(table_payload, default=str)
         table_b64 = base64.b64encode(table_json.encode()).decode()
@@ -497,9 +541,9 @@ def summarize_node(state: AgentState) -> dict:
         writer({"type": "text_delta", "content": table_block})
 
     # --- 3. SQL download / explanation / plan (collapsible, streamed as delta) ---
-    sql_queries = state.get("sql_queries") or []
-    if not sql_queries and state.get("sql_query"):
-        sql_queries = [state["sql_query"]]
+    sql_entries = [entry for entry in artifact_entries if entry.get("sql")]
+    sql_queries = [entry["sql"] for entry in sql_entries]
+    labels = [entry.get("label") for entry in sql_entries]
     explanation = state.get("sql_synthesis_explanation", "")
     explanation_entries = state.get("sql_synthesis_explanations", []) or []
     plan = state.get("plan")

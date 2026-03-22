@@ -215,19 +215,24 @@ class ResultSummarizeAgent:
         if execution_error:
             prompt += f"**Execution Failed:** {execution_error}\n"
 
-        sql_queries = state.get('sql_queries') or []
-        if not sql_queries and state.get('sql_query'):
-            sql_queries = [state['sql_query']]
         execution_results = state.get('execution_results') or []
         if not execution_results and state.get('execution_result'):
             execution_results = [state['execution_result']]
 
         MAX_PREVIEW = 200
         MAX_JSON = 20000
+        successful_results = [result for result in execution_results if result and result.get("success")]
+
+        prompt += (
+            f"**Result sets:** {len(execution_results)} total, "
+            f"{len(successful_results)} successful\n"
+        )
 
         for i, result in enumerate(execution_results):
             if not result or not result.get('success'):
-                prompt += f"\n**Query {i+1}:** Failed — {result.get('error', 'unknown')}\n"
+                label = result.get("query_label")
+                label_suffix = f" — {label}" if label else ""
+                prompt += f"\n**Query {i+1}{label_suffix}:** Failed — {result.get('error', 'unknown')}\n"
                 continue
             row_count = result.get('row_count', 0)
             columns = result.get('columns', [])
@@ -237,13 +242,11 @@ class ResultSummarizeAgent:
             if len(preview_json) > MAX_JSON:
                 preview_json = preview_json[:MAX_JSON] + "\n..."
 
-            label = ""
-            labels = state.get('sql_query_labels') or []
-            if labels and i < len(labels):
-                label = f" — {labels[i]}"
+            label = result.get("query_label")
+            label_suffix = f" — {label}" if label else ""
 
             prompt += f"""
-**Query {i+1}{label} Result:** {row_count} rows, columns: {', '.join(columns[:12])}{'...' if len(columns) > 12 else ''}
+**Query {i+1}{label_suffix} Result:** {row_count} rows, columns: {', '.join(columns[:12])}{'...' if len(columns) > 12 else ''}
 Data preview:
 {preview_json}
 """
@@ -252,15 +255,19 @@ Data preview:
 **Instructions — follow strictly:**
 1. Start with a descriptive ## title for the analysis
 2. Write a concise narrative answering the user's question with formatted numbers ($X,XXX,XXX.XX for currency, commas for counts)
-3. Present results in a well-formatted markdown table (include ALL data rows if <=30, otherwise top 20)
-4. **IMPORTANT — Code annotation:** If ANY column contains coded identifiers rather than plain text (e.g., NDC drug codes, ICD/CPT/HCPCS medical codes, NPI numbers, taxonomy codes, NAICS/SIC industry codes, MCC merchant codes, CUSIP/ISIN/ticker symbols, FIPS/ZIP codes, currency codes, tax form codes, GL account codes, or ANY other standardized code system), you MUST add a "Description" column with the human-readable name/meaning for each code. Use your domain knowledge to decode every code. Never present a table with coded columns that lack descriptions. If you cannot confidently decode a specific value, simply write "Unknown" or leave it blank. Do not write long disclaimers.
-5. Add a ### Key Insights section with 2-4 bullet points
+3. If there is more than one result set, create one `###` subsection per result set in query order. Use the query label when available.
+4. For each successful result set, include a markdown table for that result set only. If the result has <=30 rows, include all rows. Otherwise include the top 20 most relevant rows and keep it clearly labeled as a preview.
+5. Keep result sets separate. Do not merge multiple result sets into one markdown table.
+6. **IMPORTANT — Safe inference:** Only make claims directly supported by the provided rows/columns. If a result may contain repeated entities (for example multiple coverage rows per member, multiple benefit types per patient, or repeated diagnosis rows), do NOT infer distinct member counts, payer counts, or cohort composition unless the result explicitly includes distinct counts.
+7. **IMPORTANT — Code annotation:** If ANY column contains coded identifiers rather than plain text (e.g., NDC drug codes, ICD/CPT/HCPCS medical codes, NPI numbers, taxonomy codes, NAICS/SIC industry codes, MCC merchant codes, CUSIP/ISIN/ticker symbols, FIPS/ZIP codes, currency codes, tax form codes, GL account codes, or ANY other standardized code system), you MUST add a "Description" column with the human-readable name/meaning for each code. Use your domain knowledge to decode every code. Never present a table with coded columns that lack descriptions. If you cannot confidently decode a specific value, simply write "Unknown" or leave it blank. Do not write long disclaimers.
+8. Add a ### Key Insights section with 2-4 bullet points grounded in the result sets
 
 **DO NOT include:**
 - SQL queries or code blocks (those are shown separately)
 - Workflow/planning details
 - Emoji prefixes
 - JSON dumps
+- Statements about how many charts, downloadable tables, or accordion sections are shown; those are rendered separately
 """
         return prompt
     

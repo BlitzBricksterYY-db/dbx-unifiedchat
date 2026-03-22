@@ -47,6 +47,19 @@ class IntentMetadata(TypedDict):
     parent_turn_id: Optional[str]
 
 
+class QueryExecutionResult(TypedDict, total=False):
+    """Normalized execution result metadata used by summary/rendering layers."""
+    success: bool
+    sql: str
+    result: Any
+    row_count: int
+    columns: List[str]
+    error: str
+    error_type: str
+    query_number: int
+    query_label: Optional[str]
+
+
 class AgentState(TypedDict):
     """Simplified agent state using turn-based context management."""
     # Turn Management
@@ -90,8 +103,8 @@ class AgentState(TypedDict):
     has_sql: Optional[bool]  # Whether SQL was successfully extracted
     
     # Execution
-    execution_result: Optional[Dict[str, Any]]
-    execution_results: Optional[List[Dict[str, Any]]]  # Multi-part question: list of all execution results
+    execution_result: Optional[QueryExecutionResult]
+    execution_results: Optional[List[QueryExecutionResult]]  # Multi-part question: list of all execution results
     execution_error: Optional[str]
     
     # Summary
@@ -111,7 +124,7 @@ class AgentState(TypedDict):
     sql_retry_max: Optional[int]
     sql_retry_feedback: Optional[str]
     loop_reason: Optional[str]  # "retry" | "sequential_next" | None
-    preserved_results: Optional[List[Dict[str, Any]]]
+    preserved_results: Optional[List[QueryExecutionResult]]
     
     # Sequential execution mode
     execution_mode: Optional[str]  # "parallel" | "sequential"

@@ -114,6 +114,32 @@ def _filter_out_already_succeeded(
     return filtered
 
 
+def _fallback_query_label(state: AgentState, query_index: int) -> str | None:
+    """Best-effort label fallback when synthesis did not return a label."""
+    sub_questions = state.get("sub_questions") or []
+    if 0 <= query_index < len(sub_questions):
+        return sub_questions[query_index]
+    return None
+
+
+def _attach_query_metadata(
+    state: AgentState,
+    result: Dict[str, Any],
+    *,
+    query_index: int,
+    sql_query: str,
+    label: str | None = None,
+) -> Dict[str, Any]:
+    """Attach stable per-query metadata to an execution result."""
+    metadata_label = label or _fallback_query_label(state, query_index)
+    enriched = dict(result)
+    enriched["query_number"] = query_index + 1
+    enriched["sql"] = enriched.get("sql") or sql_query
+    if metadata_label:
+        enriched["query_label"] = metadata_label
+    return enriched
+
+
 def sql_execution_node(state: AgentState) -> dict:
     """
     SQL execution node wrapping SQLExecutionAgent class.
@@ -188,6 +214,7 @@ def _execute_parallel(
     """Run all queries in parallel. On partial failure, retry once via synthesis loop."""
     is_retry = state.get("loop_reason") == "retry"
     preserved = list(state.get("preserved_results") or [])
+    labels = list(state.get("sql_query_labels") or [])
 
     if is_retry:
         sql_queries = _filter_out_already_succeeded(sql_queries, preserved)
@@ -206,6 +233,16 @@ def _execute_parallel(
         writer({"type": "sql_execution_start", "estimated_complexity": "standard", "query_number": i})
 
     execution_results = agent.execute_sql_parallel(sql_queries)
+    execution_results = [
+        _attach_query_metadata(
+            state,
+            result,
+            query_index=i,
+            sql_query=sql_queries[i],
+            label=labels[i] if i < len(labels) else None,
+        )
+        for i, result in enumerate(execution_results)
+    ]
 
     for result in execution_results:
         i = result.get("query_number", 0)
@@ -282,10 +319,18 @@ def _execute_sequential(
     retry_max = state.get("sql_retry_max", 1)
 
     query = sql_queries[0]
+    labels = list(state.get("sql_query_labels") or [])
+    label = labels[0] if labels else None
     writer({"type": "sql_execution_start", "estimated_complexity": "standard", "query_number": step + 1})
 
     result = agent.execute_sql(query)
-    result["query_number"] = step + 1
+    result = _attach_query_metadata(
+        state,
+        result,
+        query_index=step,
+        sql_query=query,
+        label=label,
+    )
 
     if result["success"]:
         writer({"type": "sql_execution_complete", "rows": result["row_count"], "columns": result["columns"], "query_number": step + 1})
