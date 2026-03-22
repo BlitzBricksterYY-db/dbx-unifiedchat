@@ -314,3 +314,48 @@ details > summary ~ div:last-of-type {
   opacity: 1;
   font-size: 0.95em;
 }
+
+/* Accordion tabs */
+.accordion-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 1rem;
+}
+.accordion-group > details {
+  display: contents;
+}
+.accordion-group > details > summary {
+  padding: 6px 12px;
+  background: var(--color-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  list-style: none;
+  order: 1;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: background 0.2s ease;
+}
+.accordion-group > details > summary::-webkit-details-marker {
+  display: none;
+}
+.accordion-group > details > summary:hover {
+  background: var(--color-accent);
+}
+.accordion-group > details[open] > summary {
+  background: var(--color-primary);
+  color: var(--color-primary-foreground);
+  border-color: var(--color-primary);
+}
+.accordion-group > details > .accordion-content {
+  width: 100%;
+  order: 99;
+  flex-basis: 100%;
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+}
+

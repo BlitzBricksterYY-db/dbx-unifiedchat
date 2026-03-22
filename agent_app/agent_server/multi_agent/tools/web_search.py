@@ -252,8 +252,8 @@ def enrich_codes(
     if not sections:
         return None
 
-    result = "\n\n<details><summary>Code Reference</summary>\n"
+    result = "\n\n<details name=\"sql-accordion\"><summary>Code Reference</summary>\n\n<div class=\"accordion-content\">\n\n"
     result += "\n".join(sections)
-    result += "\n\n</details>\n"
+    result += "\n\n</div>\n</details>\n"
     print(f"✓ Code reference built ({len(sections)} code type sections)")
     return result

@@ -12,7 +12,6 @@ import {
 } from 'react';
 import { DatabricksMessageCitationStreamdownIntegration } from '../databricks-message-citation';
 import { Streamdown } from 'streamdown';
-import { PaginatedTable } from './paginated-table';
 
 const InteractiveChart = lazy(() =>
   import('./interactive-chart').then((m) => ({ default: m.InteractiveChart })),
@@ -214,17 +213,20 @@ export const Response = memo(
         // Auto-collapse the Processing Steps <details open> when summary content follows.
         // Use indexOf (first </details>) — the Processing Steps block — not lastIndexOf
         // which would find the SQL <details> block at the end (nothing follows it).
-        const closeTag = '</details>';
-        const firstClose = text.indexOf(closeTag);
-        if (firstClose !== -1) {
-          const afterProcessingSteps = text
-            .substring(firstClose + closeTag.length)
-            .trim();
-          if (afterProcessingSteps.length > 0) {
-            text = text.replace(/<details open>/g, '<details>');
-            const before = text.substring(0, firstClose + closeTag.length);
-            const after = text.substring(firstClose + closeTag.length);
-            text = before + '\n\n---\n\n' + after.trimStart();
+        const processingStepsStart = text.indexOf('<summary>Processing Steps</summary>');
+        if (processingStepsStart !== -1) {
+          const closeTag = '</details>';
+          const firstClose = text.indexOf(closeTag, processingStepsStart);
+          if (firstClose !== -1) {
+            const afterProcessingSteps = text
+              .substring(firstClose + closeTag.length)
+              .trim();
+            if (afterProcessingSteps.length > 0) {
+              text = text.replace(/<details open>/g, '<details>');
+              const before = text.substring(0, firstClose + closeTag.length);
+              const after = text.substring(firstClose + closeTag.length);
+              text = before + '\n\n---\n\n' + after.trimStart();
+            }
           }
         }
 
@@ -241,7 +243,6 @@ export const Response = memo(
           components={{
             a: DatabricksMessageCitationStreamdownIntegration,
             code: EChartsCodeBlock,
-            table: PaginatedTable,
           }}
           className="flex flex-col gap-4"
           {...props}

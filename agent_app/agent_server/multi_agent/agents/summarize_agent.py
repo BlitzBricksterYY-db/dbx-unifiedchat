@@ -90,7 +90,7 @@ class ResultSummarizeAgent:
             return ""
         import base64
 
-        parts: list[str] = ['\n\n---\n\n<details name="sql-accordion"><summary>Show SQL</summary>\n']
+        parts: list[str] = ['\n\n<details name="sql-accordion"><summary>Show SQL</summary>\n\n<div class="accordion-content">\n\n']
         for idx, sql in enumerate(sql_queries):
             label = (labels[idx] if labels and idx < len(labels) and labels[idx] else "")
             fname = f"query{'_' + str(idx + 1) if len(sql_queries) > 1 else ''}.sql"
@@ -100,7 +100,7 @@ class ResultSummarizeAgent:
             meta = f"{fname}:{encoded}"
             parts.append(f"\n{'**' + label + '**' + chr(10) if label else ''}"
                          f"```sql-download:{meta}\n{sql}\n```\n")
-        parts.append("\n</details>\n")
+        parts.append("\n\n</div>\n</details>\n")
         return "".join(parts)
 
     @staticmethod
@@ -108,14 +108,14 @@ class ResultSummarizeAgent:
         """Collapsible SQL explanation section with query labels for easy tracking."""
         if not explanation:
             return ""
-        parts: list[str] = ['\n<details name="sql-accordion"><summary>SQL Explanation</summary>\n\n']
+        parts: list[str] = ['\n\n<details name="sql-accordion"><summary>SQL Explanation</summary>\n\n<div class="accordion-content">\n\n']
         if labels:
             for idx, label in enumerate(labels):
                 if label:
                     parts.append(f"**{idx + 1}. {label}**\n\n")
             parts.append("---\n\n")
         parts.append(explanation)
-        parts.append("\n\n</details>\n")
+        parts.append("\n\n</div>\n</details>\n")
         return "".join(parts)
 
     @staticmethod
@@ -129,9 +129,9 @@ class ResultSummarizeAgent:
         encoded = base64.b64encode(plan_json.encode()).decode()
         meta = f"plan.json:{encoded}"
         return (
-            '\n<details name="sql-accordion"><summary>Plan Executed</summary>\n\n'
+            '\n\n<details name="sql-accordion"><summary>Plan Executed</summary>\n\n<div class="accordion-content">\n\n'
             f"```json-download:{meta}\n{plan_json}\n```\n"
-            "\n</details>\n"
+            "\n</div>\n</details>\n"
         )
 
     def _build_summary_prompt(self, state: AgentState) -> str:
@@ -200,7 +200,7 @@ Data preview:
 1. Start with a descriptive ## title for the analysis
 2. Write a concise narrative answering the user's question with formatted numbers ($X,XXX,XXX.XX for currency, commas for counts)
 3. Present results in a well-formatted markdown table (include ALL data rows if <=30, otherwise top 20)
-4. **IMPORTANT — Code annotation:** If ANY column contains coded identifiers rather than plain text (e.g., NDC drug codes, ICD/CPT/HCPCS medical codes, NPI numbers, taxonomy codes, NAICS/SIC industry codes, MCC merchant codes, CUSIP/ISIN/ticker symbols, FIPS/ZIP codes, currency codes, tax form codes, GL account codes, or ANY other standardized code system), you MUST add a "Description" column with the human-readable name/meaning for each code. Use your domain knowledge to decode every code. Never present a table with coded columns that lack descriptions.
+4. **IMPORTANT — Code annotation:** If ANY column contains coded identifiers rather than plain text (e.g., NDC drug codes, ICD/CPT/HCPCS medical codes, NPI numbers, taxonomy codes, NAICS/SIC industry codes, MCC merchant codes, CUSIP/ISIN/ticker symbols, FIPS/ZIP codes, currency codes, tax form codes, GL account codes, or ANY other standardized code system), you MUST add a "Description" column with the human-readable name/meaning for each code. Use your domain knowledge to decode every code. Never present a table with coded columns that lack descriptions. If you cannot confidently decode a specific value, simply write "Unknown" or leave it blank. Do not write long disclaimers.
 5. Add a ### Key Insights section with 2-4 bullet points
 
 **DO NOT include:**

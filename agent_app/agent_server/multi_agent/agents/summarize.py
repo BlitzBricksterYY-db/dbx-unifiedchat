@@ -451,6 +451,11 @@ def summarize_node(state: AgentState) -> dict:
         sql_queries = [state["sql_query"]]
     labels = state.get("sql_query_labels", [])
 
+    has_accordion = False
+    if sql_queries or explanation or plan or enrichment_future:
+        writer({"type": "text_delta", "content": "\n\n<div class=\"accordion-group\">\n\n"})
+        has_accordion = True
+
     if sql_queries:
         from .summarize_agent import ResultSummarizeAgent
         sql_block = ResultSummarizeAgent.format_sql_download(sql_queries, labels)
@@ -486,6 +491,9 @@ def summarize_node(state: AgentState) -> dict:
         finally:
             if enrichment_pool:
                 enrichment_pool.shutdown(wait=False)
+
+    if has_accordion:
+        writer({"type": "text_delta", "content": "\n\n</div>\n"})
 
     writer({"type": "summary_complete", "content": f"Summary generated ({len(summary)} chars)"})
 
