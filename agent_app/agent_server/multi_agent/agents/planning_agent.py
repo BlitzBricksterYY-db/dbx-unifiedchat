@@ -29,17 +29,29 @@ from typing import Dict, List, Any, Optional
 
 import os
 
+import mlflow
 from langchain_core.runnables import Runnable
 from databricks_langchain import DatabricksVectorSearch
 from databricks.sdk import WorkspaceClient
+from mlflow.entities import SpanType
 
 
 def _get_vector_search_workspace_client() -> WorkspaceClient:
-    """Build a WorkspaceClient that databricks-vectorsearch can consume."""
+    """Build a WorkspaceClient that databricks-vectorsearch can consume.
+
+    VectorSearchClient requires PAT-style auth. When DATABRICKS_CONFIG_PROFILE
+    is set the SDK resolves to databricks-cli auth which VectorSearchClient
+    rejects, so we temporarily hide the profile env var to force PAT auth.
+    """
     host = os.environ.get("DATABRICKS_HOST")
     token = os.environ.get("DATABRICKS_TOKEN")
     if host and token:
-        return WorkspaceClient(host=host, token=token)
+        saved = os.environ.pop("DATABRICKS_CONFIG_PROFILE", None)
+        try:
+            return WorkspaceClient(host=host, token=token)
+        finally:
+            if saved is not None:
+                os.environ["DATABRICKS_CONFIG_PROFILE"] = saved
     return WorkspaceClient()
 
 
@@ -78,30 +90,50 @@ class PlanningAgent:
             - searchable_content: Space description/content
             - score: Relevance score from vector search
         """
-        vs = DatabricksVectorSearch(
-            index_name=self.vector_search_index,
-            columns=["space_id", "space_title", "searchable_content"],
-            workspace_client=self._workspace_client,
-        )
+        with mlflow.start_span(
+            name="vector_search_spaces",
+            span_type=SpanType.RETRIEVER,
+            attributes={
+                "index_name": self.vector_search_index,
+                "num_results": num_results,
+            },
+        ) as span:
+            span.set_inputs({"query": query, "k": num_results})
 
-        docs_with_scores = vs.similarity_search_with_score(
-            query=query,
-            k=num_results,
-            filter={"chunk_type": "space_summary"},
-            query_type="ANN",
-        )
+            vs = DatabricksVectorSearch(
+                index_name=self.vector_search_index,
+                columns=["space_id", "space_title", "searchable_content"],
+                workspace_client=self._workspace_client,
+            )
 
-        relevant_spaces = []
-        for doc, score in docs_with_scores:
-            space_id = doc.metadata.get("space_id", "")
-            if not space_id:
-                continue
-            relevant_spaces.append({
-                "space_id": space_id,
-                "space_title": doc.metadata.get("space_title", ""),
-                "searchable_content": doc.page_content,
-                "score": score,
-            })
+            docs_with_scores = vs.similarity_search_with_score(
+                query=query,
+                k=num_results,
+                filter={"chunk_type": "space_summary"},
+                query_type="ANN",
+            )
+
+            relevant_spaces = []
+            for doc, score in docs_with_scores:
+                space_id = doc.metadata.get("space_id", "")
+                if not space_id:
+                    continue
+                relevant_spaces.append({
+                    "space_id": space_id,
+                    "space_title": doc.metadata.get("space_title", ""),
+                    "searchable_content": doc.page_content,
+                    "score": score,
+                })
+
+            span.set_outputs(
+                {
+                    "result_count": len(relevant_spaces),
+                    "spaces": [
+                        {"space_id": s["space_id"], "space_title": s["space_title"], "score": s["score"]}
+                        for s in relevant_spaces
+                    ],
+                }
+            )
 
         return relevant_spaces
     

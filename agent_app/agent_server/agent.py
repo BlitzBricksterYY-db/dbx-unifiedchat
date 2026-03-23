@@ -5,6 +5,7 @@ Converted from SuperAgentHybridResponsesAgent (Model Serving) to
 MLflow GenAI Server decorated functions (Databricks Apps).
 """
 
+import contextvars
 import json
 import logging
 import time
@@ -13,6 +14,7 @@ from uuid import uuid4
 
 import litellm
 import mlflow
+from mlflow.entities import SpanType
 from mlflow.genai.agent_server import invoke, stream
 from mlflow.types.responses import (
     ResponsesAgentRequest,
@@ -28,7 +30,7 @@ from agent_server.utils import get_session_id
 from agent_server.multi_agent.core.graph import create_super_agent_hybrid
 from agent_server.multi_agent.core.state import RESET_STATE_TEMPLATE
 
-mlflow.langchain.autolog(run_tracer_inline=False)
+mlflow.langchain.autolog(disable=True)
 
 logging.getLogger("mlflow.utils.autologging_utils").setLevel(logging.ERROR)
 litellm.suppress_debug_info = True
@@ -252,6 +254,13 @@ async def stream_handler(
     thread_id = _get_or_create_thread_id(request)
     user_id = _get_user_id(request)
 
+    mlflow.update_current_trace(
+        metadata={
+            "chat.thread_id": thread_id,
+            **({"chat.user_id": user_id} if user_id else {}),
+        }
+    )
+
     ci = dict(request.custom_inputs or {})
     ci["thread_id"] = thread_id
     if user_id:
@@ -311,21 +320,53 @@ Guidelines:
         from databricks_langchain import CheckpointSaver
 
         try:
-            with CheckpointSaver(instance_name=LAKEBASE_INSTANCE_NAME) as checkpointer:
-                app = _workflow.compile(checkpointer=checkpointer)
-                logger.info(f"Executing workflow with checkpointer (thread: {thread_id})")
-                for event in app.stream(
-                    initial_state,
-                    run_config,
-                    stream_mode=["updates", "messages", "custom", "tasks"],
-                ):
-                    loop.call_soon_threadsafe(queue.put_nowait, event)
+            with mlflow.start_span(
+                name="langgraph_workflow",
+                span_type=SpanType.AGENT,
+                attributes={
+                    "thread_id": thread_id,
+                    "execution_mode": execution_mode,
+                    "force_synthesis_route": force_synthesis_route,
+                },
+            ) as span:
+                span.set_inputs(
+                    {
+                        "original_query": latest_query,
+                        "thread_id": thread_id,
+                        "user_id": user_id,
+                        "execution_mode": execution_mode,
+                        "force_synthesis_route": force_synthesis_route,
+                    }
+                )
+                last_state: dict = {}
+                with CheckpointSaver(instance_name=LAKEBASE_INSTANCE_NAME) as checkpointer:
+                    app = _workflow.compile(checkpointer=checkpointer)
+                    logger.info(f"Executing workflow with checkpointer (thread: {thread_id})")
+                    for event in app.stream(
+                        initial_state,
+                        run_config,
+                        stream_mode=["updates", "messages", "custom", "tasks"],
+                    ):
+                        if event[0] == "updates" and isinstance(event[1], dict):
+                            last_state.update(event[1])
+                        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+                workflow_output: dict = {"status": "completed"}
+                if summary := last_state.get("final_summary"):
+                    workflow_output["final_summary"] = summary[:4000] if len(summary) > 4000 else summary
+                if sql := last_state.get("sql_query"):
+                    workflow_output["sql_query"] = sql[:2000] if len(sql) > 2000 else sql
+                if er := last_state.get("execution_result"):
+                    workflow_output["execution_result_status"] = er.get("status")
+                    workflow_output["row_count"] = er.get("row_count")
+                span.set_outputs(workflow_output)
         except Exception as exc:
             loop.call_soon_threadsafe(queue.put_nowait, exc)
         finally:
             loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
 
-    loop.run_in_executor(None, _run_workflow)
+    trace_context = contextvars.copy_context()
+    loop.run_in_executor(None, trace_context.run, _run_workflow)
 
     progress_steps: list[str] = []
     progress_item_id = str(uuid4())
