@@ -30,7 +30,7 @@ from agent_server.utils import get_session_id
 from agent_server.multi_agent.core.graph import create_super_agent_hybrid
 from agent_server.multi_agent.core.state import RESET_STATE_TEMPLATE
 
-mlflow.langchain.autolog(disable=True)
+mlflow.langchain.autolog(run_tracer_inline=True)
 
 logging.getLogger("mlflow.utils.autologging_utils").setLevel(logging.ERROR)
 litellm.suppress_debug_info = True

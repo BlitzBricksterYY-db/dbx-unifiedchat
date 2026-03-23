@@ -25,23 +25,27 @@ Example usage:
 
 import json
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 
 import os
 
 import mlflow
 from langchain_core.runnables import Runnable
-from databricks_langchain import DatabricksVectorSearch
+from databricks_langchain import VectorSearchRetrieverTool
 from databricks.sdk import WorkspaceClient
 from mlflow.entities import SpanType
 
 
-def _get_vector_search_workspace_client() -> WorkspaceClient:
-    """Build a WorkspaceClient that databricks-vectorsearch can consume.
+def _build_workspace_client() -> WorkspaceClient:
+    """Build a WorkspaceClient for VectorSearchRetrieverTool.
 
-    VectorSearchClient requires PAT-style auth. When DATABRICKS_CONFIG_PROFILE
-    is set the SDK resolves to databricks-cli auth which VectorSearchClient
-    rejects, so we temporarily hide the profile env var to force PAT auth.
+    Local dev with DATABRICKS_CONFIG_PROFILE uses databricks-cli auth, which
+    VectorSearchClient rejects.  When explicit HOST + TOKEN are available we
+    temporarily hide the profile env var to force PAT auth.
+
+    In deployed environments (Databricks Apps / Model Serving) where neither
+    HOST nor TOKEN is set, WorkspaceClient() falls back to model-serving
+    credential strategy automatically.
     """
     host = os.environ.get("DATABRICKS_HOST")
     token = os.environ.get("DATABRICKS_TOKEN")
@@ -72,13 +76,26 @@ class PlanningAgent:
         """
         self.llm = llm
         self.vector_search_index = vector_search_index
-        self._workspace_client = _get_vector_search_workspace_client()
+        self._vs_tool = self._build_vs_tool()
         self.name = "Planning"
-    
+
+    def _build_vs_tool(self) -> VectorSearchRetrieverTool:
+        return VectorSearchRetrieverTool(
+            index_name=self.vector_search_index,
+            tool_name="search_genie_spaces",
+            tool_description="Search for relevant Genie spaces by semantic similarity",
+            num_results=5,
+            columns=["space_id", "space_title", "searchable_content"],
+            filters={"chunk_type": "space_summary"},
+            query_type="ANN",
+            include_score=True,
+            workspace_client=_build_workspace_client(),
+        )
+
     def search_relevant_spaces(self, query: str, num_results: int = 5) -> List[Dict[str, Any]]:
         """
-        Search for relevant Genie spaces using vector search.
-        
+        Search for relevant Genie spaces using VectorSearchRetrieverTool.
+
         Args:
             query: User's question
             num_results: Number of results to return
@@ -96,17 +113,12 @@ class PlanningAgent:
             attributes={
                 "index_name": self.vector_search_index,
                 "num_results": num_results,
+                "tool_name": self._vs_tool.name,
             },
         ) as span:
             span.set_inputs({"query": query, "k": num_results})
 
-            vs = DatabricksVectorSearch(
-                index_name=self.vector_search_index,
-                columns=["space_id", "space_title", "searchable_content"],
-                workspace_client=self._workspace_client,
-            )
-
-            docs_with_scores = vs.similarity_search_with_score(
+            docs = self._vs_tool._vector_store.similarity_search(
                 query=query,
                 k=num_results,
                 filter={"chunk_type": "space_summary"},
@@ -114,7 +126,7 @@ class PlanningAgent:
             )
 
             relevant_spaces = []
-            for doc, score in docs_with_scores:
+            for doc in docs:
                 space_id = doc.metadata.get("space_id", "")
                 if not space_id:
                     continue
@@ -122,7 +134,7 @@ class PlanningAgent:
                     "space_id": space_id,
                     "space_title": doc.metadata.get("space_title", ""),
                     "searchable_content": doc.page_content,
-                    "score": score,
+                    "score": doc.metadata.get("score", 0.0),
                 })
 
             span.set_outputs(
