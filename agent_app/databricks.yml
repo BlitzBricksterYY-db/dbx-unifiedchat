@@ -60,6 +60,10 @@ resources:
             value: "1024"
           - name: MLFLOW_EXPERIMENT_ID
             value_from: experiment
+          - name: MLFLOW_TRACKING_URI
+            value: "databricks"
+          - name: MLFLOW_REGISTRY_URI
+            value: "databricks-uc"
 
       resources:
         - name: 'experiment'
