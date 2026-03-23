@@ -324,13 +324,18 @@ def planning_node(state: AgentState) -> dict:
     # Create execution plan
     # IMPORTANT: Use planning_query (with context_summary) not just query
     # Pass original_query so it can be shown in the prompt before context_summary
-    plan = planning_agent.create_execution_plan(planning_query, relevant_spaces_full, original_query=query)
+    force_route = state.get("force_synthesis_route", "auto")
+    plan = planning_agent.create_execution_plan(
+        planning_query,
+        relevant_spaces_full,
+        original_query=query,
+        force_synthesis_route=force_route,
+    )
     
     # Extract plan components
     join_strategy = plan.get("join_strategy")
     
     # Honor force_synthesis_route override from UI
-    force_route = state.get("force_synthesis_route", "auto")
     if force_route == "table_route":
         join_strategy = "table_route"
         next_agent = "sql_synthesis_table"

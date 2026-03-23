@@ -108,7 +108,8 @@ class PlanningAgent:
         self, 
         query: str, 
         relevant_spaces: List[Dict[str, Any]],
-        original_query: str = None
+        original_query: str = None,
+        force_synthesis_route: str = "auto",
     ) -> Dict[str, Any]:
         """
         Create execution plan based on query and relevant spaces.
@@ -133,6 +134,18 @@ class PlanningAgent:
         """
         # Use original_query if provided, otherwise use query as original
         original_query_display = original_query if original_query is not None else query
+        forced_route_display = force_synthesis_route or "auto"
+        forced_route_instructions = ""
+        if forced_route_display == "genie_route":
+            forced_route_instructions = """
+- UI override: Genie Route is selected.
+- You must use Genie Route and must create `genie_route_plan`.
+"""
+        elif forced_route_display == "table_route":
+            forced_route_instructions = """
+- UI override: Table Route is selected.
+- You must use Table Route and must keep `genie_route_plan` null.
+"""
         
         planning_prompt = f"""
 You are a query planning expert. Analyze the following question and create an execution plan.
@@ -140,6 +153,8 @@ You are a query planning expert. Analyze the following question and create an ex
 User original query this turn: {original_query_display}
 
 Question: {query}
+
+Forced synthesis route from UI: {forced_route_display}
 
 Potentially relevant Genie spaces:
 {json.dumps(relevant_spaces, indent=2)}
@@ -154,12 +169,14 @@ Break down the question and determine:
     - "table_route": Directly synthesize SQL across multiple tables
     - "genie_route": Query each Genie Space Agent separately, then combine SQL queries
     - If user explicitly asks for "genie_route", use it; otherwise, use "table_route"
+    - If Genie Route is selected from UI, you must use Genie Route and must create `genie_route_plan`
     - always populate the join_strategy field in the JSON output.
 5. Execution plan: A brief description of how to execute the plan.
     - For genie_route: Return "genie_route_plan": {{'space_id_1':'partial_question_1', 'space_id_2':'partial_question_2'}}
     - For table_route: Return "genie_route_plan": null
     - Each partial_question should be similar to original but scoped to that space
     - Add "Please limit to top 10 rows" to each partial question
+{forced_route_instructions}
 
 Return your analysis as JSON:
 {{
