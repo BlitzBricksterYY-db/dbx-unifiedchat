@@ -186,6 +186,23 @@ result5 = run_test(
 )
 test_results.append(result5)
 
+# Test 6: Resource modification routing (AgentRx)
+result6 = run_test(
+    "Resource Modification - AgentRx Routing",
+    "Add table catalog.schema.new_table to the patient demographics Genie space",
+    expected_agents=["agent_rx"]
+)
+test_results.append(result6)
+time.sleep(2)
+
+# Test 7: Normal query does NOT trigger AgentRx
+result7 = run_test(
+    "Normal Query Does Not Trigger AgentRx",
+    "Show me patient data for patients older than 50",
+    expected_agents=["ThinkingPlanning"]
+)
+test_results.append(result7)
+
 # Print Summary
 print("\n\n" + "="*80)
 print("TEST SUMMARY")

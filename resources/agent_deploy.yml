@@ -40,6 +40,7 @@ resources:
               llm_endpoint_sql_synthesis_genie: ${var.llm_endpoint_sql_synthesis_genie}
               llm_endpoint_execution: ${var.llm_endpoint_execution}
               llm_endpoint_summarize: ${var.llm_endpoint_summarize}
+              llm_endpoint_agent_rx: ${var.llm_endpoint_agent_rx}
               sample_size: ${var.sample_size}
               max_unique_values: ${var.max_unique_values}
               vs_endpoint_name: ${var.vs_endpoint_name}
@@ -81,6 +82,7 @@ resources:
               llm_endpoint_sql_synthesis_genie: ${var.llm_endpoint_sql_synthesis_genie}
               llm_endpoint_execution: ${var.llm_endpoint_execution}
               llm_endpoint_summarize: ${var.llm_endpoint_summarize}
+              llm_endpoint_agent_rx: ${var.llm_endpoint_agent_rx}
               sample_size: ${var.sample_size}
               max_unique_values: ${var.max_unique_values}
               vs_endpoint_name: ${var.vs_endpoint_name}
@@ -119,6 +121,7 @@ resources:
               llm_endpoint_sql_synthesis_genie: ${var.llm_endpoint_sql_synthesis_genie}
               llm_endpoint_execution: ${var.llm_endpoint_execution}
               llm_endpoint_summarize: ${var.llm_endpoint_summarize}
+              llm_endpoint_agent_rx: ${var.llm_endpoint_agent_rx}
               sample_size: ${var.sample_size}
               max_unique_values: ${var.max_unique_values}
               vs_endpoint_name: ${var.vs_endpoint_name}

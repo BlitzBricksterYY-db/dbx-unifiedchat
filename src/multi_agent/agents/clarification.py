@@ -414,6 +414,29 @@ If it's irrelevant, you MUST:
 
 NOTE: If a question mentions data but in an irrelevant context (e.g., "What's the weather like in my data?"), treat it as irrelevant.
 
+## Task 0.5: Detect Knowledge Base Modification Requests
+Next, determine if the user is requesting a change to what data the agent has access to (its knowledge base):
+- Adding or removing a Genie Space from the agent's indexed knowledge
+- Removing a data topic or dataset from what the agent can query
+- Adding a new data source so the agent can answer questions about it
+- Refreshing metadata, re-running ETL, or rebuilding the search index
+- Asking what data sources the agent currently has indexed (when phrased as a management request, not an analytical question)
+
+Examples of knowledge-base modification requests (all should set is_resource_modification=true):
+- "Remove NYC Taxi Trip data from what you can access"
+- "Stop using the healthcare space"
+- "Add the marketing Genie space to your knowledge base"
+- "I don't want you to query the test data anymore"
+- "Can you add a new data source for supply chain data?"
+- "Refresh the metadata index"
+- "Re-run the ETL pipeline"
+- "What Genie Spaces do you currently have indexed?"
+
+If it's a knowledge-base modification, you MUST:
+1. Set "is_resource_modification": true
+2. Provide a brief acknowledgment of what will be changed
+3. Set "question_clear": true (knowledge-base modifications are always routed immediately)
+
 ## Task 1: Detect Meta-Questions
 Next, determine if this is a META-QUESTION about the system itself:
 - Questions about available tables, data sources, spaces, schemas
@@ -483,6 +506,29 @@ Could you rephrase your question to focus on analyzing the available data?
   "clarification_reason": null,
   "clarification_options": null,
   "metadata": {{{{"domain": "irrelevant", "complexity": "simple", "topic_change_score": 1.0}}}}
+}}}}
+```
+
+**CASE 0.5: Knowledge Base Modification** (is_resource_modification=true)
+Output acknowledgment markdown FIRST, then JSON metadata:
+
+### Knowledge Base Modification Request
+
+I'll process your request to [describe the change, e.g. "remove the NYC Taxi Trip data from the agent's knowledge base"].
+
+```json
+{{{{
+  "is_irrelevant": false,
+  "is_resource_modification": true,
+  "is_meta_question": false,
+  "meta_answer": null,
+  "intent_type": "new_question",
+  "confidence": 0.95,
+  "context_summary": "User wants to [describe the knowledge-base change in detail for AgentRx, e.g. remove/add a specific space or data topic from the indexed metadata]",
+  "question_clear": true,
+  "clarification_reason": null,
+  "clarification_options": null,
+  "metadata": {{{{"domain": "resource_management", "complexity": "moderate", "topic_change_score": 1.0}}}}
 }}}}
 ```
 
@@ -623,6 +669,7 @@ CRITICAL:
         
         # Extract results
         is_irrelevant = result.get("is_irrelevant", False)
+        is_resource_modification = result.get("is_resource_modification", False)
         is_meta_question = result.get("is_meta_question", False)
         meta_answer = result.get("meta_answer")
         intent_type = result["intent_type"].lower()
@@ -637,6 +684,7 @@ CRITICAL:
         print(f"  Context: {context_summary[:100]}...")
         print(f"  Question clear: {question_clear}")
         print(f"  Irrelevant: {is_irrelevant}")
+        print(f"  Resource modification: {is_resource_modification}")
         print(f"  Meta-question: {is_meta_question}")
         
         # Create conversation turn
@@ -717,6 +765,49 @@ Could you rephrase your question to focus on analyzing the available data?"""
                 "messages": [
                     AIMessage(content=irrelevant_display),
                     SystemMessage(content="Irrelevant question detected, skipping SQL generation")
+                ]
+            }
+        
+        # Check if this is a resource modification request - route to AgentRx
+        if is_resource_modification:
+            print("Resource modification detected - routing to AgentRx")
+            
+            turn["metadata"]["is_resource_modification"] = True
+            
+            writer({
+                "type": "resource_modification_detected",
+                "note": "Routing to AgentRx for resource management"
+            })
+            
+            if markdown_section and markdown_section.strip():
+                modification_display = markdown_section
+            else:
+                modification_display = (
+                    "### Resource Modification Request\n\n"
+                    "I'll process your resource modification request now."
+                )
+            
+            return {
+                "current_turn": turn,
+                "turn_history": [turn],
+                "intent_metadata": IntentMetadata(
+                    intent_type=intent_type,
+                    confidence=confidence,
+                    reasoning=f"Resource modification: {intent_type}",
+                    topic_change_score=1.0,
+                    domain="resource_management",
+                    operation=None,
+                    complexity=metadata.get("complexity", "moderate"),
+                    parent_turn_id=None
+                ),
+                "question_clear": True,
+                "is_resource_modification": True,
+                "is_meta_question": False,
+                "is_irrelevant": False,
+                "pending_clarification": None,
+                "messages": [
+                    AIMessage(content=modification_display),
+                    SystemMessage(content="Resource modification request detected, routing to AgentRx")
                 ]
             }
         

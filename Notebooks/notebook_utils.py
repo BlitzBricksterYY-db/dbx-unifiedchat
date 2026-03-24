@@ -16,6 +16,7 @@ AGENT_CONFIG_KEYS = [
     "llm_endpoint_sql_synthesis_genie",
     "llm_endpoint_execution",
     "llm_endpoint_summarize",
+    "llm_endpoint_agent_rx",
     "vs_endpoint_name",
     "embedding_model",
     "lakebase_instance_name",
