@@ -211,14 +211,48 @@ def remove_space_from_index(space_id: str) -> str:
         return json.dumps({"status": "error", "message": f"Failed to remove space from index: {e}"})
 
 
+_INCREMENTAL_JOB_NAME = "multi_agent_genie_incremental_space_index"
+
+
+def _trigger_incremental_job(host: str, headers: dict, space_id: str) -> dict:
+    """Look up the incremental indexing job and trigger it with space_id."""
+    resp = requests.get(
+        f"{host}/api/2.1/jobs/list",
+        headers=headers,
+        params={"name": _INCREMENTAL_JOB_NAME, "limit": 5},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    jobs = resp.json().get("jobs", [])
+    if not jobs:
+        raise RuntimeError(
+            f"No job found with name '{_INCREMENTAL_JOB_NAME}'. "
+            f"Deploy the bundle first: databricks bundle deploy"
+        )
+
+    job_id = jobs[0]["job_id"]
+    run_resp = requests.post(
+        f"{host}/api/2.1/jobs/run-now",
+        headers=headers,
+        json={"job_id": job_id, "job_parameters": {"space_id": space_id}},
+        timeout=30,
+    )
+    run_resp.raise_for_status()
+    return {
+        "job_id": job_id,
+        "run_id": run_resp.json().get("run_id", "unknown"),
+    }
+
+
 @tool
 def add_space_to_index(space_id: str) -> str:
     """Add a Genie Space to the agent's knowledge base.
 
     Fetches the space metadata from the Genie API, writes it to the UC export
-    volume, then triggers the full ETL pipeline (export → enrich → rebuild
-    Vector Search index).  The pipeline runs asynchronously; the space will
-    become available to the Planning Agent after it completes.
+    volume, then triggers an async incremental workflow that enriches only
+    this space (with LLM-enhanced descriptions) and syncs the Vector Search
+    index.  The workflow runs asynchronously; the space will become available
+    to the Planning Agent after it completes (typically 2-5 minutes).
 
     Args:
         space_id: The Genie Space ID to add to the knowledge base.
@@ -262,20 +296,24 @@ def add_space_to_index(space_id: str) -> str:
                 f"{put_resp.text[:200]}"
             )
 
-        from .etl_trigger import trigger_full_etl_pipeline, invalidate_space_context_cache
-        etl_result = json.loads(trigger_full_etl_pipeline.invoke({}))
-        operations.append(f"ETL pipeline: {etl_result.get('status', 'unknown')} — {etl_result.get('message', '')}")
+        job_info = _trigger_incremental_job(host, headers, space_id)
+        operations.append(
+            f"Triggered incremental indexing job (run ID: {job_info['run_id']})"
+        )
 
+        from .etl_trigger import invalidate_space_context_cache
         cache_result = json.loads(invalidate_space_context_cache.invoke({}))
         operations.append(f"Cache invalidation: {cache_result.get('status', 'unknown')}")
 
         return json.dumps({
             "status": "success",
             "message": (
-                f"Space '{title}' (ID: {space_id}) exported. The ETL pipeline "
-                f"will enrich metadata and rebuild the search index."
+                f"Space '{title}' (ID: {space_id}) exported and incremental "
+                f"indexing started (run ID: {job_info['run_id']}). The space "
+                f"will be available after enrichment completes (~2-5 min)."
             ),
             "space_id": space_id,
+            "run_id": job_info["run_id"],
             "operations": operations,
         }, indent=2)
     except Exception as e:

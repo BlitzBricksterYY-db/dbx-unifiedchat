@@ -28,6 +28,7 @@ dbutils.widgets.text("source_table", os.getenv("SOURCE_TABLE", "enriched_genie_d
 dbutils.widgets.text("vs_endpoint_name", os.getenv("VS_ENDPOINT_NAME", "genie_multi_agent_vs"))
 dbutils.widgets.text("embedding_model", os.getenv("EMBEDDING_MODEL", "databricks-gte-large-en"))
 dbutils.widgets.text("pipeline_type", os.getenv("PIPELINE_TYPE", "TRIGGERED"))
+dbutils.widgets.text("sync_only", os.getenv("SYNC_ONLY", ""))
 
 catalog_name = dbutils.widgets.get("catalog_name")
 schema_name = dbutils.widgets.get("schema_name")
@@ -35,6 +36,7 @@ source_table = dbutils.widgets.get("source_table")
 vs_endpoint_name = dbutils.widgets.get("vs_endpoint_name")
 embedding_model = dbutils.widgets.get("embedding_model")
 pipeline_type = dbutils.widgets.get("pipeline_type")
+sync_only = dbutils.widgets.get("sync_only").strip().lower() in ("true", "1", "yes")
 
 # Construct fully qualified table names
 source_table_name = f"{catalog_name}.{schema_name}.{source_table}"
@@ -45,6 +47,7 @@ print(f"VS Endpoint: {vs_endpoint_name}")
 print(f"Index Name: {index_name}")
 print(f"Embedding Model: {embedding_model}")
 print(f"Pipeline Type: {pipeline_type}")
+print(f"Sync Only: {sync_only}")
 print("\nNote: Using multi-level chunks table with space_summary, table_overview, and column_detail chunks")
 
 # Ensure catalog/schema context is set (each serverless task is a separate session)
@@ -121,44 +124,54 @@ print(f"✓ Endpoint '{vs_endpoint_name}' is online and ready")
 
 # COMMAND ----------
 
-# DBTITLE 1,Create Delta Sync Vector Search Index
+# DBTITLE 1,Create or Sync Vector Search Index
 
-print(f"Creating vector search index: {index_name}")
-print(f"  Source: {source_table_name}")
-print(f"  Embedding column: searchable_content")
-print(f"  Primary key: chunk_id")
-print(f"  Embedding model: {embedding_model}")
-
-try:
-    # Check if index already exists
+if sync_only:
+    # ---- Incremental mode: trigger sync on existing index ----
+    print(f"SYNC-ONLY mode: triggering sync on existing index '{index_name}'")
     try:
-        existing_index = client.get_index(index_name=index_name)
-        print(f"Index '{index_name}' already exists. Deleting and recreating...")
-        client.delete_index(index_name=index_name)
-        time.sleep(5)  # Wait for deletion to complete
-    except Exception:
-        print(f"Index does not exist, creating new...")
-    
-    # Create new index with metadata filters
-    index = client.create_delta_sync_index(
-        endpoint_name=vs_endpoint_name,
-        source_table_name=source_table_name,
-        index_name=index_name,
-        pipeline_type=pipeline_type,
-        primary_key="chunk_id",
-        embedding_source_column="searchable_content",
-        embedding_model_endpoint_name=embedding_model
-    )
-    
-    print(f"✓ Vector search index creation initiated: {index_name}")
-    print(f"  Metadata fields available for filtering:")
-    print(f"    - chunk_type (space_summary, table_overview, column_detail)")
-    print(f"    - table_name, column_name")
-    print(f"    - is_categorical, is_temporal, is_identifier, has_value_dictionary")
-    
-except Exception as e:
-    print(f"Error creating index: {str(e)}")
-    raise
+        index = client.get_index(index_name=index_name)
+        index.sync()
+        print(f"✓ Sync triggered for index '{index_name}'")
+    except Exception as e:
+        print(f"Error triggering sync: {str(e)}")
+        raise
+else:
+    # ---- Full mode: delete existing index and recreate from scratch ----
+    print(f"Creating vector search index: {index_name}")
+    print(f"  Source: {source_table_name}")
+    print(f"  Embedding column: searchable_content")
+    print(f"  Primary key: chunk_id")
+    print(f"  Embedding model: {embedding_model}")
+
+    try:
+        try:
+            existing_index = client.get_index(index_name=index_name)
+            print(f"Index '{index_name}' already exists. Deleting and recreating...")
+            client.delete_index(index_name=index_name)
+            time.sleep(5)
+        except Exception:
+            print(f"Index does not exist, creating new...")
+        
+        index = client.create_delta_sync_index(
+            endpoint_name=vs_endpoint_name,
+            source_table_name=source_table_name,
+            index_name=index_name,
+            pipeline_type=pipeline_type,
+            primary_key="chunk_id",
+            embedding_source_column="searchable_content",
+            embedding_model_endpoint_name=embedding_model
+        )
+        
+        print(f"✓ Vector search index creation initiated: {index_name}")
+        print(f"  Metadata fields available for filtering:")
+        print(f"    - chunk_type (space_summary, table_overview, column_detail)")
+        print(f"    - table_name, column_name")
+        print(f"    - is_categorical, is_temporal, is_identifier, has_value_dictionary")
+        
+    except Exception as e:
+        print(f"Error creating index: {str(e)}")
+        raise
 
 # COMMAND ----------
 
@@ -171,17 +184,19 @@ start_time = time.time()
 while time.time() - start_time < max_wait_time:
     try:
         index_status = index.describe()
-        detailed_state = index_status.get('status', {}).get('detailed_state', '')
+        status_obj = index_status.get('status', {})
+        detailed_state = status_obj.get('detailed_state', '')
+        indexed_rows = status_obj.get('indexed_row_count', '?')
         
-        print(f"  Current state: {detailed_state}")
+        print(f"  Current state: {detailed_state} (indexed rows: {indexed_rows})")
         
         if detailed_state.startswith('ONLINE_NO_PENDING_UPDATE'):
             print(f"✓ Index is ONLINE and ready to use!")
             break
         elif 'FAILED' in detailed_state:
-            print(f"✗ Index creation failed: {detailed_state}")
+            print(f"✗ Index creation/sync failed: {detailed_state}")
             print(f"Full status: {index_status}")
-            raise Exception(f"Index creation failed: {detailed_state}")
+            raise Exception(f"Index creation/sync failed: {detailed_state}")
         
         time.sleep(10)
     except Exception as e:

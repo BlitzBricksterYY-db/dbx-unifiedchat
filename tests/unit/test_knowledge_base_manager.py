@@ -129,32 +129,70 @@ class TestAddSpaceToIndex:
     def test_success(self, _patch_helpers):
         from multi_agent.tools.knowledge_base_manager import add_space_to_index
 
-        mock_get_resp = MagicMock()
-        mock_get_resp.status_code = 200
-        mock_get_resp.json.return_value = {"title": "New Space", "space_id": "new1"}
-        mock_get_resp.raise_for_status.return_value = None
+        mock_genie_resp = MagicMock()
+        mock_genie_resp.status_code = 200
+        mock_genie_resp.json.return_value = {"title": "New Space", "space_id": "new1"}
+        mock_genie_resp.raise_for_status.return_value = None
 
         mock_put_resp = MagicMock()
         mock_put_resp.status_code = 200
 
-        etl_ok = json.dumps({"status": "success", "message": "triggered", "run_id": 42})
+        mock_jobs_list_resp = MagicMock()
+        mock_jobs_list_resp.status_code = 200
+        mock_jobs_list_resp.json.return_value = {"jobs": [{"job_id": 99}]}
+        mock_jobs_list_resp.raise_for_status.return_value = None
+
+        mock_run_resp = MagicMock()
+        mock_run_resp.status_code = 200
+        mock_run_resp.json.return_value = {"run_id": 555}
+        mock_run_resp.raise_for_status.return_value = None
+
         cache_ok = json.dumps({"status": "success", "message": "invalidated"})
 
         with patch(f"{MODULE}.requests") as mock_req, \
              patch("multi_agent.tools.genie_space_manager._get_auth", return_value=MOCK_AUTH), \
-             patch("multi_agent.tools.etl_trigger.trigger_full_etl_pipeline") as mock_etl, \
              patch("multi_agent.tools.etl_trigger.invalidate_space_context_cache") as mock_cache:
-            mock_req.get.return_value = mock_get_resp
+            mock_req.get.side_effect = [mock_genie_resp, mock_jobs_list_resp]
             mock_req.put.return_value = mock_put_resp
-            mock_etl.invoke.return_value = etl_ok
+            mock_req.post.return_value = mock_run_resp
             mock_cache.invoke.return_value = cache_ok
 
             result = json.loads(add_space_to_index.invoke({"space_id": "new1"}))
 
         assert result["status"] == "success"
         assert "New Space" in result["message"]
+        assert result["run_id"] == 555
         assert any("Exported space JSON" in op for op in result["operations"])
-        assert any("ETL pipeline" in op for op in result["operations"])
+        assert any("incremental indexing job" in op for op in result["operations"])
+        mock_req.post.assert_called_once()
+        call_json = mock_req.post.call_args.kwargs.get("json") or mock_req.post.call_args[1].get("json")
+        assert call_json["job_parameters"]["space_id"] == "new1"
+
+    def test_job_not_found(self, _patch_helpers):
+        from multi_agent.tools.knowledge_base_manager import add_space_to_index
+
+        mock_genie_resp = MagicMock()
+        mock_genie_resp.status_code = 200
+        mock_genie_resp.json.return_value = {"title": "New Space", "space_id": "new1"}
+        mock_genie_resp.raise_for_status.return_value = None
+
+        mock_put_resp = MagicMock()
+        mock_put_resp.status_code = 200
+
+        mock_jobs_list_resp = MagicMock()
+        mock_jobs_list_resp.status_code = 200
+        mock_jobs_list_resp.json.return_value = {"jobs": []}
+        mock_jobs_list_resp.raise_for_status.return_value = None
+
+        with patch(f"{MODULE}.requests") as mock_req, \
+             patch("multi_agent.tools.genie_space_manager._get_auth", return_value=MOCK_AUTH):
+            mock_req.get.side_effect = [mock_genie_resp, mock_jobs_list_resp]
+            mock_req.put.return_value = mock_put_resp
+
+            result = json.loads(add_space_to_index.invoke({"space_id": "new1"}))
+
+        assert result["status"] == "error"
+        assert "No job found" in result["message"]
 
     def test_invalid_space_id(self, _patch_helpers):
         from multi_agent.tools.knowledge_base_manager import add_space_to_index

@@ -36,7 +36,7 @@ from ..core.state import (
 
 # Space context cache (TTL-based)
 _space_context_cache = {"data": None, "timestamp": None, "table_name": None}
-_SPACE_CONTEXT_CACHE_TTL = timedelta(minutes=30)
+_SPACE_CONTEXT_CACHE_TTL = timedelta(minutes=2)
 
 # LLM connection pool (reuses connections across requests)
 _llm_connection_pool: Dict[str, ChatDatabricks] = {}
