@@ -330,6 +330,7 @@ export function Chat({
 
   const [searchParams] = useSearchParams();
   const query = searchParams.get('query');
+  const selectedTurnId = searchParams.get('turn');
 
   const [hasAppendedQuery, setHasAppendedQuery] = useState(false);
 
@@ -354,6 +355,7 @@ export function Chat({
         <Messages
           status={status}
           messages={messages}
+          selectedTurnId={selectedTurnId}
           setMessages={setMessages}
           addToolApprovalResponse={addToolApprovalResponse}
           regenerate={regenerate}

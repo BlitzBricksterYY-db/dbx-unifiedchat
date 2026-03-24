@@ -15,16 +15,40 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from './ui/dropdown-menu';
-import { memo } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { useChatVisibility } from '@/hooks/use-chat-visibility';
+import { useChatData } from '@/hooks/useChatData';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from './ui/collapsible';
 import {
   CircleCheck,
+  ChevronDownIcon,
   GlobeIcon,
+  LoaderIcon,
   LockIcon,
   MoreHorizontalIcon,
   ShareIcon,
   TrashIcon,
 } from 'lucide-react';
+import type { ChatMessage } from '@chat-template/core';
+
+function getTurnLabel(message: ChatMessage, index: number) {
+  const text = message.parts
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text.trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ');
+
+  if (!text) {
+    return `Turn ${index + 1}`;
+  }
+
+  return text.length > 48 ? `${text.slice(0, 45)}...` : text;
+}
 
 const PureChatItem = ({
   chat,
@@ -41,6 +65,19 @@ const PureChatItem = ({
     chatId: chat.id,
     initialVisibilityType: chat.visibility,
   });
+  const { chatData, isLoading } = useChatData(chat.id, isActive);
+  const [isExpanded, setIsExpanded] = useState(isActive);
+  const turnMessages = useMemo(
+    () =>
+      (chatData?.messages ?? []).filter((message) => message.role === 'user'),
+    [chatData?.messages],
+  );
+
+  useEffect(() => {
+    if (isActive) {
+      setIsExpanded(true);
+    }
+  }, [isActive]);
 
   return (
     <SidebarMenuItem data-testid="chat-history-item">
@@ -107,6 +144,48 @@ const PureChatItem = ({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      {isActive && (isLoading || turnMessages.length > 0) && (
+        <Collapsible open={isExpanded} onOpenChange={setIsExpanded}>
+          <CollapsibleTrigger asChild>
+            <button
+              type="button"
+              className="mt-1 flex w-full items-center gap-1 px-2 text-sidebar-foreground/70 text-xs transition-colors hover:text-sidebar-foreground"
+            >
+              <ChevronDownIcon
+                className={`size-3 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+              />
+              <span>
+                {isLoading ? 'Loading turns...' : `Turns (${turnMessages.length})`}
+              </span>
+            </button>
+          </CollapsibleTrigger>
+
+          <CollapsibleContent className="mt-1">
+            <div className="ml-3 border-sidebar-border/60 border-l pl-2">
+              {isLoading ? (
+                <div className="flex items-center gap-2 px-2 py-1 text-sidebar-foreground/60 text-xs">
+                  <LoaderIcon className="size-3 animate-spin" />
+                  <span>Loading turns...</span>
+                </div>
+              ) : (
+                turnMessages.map((message, index) => (
+                  <Link
+                    key={message.id}
+                    to={`/chat/${chat.id}?turn=${message.id}`}
+                    onClick={() => setOpenMobile(false)}
+                    className="flex w-full rounded-md px-2 py-1 text-left text-sidebar-foreground/80 text-xs transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                  >
+                    <span className="truncate">
+                      {index + 1}. {getTurnLabel(message, index)}
+                    </span>
+                  </Link>
+                ))
+              )}
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
+      )}
     </SidebarMenuItem>
   );
 };
