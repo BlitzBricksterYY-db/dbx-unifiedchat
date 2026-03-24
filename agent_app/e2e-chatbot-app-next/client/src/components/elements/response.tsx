@@ -49,8 +49,12 @@ type TableDownloadPayload = {
   columns: string[];
   rows: Array<Record<string, unknown>>;
   totalRows?: number;
+  previewRowCount?: number;
+  isPreview?: boolean;
   filename?: string;
   title?: string;
+  sql?: string;
+  sqlFilename?: string;
 };
 
 function decodeTableFromBase64(b64: string): TableDownloadPayload | null {
@@ -240,8 +244,12 @@ function EChartsCodeBlock(props: Record<string, unknown>) {
               columns: payload.columns,
               rows: payload.rows,
               totalRows: payload.totalRows,
+              previewRowCount: payload.previewRowCount,
+              isPreview: payload.isPreview,
               filename: payload.filename,
               title: payload.title,
+              sql: payload.sql,
+              sqlFilename: payload.sqlFilename,
             }}
           />
         );

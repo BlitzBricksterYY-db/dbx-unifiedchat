@@ -557,6 +557,7 @@ def summarize_node(state: AgentState) -> dict:
 
     # --- 3. Downloadable paginated tables (rendered after charts) ---
     import base64
+    from .summarize_agent import ResultSummarizeAgent
     for entry in artifact_entries:
         idx = entry["index"]
         result_item = entry["result"]
@@ -567,12 +568,22 @@ def summarize_node(state: AgentState) -> dict:
         if not columns or not data:
             continue
 
+        preview_rows = data[:MAX_PREVIEW_ROWS]
+        preview_row_count = len(preview_rows)
+        source_row_count = result_item.get("row_count") or len(data)
         table_payload = {
             "columns": columns,
-            "rows": data[:MAX_PREVIEW_ROWS],
-            "totalRows": result_item.get("row_count", len(data)),
+            "rows": preview_rows,
+            "totalRows": preview_row_count,
+            "previewRowCount": preview_row_count,
+            "isPreview": source_row_count > preview_row_count,
             "filename": f"results_{idx + 1}.csv" if len(execution_results) > 1 else "results.csv",
             "title": entry.get("label"),
+            "sql": ResultSummarizeAgent.resolve_sql_download_text(entry),
+            "sqlFilename": ResultSummarizeAgent.get_sql_download_filename(
+                entry,
+                total_entries=len(artifact_entries),
+            ),
         }
         table_json = _json.dumps(table_payload, default=str)
         table_b64 = base64.b64encode(table_json.encode()).decode()
@@ -596,8 +607,10 @@ def summarize_node(state: AgentState) -> dict:
         has_accordion = True
 
     if artifact_entries:
-        from .summarize_agent import ResultSummarizeAgent
-        sql_block = ResultSummarizeAgent.format_sql_download(artifact_entries)
+        sql_block = ResultSummarizeAgent.format_sql_download(
+            artifact_entries,
+            total_entries=len(artifact_entries),
+        )
         summary += sql_block
         writer({"type": "text_delta", "content": sql_block})
 

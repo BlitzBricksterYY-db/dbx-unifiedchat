@@ -25,6 +25,7 @@ const proxyTarget = "http://localhost:3001";
 export default defineConfig({
   plugins: [react()],
   resolve: {
+    extensions: [".tsx", ".ts", ".jsx", ".js", ".mjs", ".json"],
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },

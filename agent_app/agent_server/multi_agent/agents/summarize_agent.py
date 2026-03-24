@@ -84,27 +84,24 @@ class ResultSummarizeAgent:
         return summary
     
     @staticmethod
-    def format_sql_download(artifact_entries: List[dict]) -> str:
+    def format_sql_download(
+        artifact_entries: List[dict],
+        total_entries: int | None = None,
+    ) -> str:
         """Collapsible SQL section with small data-URI download link."""
         if not artifact_entries:
             return ""
         import base64
 
         parts: list[str] = ['\n\n<details name="sql-accordion"><summary>Show SQL</summary>\n\n<div class="accordion-content">\n\n']
-        for idx, entry in enumerate(artifact_entries):
-            sql = entry.get("sql") or ""
+        total_entries = total_entries or len(artifact_entries)
+        for entry in artifact_entries:
+            sql = ResultSummarizeAgent.resolve_sql_download_text(entry)
             label = entry.get("label") or ""
-            status = entry.get("status", "success")
-            if not sql:
-                if status == "skipped":
-                    sql = (
-                        "-- No SQL generated for this planned query.\n"
-                        f"-- {entry.get('skip_reason', 'Skipped because the question was already covered.')}"
-                    )
-                else:
-                    sql = "-- No SQL captured for this query."
-
-            fname = f"query{'_' + str(idx + 1) if len(artifact_entries) > 1 else ''}.sql"
+            fname = ResultSummarizeAgent.get_sql_download_filename(
+                entry,
+                total_entries=total_entries,
+            )
             encoded = base64.b64encode(sql.encode()).decode()
             # Use a custom language tag so the frontend renders copy+download buttons.
             # Format: ```sql-download:filename:base64data\n{sql}\n```
@@ -113,6 +110,26 @@ class ResultSummarizeAgent:
                          f"```sql-download:{meta}\n{sql}\n```\n")
         parts.append("\n\n</div>\n</details>\n")
         return "".join(parts)
+
+    @staticmethod
+    def resolve_sql_download_text(entry: dict) -> str:
+        sql = entry.get("sql") or ""
+        status = entry.get("status", "success")
+        if sql:
+            return sql
+        if status == "skipped":
+            return (
+                "-- No SQL generated for this planned query.\n"
+                f"-- {entry.get('skip_reason', 'Skipped because the question was already covered.')}"
+            )
+        return "-- No SQL captured for this query."
+
+    @staticmethod
+    def get_sql_download_filename(entry: dict, total_entries: int = 1) -> str:
+        entry_index = entry.get("index")
+        if isinstance(entry_index, int) and total_entries > 1:
+            return f"query_{entry_index + 1}.sql"
+        return "query.sql"
 
     @staticmethod
     def _normalize_markdown_block(text: str) -> str:
