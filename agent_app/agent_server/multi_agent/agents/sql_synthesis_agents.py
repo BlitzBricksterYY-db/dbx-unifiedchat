@@ -38,6 +38,7 @@ Example usage:
     sql_result = genie_agent(execution_plan)
 """
 
+import contextvars
 import json
 import re
 from typing import Dict, List, Any, Optional
@@ -598,16 +599,13 @@ class SQLSynthesisGenieAgent:
                 if not route_plan:
                     return {"error": "No valid parallel tasks to execute"}
                 
-                # Build dynamic parallel tasks - each task invokes the corresponding tool's func
-                # Call the underlying function directly with individual arguments
                 parallel_tasks = {}
                 for space_id, question in route_plan.items():
                     tool = space_id_to_tool[space_id]
-                    # Create a lambda that calls the tool's func with individual kwargs
-                    # Use default argument to capture values properly in closure
+                    ctx = contextvars.copy_context()
                     parallel_tasks[space_id] = RunnableLambda(
-                        lambda inp, sid=space_id, t=tool: t.func(
-                            question=inp[sid], conversation_id=None
+                        lambda inp, sid=space_id, t=tool, c=ctx: c.run(
+                            t.func, question=inp[sid], conversation_id=None
                         )
                     )
                 
@@ -809,14 +807,14 @@ OUTPUT REQUIREMENTS:
                         space_id_to_tool[space_id] = tool
                         break
         
-        # Build parallel tasks that call tool.func() directly with individual arguments
         parallel_tasks = {}
         for space_id, question in genie_route_plan.items():
             if space_id in space_id_to_tool:
                 tool = space_id_to_tool[space_id]
+                ctx = contextvars.copy_context()
                 parallel_tasks[space_id] = RunnableLambda(
-                    lambda inp, sid=space_id, t=tool: t.func(
-                        question=inp[sid], conversation_id=None
+                    lambda inp, sid=space_id, t=tool, c=ctx: c.run(
+                        t.func, question=inp[sid], conversation_id=None
                     )
                 )
             else:
