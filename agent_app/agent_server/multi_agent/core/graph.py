@@ -20,133 +20,22 @@ from ..agents.sql_execution import sql_execution_node
 from ..agents.summarize import summarize_node
 
 
-def _truncate(value: Any, max_len: int = 2000) -> Any:
-    """Truncate large string values so spans stay readable."""
-    if isinstance(value, str) and len(value) > max_len:
-        return value[:max_len] + f"... ({len(value)} chars total)"
-    return value
-
-
 def _trace_state_snapshot(payload: Any) -> dict[str, Any]:
-    """Capture a rich state snapshot for trace inputs/outputs.
+    """Capture the full agent state for trace inputs/outputs.
 
-    Designed to surface the fields that matter most when debugging a
-    chat-turn inside the MLflow trace UI.
+    Messages are excluded (already captured by LangChain autologging)
+    and replaced with a count to avoid duplication.
     """
     if not isinstance(payload, dict):
         return {"payload_type": type(payload).__name__}
 
     snapshot: dict[str, Any] = {}
-
-    # Scalar flags / identifiers
-    for key in (
-        "original_query",
-        "execution_mode",
-        "force_synthesis_route",
-        "question_clear",
-        "is_meta_question",
-        "is_irrelevant",
-        "next_agent",
-        "has_sql",
-        "thread_id",
-        "user_id",
-    ):
-        value = payload.get(key)
-        if value is not None:
+    for key, value in payload.items():
+        if key == "messages":
+            if isinstance(value, list):
+                snapshot["message_count"] = len(value)
+        else:
             snapshot[key] = value
-
-    # Turn context
-    current_turn = payload.get("current_turn")
-    if isinstance(current_turn, dict):
-        snapshot["current_turn"] = {
-            k: current_turn[k]
-            for k in ("turn_id", "query", "intent_type", "parent_turn_id", "context_summary")
-            if k in current_turn and current_turn[k] is not None
-        }
-
-    # Intent metadata
-    intent_metadata = payload.get("intent_metadata")
-    if isinstance(intent_metadata, dict):
-        snapshot["intent_metadata"] = {
-            k: intent_metadata[k]
-            for k in ("intent_type", "confidence", "reasoning", "domain", "complexity")
-            if k in intent_metadata and intent_metadata[k] is not None
-        }
-
-    # Planning outputs
-    plan = payload.get("plan")
-    if isinstance(plan, dict):
-        snapshot["plan"] = {
-            k: plan[k]
-            for k in ("sub_questions", "requires_join", "join_strategy", "execution_plan", "relevant_space_ids")
-            if k in plan and plan[k] is not None
-        }
-    for key in ("sub_questions", "relevant_space_ids", "execution_plan", "join_strategy"):
-        value = payload.get(key)
-        if value is not None and key not in snapshot.get("plan", {}):
-            snapshot[key] = value
-
-    # SQL synthesis
-    sql_query = payload.get("sql_query")
-    if sql_query:
-        snapshot["sql_query"] = _truncate(sql_query)
-    sql_queries = payload.get("sql_queries")
-    if isinstance(sql_queries, list) and sql_queries:
-        snapshot["sql_queries"] = [_truncate(q) for q in sql_queries]
-    sql_explanation = payload.get("sql_synthesis_explanation")
-    if sql_explanation:
-        snapshot["sql_synthesis_explanation"] = _truncate(sql_explanation)
-    synthesis_error = payload.get("synthesis_error")
-    if synthesis_error:
-        snapshot["synthesis_error"] = _truncate(synthesis_error)
-
-    # Execution results
-    execution_results = payload.get("execution_results")
-    if isinstance(execution_results, list) and execution_results:
-        snapshot["execution_results"] = [
-            {
-                "status": r.get("status"),
-                "success": r.get("success"),
-                "row_count": r.get("row_count"),
-                "columns": r.get("columns"),
-                "error": _truncate(r.get("error")) if r.get("error") else None,
-                "sql": _truncate(r.get("sql")) if r.get("sql") else None,
-            }
-            for r in execution_results
-        ]
-    execution_result = payload.get("execution_result")
-    if isinstance(execution_result, dict) and not execution_results:
-        snapshot["execution_result"] = {
-            "status": execution_result.get("status"),
-            "success": execution_result.get("success"),
-            "row_count": execution_result.get("row_count"),
-            "columns": execution_result.get("columns"),
-            "error": _truncate(execution_result.get("error")) if execution_result.get("error") else None,
-        }
-    execution_error = payload.get("execution_error")
-    if execution_error:
-        snapshot["execution_error"] = _truncate(execution_error)
-
-    # Final summary
-    final_summary = payload.get("final_summary")
-    if final_summary:
-        snapshot["final_summary"] = _truncate(final_summary, max_len=4000)
-
-    # Clarification
-    pending_clarification = payload.get("pending_clarification")
-    if isinstance(pending_clarification, dict):
-        snapshot["pending_clarification"] = pending_clarification
-
-    # Meta-answer
-    meta_answer = payload.get("meta_answer")
-    if meta_answer:
-        snapshot["meta_answer"] = _truncate(meta_answer)
-
-    # Messages count (don't dump full messages -- too large)
-    messages = payload.get("messages")
-    if isinstance(messages, list):
-        snapshot["message_count"] = len(messages)
-
     return snapshot
 
 
