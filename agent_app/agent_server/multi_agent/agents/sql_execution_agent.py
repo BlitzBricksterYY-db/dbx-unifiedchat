@@ -327,11 +327,10 @@ class SQLExecutionAgent:
         print(f"⚡ Executing {len(sql_queries)} queries in parallel (max_workers={min(len(sql_queries), max_workers)})")
         
         results = [None] * len(sql_queries)  # Pre-allocate to preserve ordering
-        trace_ctx = contextvars.copy_context()
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(sql_queries), max_workers)) as executor:
             future_to_idx = {
-                executor.submit(trace_ctx.run, self.execute_sql, query, max_rows, return_format): idx
+                executor.submit(contextvars.copy_context().run, self.execute_sql, query, max_rows, return_format): idx
                 for idx, query in enumerate(sql_queries)
             }
             

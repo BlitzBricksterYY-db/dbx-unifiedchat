@@ -432,7 +432,6 @@ def summarize_node(state: AgentState) -> dict:
             enrichment_pool = concurrent.futures.ThreadPoolExecutor(
                 max_workers=min(4, len(enrichable_results))
             )
-            trace_ctx = contextvars.copy_context()
             for idx, result_item in enrichable_results:
                 entry = artifact_entries[idx] if idx < len(artifact_entries) else {}
                 section_title = (
@@ -445,7 +444,7 @@ def summarize_node(state: AgentState) -> dict:
                         idx,
                         section_title,
                         enrichment_pool.submit(
-                            trace_ctx.run,
+                            contextvars.copy_context().run,
                             enrich_codes,
                             result_item["columns"],
                             result_item["result"],
@@ -495,13 +494,12 @@ def summarize_node(state: AgentState) -> dict:
             chart_pool = concurrent.futures.ThreadPoolExecutor(
                 max_workers=min(4, len(chartable_entries))
             )
-            chart_trace_ctx = contextvars.copy_context()
             for entry in chartable_entries:
                 result_item = entry["result"]
                 chart_futures[entry["index"]] = (
                     entry,
                     chart_pool.submit(
-                        chart_trace_ctx.run,
+                        contextvars.copy_context().run,
                         chart_gen.generate_chart,
                         result_item.get("columns", []),
                         result_item.get("result", []),
