@@ -47,6 +47,23 @@ class IntentMetadata(TypedDict):
     parent_turn_id: Optional[str]
 
 
+class QueryExecutionResult(TypedDict, total=False):
+    """Normalized execution result metadata used by summary/rendering layers."""
+    status: str
+    success: bool
+    sql: str
+    result: Any
+    row_count: int
+    columns: List[str]
+    error: str
+    error_type: str
+    query_number: int
+    query_label: Optional[str]
+    skip_reason: Optional[str]
+    sql_explanation: Optional[str]
+    row_grain_hint: Optional[str]
+
+
 class AgentState(TypedDict):
     """Simplified agent state using turn-based context management."""
     # Turn Management
@@ -85,12 +102,13 @@ class AgentState(TypedDict):
     sql_queries: Optional[List[str]]  # Multi-part question: list of all SQL queries
     sql_query_labels: Optional[List[str]]  # Multi-part question: per-query labels
     sql_synthesis_explanation: Optional[str]
+    sql_synthesis_explanations: Optional[List[Dict[str, Any]]]
     synthesis_error: Optional[str]
     has_sql: Optional[bool]  # Whether SQL was successfully extracted
     
     # Execution
-    execution_result: Optional[Dict[str, Any]]
-    execution_results: Optional[List[Dict[str, Any]]]  # Multi-part question: list of all execution results
+    execution_result: Optional[QueryExecutionResult]
+    execution_results: Optional[List[QueryExecutionResult]]  # Multi-part question: list of all execution results
     execution_error: Optional[str]
     
     # Summary
@@ -104,6 +122,22 @@ class AgentState(TypedDict):
     # Control Flow
     next_agent: Optional[str]
     messages: Annotated[List, operator.add]
+    
+    # Retry / Sequential loop
+    sql_retry_count: Optional[int]
+    sql_retry_max: Optional[int]
+    sql_retry_feedback: Optional[str]
+    loop_reason: Optional[str]  # "retry" | "sequential_next" | None
+    preserved_results: Optional[List[QueryExecutionResult]]
+    
+    # Sequential execution mode
+    execution_mode: Optional[str]  # "parallel" | "sequential"
+    sequential_step: Optional[int]
+    total_sub_questions: Optional[int]
+    
+    # UI override
+    force_synthesis_route: Optional[str]  # "auto" | "table_route" | "genie_route"
+    join_strategy_route: Optional[str]  # stores the synthesis node name chosen by planning
 
 
 # Helper Functions
@@ -215,6 +249,7 @@ def get_reset_state_template() -> Dict[str, Any]:
         "sql_queries": None,
         "sql_query_labels": None,
         "sql_synthesis_explanation": None,
+        "sql_synthesis_explanations": [],
         "synthesis_error": None,
         "has_sql": None,
         
@@ -225,6 +260,20 @@ def get_reset_state_template() -> Dict[str, Any]:
         
         # Summary (per-query)
         "final_summary": None,
+        
+        # Retry / Sequential loop (per-query)
+        "sql_retry_count": 0,
+        "sql_retry_max": 1,
+        "sql_retry_feedback": None,
+        "loop_reason": None,
+        "preserved_results": [],
+        
+        # Sequential execution mode (per-query)
+        "sequential_step": 0,
+        "total_sub_questions": 0,
+        
+        # Routing memory (per-query)
+        "join_strategy_route": None,
     }
 
 

@@ -62,10 +62,12 @@ class ResultSummarizeAgent:
         
         return json.dumps(obj, indent=indent, default=default_handler)
     
-    def generate_summary(self, state: AgentState) -> str:
+    def generate_summary(self, state: AgentState, writer=None) -> str:
         """
         Generate a clean natural language summary (no SQL, no workflow sections).
         Chart blocks and SQL downloads are appended by summarize_node().
+        When *writer* is provided, each token chunk is emitted as a text_delta
+        custom event for real-time streaming to the frontend.
         """
         summary_prompt = self._build_summary_prompt(state)
 
@@ -74,29 +76,184 @@ class ResultSummarizeAgent:
         for chunk in self.llm.stream(summary_prompt):
             if chunk.content:
                 summary += chunk.content
+                if writer:
+                    writer({"type": "text_delta", "content": chunk.content})
 
         summary = summary.strip()
         print(f"✓ Summary stream complete ({len(summary)} chars)")
         return summary
     
     @staticmethod
-    def format_sql_download(sql_queries: List[str], labels: List[str] | None = None) -> str:
+    def format_sql_download(
+        artifact_entries: List[dict],
+        total_entries: int | None = None,
+    ) -> str:
         """Collapsible SQL section with small data-URI download link."""
-        if not sql_queries:
+        if not artifact_entries:
             return ""
         import base64
 
-        parts: list[str] = ["\n\n---\n\n<details><summary>Show SQL</summary>\n"]
-        for idx, sql in enumerate(sql_queries):
-            if labels and idx < len(labels) and labels[idx]:
-                parts.append(f"\n**{labels[idx]}**\n")
-            parts.append(f"\n```sql\n{sql}\n```\n")
+        parts: list[str] = ['\n\n<details name="sql-accordion"><summary>Show SQL</summary>\n\n<div class="accordion-content">\n\n']
+        total_entries = total_entries or len(artifact_entries)
+        for entry in artifact_entries:
+            sql = ResultSummarizeAgent.resolve_sql_download_text(entry)
+            label = entry.get("label") or ""
+            fname = ResultSummarizeAgent.get_sql_download_filename(
+                entry,
+                total_entries=total_entries,
+            )
             encoded = base64.b64encode(sql.encode()).decode()
-            fname = f"query{'_' + str(idx + 1) if len(sql_queries) > 1 else ''}.sql"
-            parts.append(f'\n<a href="data:text/sql;base64,{encoded}" download="{fname}">Download {fname}</a>\n')
-        parts.append("\n</details>\n")
+            # Use a custom language tag so the frontend renders copy+download buttons.
+            # Format: ```sql-download:filename:base64data\n{sql}\n```
+            meta = f"{fname}:{encoded}"
+            parts.append(f"\n{'**' + label + '**' + chr(10) if label else ''}"
+                         f"```sql-download:{meta}\n{sql}\n```\n")
+        parts.append("\n\n</div>\n</details>\n")
         return "".join(parts)
-    
+
+    @staticmethod
+    def resolve_sql_download_text(entry: dict) -> str:
+        sql = entry.get("sql") or ""
+        status = entry.get("status", "success")
+        if sql:
+            return sql
+        if status == "skipped":
+            return (
+                "-- No SQL generated for this planned query.\n"
+                f"-- {entry.get('skip_reason', 'Skipped because the question was already covered.')}"
+            )
+        return "-- No SQL captured for this query."
+
+    @staticmethod
+    def get_sql_download_filename(entry: dict, total_entries: int = 1) -> str:
+        entry_index = entry.get("index")
+        if isinstance(entry_index, int) and total_entries > 1:
+            return f"query_{entry_index + 1}.sql"
+        return "query.sql"
+
+    @staticmethod
+    def _normalize_markdown_block(text: str) -> str:
+        import re
+
+        normalized = (text or "").replace("\r\n", "\n").strip()
+        normalized = re.sub(r"^\s*---\s*$", "", normalized, flags=re.MULTILINE)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        normalized = re.sub(r"[ \t]+\n", "\n", normalized)
+        return normalized.strip()
+
+    @staticmethod
+    def _format_attempt_context(entry: dict, attempt_number: int) -> str:
+        route = entry.get("route", "unknown")
+        loop_reason = entry.get("loop_reason")
+        retry_count = entry.get("retry_count", 0)
+        sequential_step = entry.get("sequential_step", 0)
+        synthesis_error = entry.get("synthesis_error")
+        query_labels = entry.get("query_labels") or []
+
+        route_label = "Table Route" if route == "table" else "Genie Route" if route == "genie" else route.title()
+        mode_label = "Initial synthesis"
+        if loop_reason == "retry":
+            mode_label = f"Retry attempt {retry_count + 1}"
+        elif loop_reason == "sequential_next":
+            mode_label = f"Sequential step {sequential_step + 1}"
+
+        lines = [f"### Attempt {attempt_number}", "", f"- **Route:** {route_label}", f"- **Context:** {mode_label}"]
+        if query_labels:
+            lines.append(f"- **Queries:** {', '.join(label for label in query_labels if label)}")
+        if synthesis_error:
+            lines.append(f"- **Status:** Synthesis issue detected")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_artifact_context(entry: dict, query_number: int) -> str:
+        label = entry.get("label") or f"Query {query_number}"
+        status = entry.get("status", "success")
+        lines = [f"### Query {query_number} — {label}", ""]
+        if status == "skipped":
+            lines.append("- **Status:** Skipped / already covered")
+        elif status == "failed":
+            lines.append("- **Status:** Failed")
+        else:
+            lines.append("- **Status:** Executed")
+
+        skip_reason = entry.get("skip_reason")
+        if skip_reason:
+            lines.append(f"- **Reason:** {skip_reason}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_sql_explanation(
+        artifact_entries: List[dict] | None = None,
+    ) -> str:
+        """Collapsible SQL explanation section with clean markdown formatting."""
+        entries = list(artifact_entries or [])
+        relevant = [e for e in entries if e.get("sql_explanation") or e.get("skip_reason")]
+        if not relevant:
+            return ""
+
+        normalize = ResultSummarizeAgent._normalize_markdown_block
+        format_ctx = ResultSummarizeAgent._format_artifact_context
+
+        parts: list[str] = [
+            '\n\n<details name="sql-accordion"><summary>SQL Explanation</summary>'
+            '\n\n<div class="accordion-content">\n\n'
+        ]
+
+        if len(relevant) > 1:
+            per_entry_text = [
+                normalize(e.get("sql_explanation") or e.get("skip_reason") or "")
+                for e in relevant
+            ]
+            from collections import Counter
+            counts = Counter(t for t in per_entry_text if t)
+            shared_texts = {t for t, c in counts.items() if c > 1}
+
+            if shared_texts:
+                for shared in shared_texts:
+                    parts.append(shared)
+                    parts.append("\n\n")
+                for idx, (entry, text) in enumerate(zip(relevant, per_entry_text), 1):
+                    parts.append(format_ctx(entry, idx))
+                    parts.append("\n\n")
+                    if text and text not in shared_texts:
+                        parts.append(text)
+                        parts.append("\n\n")
+            else:
+                for idx, (entry, text) in enumerate(zip(relevant, per_entry_text), 1):
+                    parts.append(format_ctx(entry, idx))
+                    parts.append("\n\n")
+                    if text:
+                        parts.append(text)
+                        parts.append("\n\n")
+        else:
+            entry = relevant[0]
+            parts.append(format_ctx(entry, 1))
+            parts.append("\n\n")
+            explanation = entry.get("sql_explanation") or entry.get("skip_reason") or ""
+            normalized = normalize(explanation)
+            if normalized:
+                parts.append(normalized)
+                parts.append("\n\n")
+
+        parts.append("\n\n</div>\n</details>\n")
+        return "".join(parts)
+
+    @staticmethod
+    def format_plan_executed(plan: dict) -> str:
+        """Collapsible plan section with JSON code block (copy + download)."""
+        if not plan:
+            return ""
+        import base64
+
+        plan_json = ResultSummarizeAgent._safe_json_dumps(plan, indent=2)
+        encoded = base64.b64encode(plan_json.encode()).decode()
+        meta = f"plan.json:{encoded}"
+        return (
+            '\n\n<details name="sql-accordion"><summary>Plan Executed</summary>\n\n<div class="accordion-content">\n\n'
+            f"```json-download:{meta}\n{plan_json}\n```\n"
+            "\n</div>\n</details>\n"
+        )
+
     def _build_summary_prompt(self, state: AgentState) -> str:
         """Build a prompt that produces a clean narrative summary.
 
@@ -125,19 +282,39 @@ class ResultSummarizeAgent:
         if execution_error:
             prompt += f"**Execution Failed:** {execution_error}\n"
 
-        sql_queries = state.get('sql_queries', [])
-        if not sql_queries and state.get('sql_query'):
-            sql_queries = [state['sql_query']]
-        execution_results = state.get('execution_results', [])
+        execution_results = state.get('execution_results') or []
         if not execution_results and state.get('execution_result'):
             execution_results = [state['execution_result']]
 
-        MAX_PREVIEW = 20
-        MAX_JSON = 2000
+        MAX_PREVIEW = 200
+        MAX_JSON = 20000
+        successful_results = [result for result in execution_results if result and result.get("success")]
+        skipped_results = [result for result in execution_results if result and result.get("status") == "skipped"]
+        failed_results = [
+            result
+            for result in execution_results
+            if result and not result.get("success") and result.get("status") != "skipped"
+        ]
+
+        prompt += (
+            f"**Result sets:** {len(execution_results)} total, "
+            f"{len(successful_results)} successful, "
+            f"{len(skipped_results)} skipped, "
+            f"{len(failed_results)} failed\n"
+        )
 
         for i, result in enumerate(execution_results):
+            status = result.get("status")
+            label = result.get("query_label")
+            label_suffix = f" — {label}" if label else ""
+            if status == "skipped":
+                prompt += (
+                    f"\n**Query {i+1}{label_suffix}:** Skipped — "
+                    f"{result.get('skip_reason', 'already covered by prior results')}\n"
+                )
+                continue
             if not result or not result.get('success'):
-                prompt += f"\n**Query {i+1}:** Failed — {result.get('error', 'unknown')}\n"
+                prompt += f"\n**Query {i+1}{label_suffix}:** Failed — {result.get('error', 'unknown')}\n"
                 continue
             row_count = result.get('row_count', 0)
             columns = result.get('columns', [])
@@ -146,14 +323,8 @@ class ResultSummarizeAgent:
             preview_json = self._safe_json_dumps(preview, indent=2)
             if len(preview_json) > MAX_JSON:
                 preview_json = preview_json[:MAX_JSON] + "\n..."
-
-            label = ""
-            labels = state.get('sql_query_labels', [])
-            if labels and i < len(labels):
-                label = f" — {labels[i]}"
-
             prompt += f"""
-**Query {i+1}{label} Result:** {row_count} rows, columns: {', '.join(columns[:12])}{'...' if len(columns) > 12 else ''}
+**Query {i+1}{label_suffix} Result:** {row_count} rows, columns: {', '.join(columns[:12])}{'...' if len(columns) > 12 else ''}
 Data preview:
 {preview_json}
 """
@@ -162,15 +333,19 @@ Data preview:
 **Instructions — follow strictly:**
 1. Start with a descriptive ## title for the analysis
 2. Write a concise narrative answering the user's question with formatted numbers ($X,XXX,XXX.XX for currency, commas for counts)
-3. Present results in a well-formatted markdown table (include ALL data rows if <=30, otherwise top 20)
-4. If columns contain raw codes (ICD, CPT, etc.) without descriptions, add a description column with human-readable meanings
-5. Add a ### Key Insights section with 2-4 bullet points
+3. If there is more than one result set, create one `###` subsection per result set in query order. Use the query label when available.
+4. For each successful result set, include a markdown table for that result set only. If the result has <=30 rows, include all rows. Otherwise include the top 20 most relevant rows and keep it clearly labeled as a preview.
+5. Keep result sets separate. Do not merge multiple result sets into one markdown table.
+6. **IMPORTANT — Safe inference:** Only make claims directly supported by the provided rows/columns. If a result may contain repeated entities (for example multiple coverage rows per member, multiple benefit types per patient, or repeated diagnosis rows), do NOT infer distinct member counts, payer counts, or cohort composition unless the result explicitly includes distinct counts.
+7. **IMPORTANT — Code annotation:** If ANY column contains coded identifiers rather than plain text (e.g., NDC drug codes, ICD/CPT/HCPCS medical codes, NPI numbers, taxonomy codes, NAICS/SIC industry codes, MCC merchant codes, CUSIP/ISIN/ticker symbols, FIPS/ZIP codes, currency codes, tax form codes, GL account codes, or ANY other standardized code system), you MUST add a "Description" column with the human-readable name/meaning for each code. Use your domain knowledge to decode every code. Never present a table with coded columns that lack descriptions. If you cannot confidently decode a specific value, simply write "Unknown" or leave it blank. Do not write long disclaimers.
+8. Add a ### Key Insights section with 2-4 bullet points grounded in the result sets
 
 **DO NOT include:**
 - SQL queries or code blocks (those are shown separately)
 - Workflow/planning details
 - Emoji prefixes
 - JSON dumps
+- Statements about how many charts, downloadable tables, or accordion sections are shown; those are rendered separately
 """
         return prompt
     

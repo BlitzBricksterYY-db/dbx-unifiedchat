@@ -29,6 +29,8 @@ Example usage:
 """
 
 import json
+import threading
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Callable
 from functools import wraps
@@ -44,9 +46,51 @@ from ..core.state import AgentState
 # ==============================================================================
 
 # Vector search result cache (for refinement queries)
-# Format: {thread_id: {"query": str, "results": List, "timestamp": datetime}}
-_vector_search_cache: Dict[str, Dict[str, Any]] = {}
-_VECTOR_SEARCH_CACHE_TTL = timedelta(minutes=10)  # Shorter TTL for conversation-specific cache
+# Bounded OrderedDict: evicts expired + oldest entries when full.
+_vector_search_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
+_vector_search_cache_lock = threading.Lock()
+_VECTOR_SEARCH_CACHE_TTL = timedelta(minutes=10)
+_VS_CACHE_MAX_SIZE = 200
+
+
+def _vs_cache_evict_expired() -> None:
+    """Remove all expired entries. Caller must hold _vector_search_cache_lock."""
+    now = datetime.now()
+    expired = [
+        k for k, v in _vector_search_cache.items()
+        if now - v["timestamp"] >= _VECTOR_SEARCH_CACHE_TTL
+    ]
+    for k in expired:
+        del _vector_search_cache[k]
+
+
+def _vs_cache_get(thread_id: str) -> Optional[Dict[str, Any]]:
+    """Thread-safe TTL-aware cache lookup. Returns entry or None."""
+    with _vector_search_cache_lock:
+        entry = _vector_search_cache.get(thread_id)
+        if entry is None:
+            return None
+        if datetime.now() - entry["timestamp"] >= _VECTOR_SEARCH_CACHE_TTL:
+            del _vector_search_cache[thread_id]
+            return None
+        _vector_search_cache.move_to_end(thread_id)
+        return entry
+
+
+def _vs_cache_put(thread_id: str, query: str, results: List) -> None:
+    """Thread-safe bounded cache insert. Evicts oldest if at capacity."""
+    with _vector_search_cache_lock:
+        if thread_id in _vector_search_cache:
+            del _vector_search_cache[thread_id]
+        elif len(_vector_search_cache) >= _VS_CACHE_MAX_SIZE:
+            _vs_cache_evict_expired()
+            while len(_vector_search_cache) >= _VS_CACHE_MAX_SIZE:
+                _vector_search_cache.popitem(last=False)
+        _vector_search_cache[thread_id] = {
+            "query": query,
+            "results": results,
+            "timestamp": datetime.now(),
+        }
 
 # Performance metrics tracking
 _performance_metrics: Dict[str, Any] = {
@@ -274,45 +318,33 @@ def planning_node(state: AgentState) -> dict:
     
     relevant_spaces_full = None
     cache_hit = False
-    
-    if can_reuse_cache and thread_id in _vector_search_cache:
-        cache_entry = _vector_search_cache[thread_id]
-        cache_age = datetime.now() - cache_entry["timestamp"]
-        
-        if cache_age < _VECTOR_SEARCH_CACHE_TTL:
+
+    if can_reuse_cache:
+        cache_entry = _vs_cache_get(thread_id)
+        if cache_entry is not None:
             record_cache_hit("vector_search")
             relevant_spaces_full = cache_entry["results"]
             cache_hit = True
+            cache_age = datetime.now() - cache_entry["timestamp"]
             print(f"🚀 VECTOR SEARCH CACHE HIT (thread: {thread_id}, age: {cache_age.seconds}s)")
             print(f"   Reusing {len(relevant_spaces_full)} spaces for {intent_type} query")
             print(f"   Expected gain: -300 to -800ms")
-            
+
             writer({
                 "type": "vector_search_cache_hit",
                 "thread_id": thread_id,
                 "intent_type": intent_type,
                 "space_count": len(relevant_spaces_full)
             })
-        else:
-            print(f"⚠️ Vector search cache expired (age: {cache_age.seconds}s > {_VECTOR_SEARCH_CACHE_TTL.seconds}s)")
-    
-    # If no cache hit, perform vector search
+
     if relevant_spaces_full is None:
         record_cache_miss("vector_search")
-        # Emit vector search start event
         writer({"type": "vector_search_start", "index": VECTOR_SEARCH_INDEX})
-        
-        # Get relevant spaces with full metadata (for Genie agents)
-        # Use planning_query which includes context_summary if available
+
         print(f"🔍 Performing vector search (cache miss or new question)...")
         relevant_spaces_full = planning_agent.search_relevant_spaces(planning_query)
-        
-        # Cache results for future refinements
-        _vector_search_cache[thread_id] = {
-            "query": planning_query,
-            "results": relevant_spaces_full,
-            "timestamp": datetime.now()
-        }
+
+        _vs_cache_put(thread_id, planning_query, relevant_spaces_full)
         print(f"✓ Cached vector search results for thread: {thread_id}")
     
     # Emit vector search results
@@ -324,30 +356,48 @@ def planning_node(state: AgentState) -> dict:
     # Create execution plan
     # IMPORTANT: Use planning_query (with context_summary) not just query
     # Pass original_query so it can be shown in the prompt before context_summary
-    plan = planning_agent.create_execution_plan(planning_query, relevant_spaces_full, original_query=query)
+    force_route = state.get("force_synthesis_route", "auto")
+    plan = planning_agent.create_execution_plan(
+        planning_query,
+        relevant_spaces_full,
+        original_query=query,
+        force_synthesis_route=force_route,
+    )
     
     # Extract plan components
     join_strategy = plan.get("join_strategy")
     
+    # Honor force_synthesis_route override from UI
+    if force_route == "table_route":
+        join_strategy = "table_route"
+        next_agent = "sql_synthesis_table"
+        print(f"✓ Plan complete - FORCED TABLE ROUTE (UI override)")
+    elif force_route == "genie_route":
+        join_strategy = "genie_route"
+        next_agent = "sql_synthesis_genie"
+        print(f"✓ Plan complete - FORCED GENIE ROUTE (UI override)")
+    elif join_strategy == "genie_route":
+        next_agent = "sql_synthesis_genie"
+        print("✓ Plan complete - using GENIE ROUTE (Genie agents)")
+    else:
+        next_agent = "sql_synthesis_table"
+        print("✓ Plan complete - using TABLE ROUTE (direct SQL synthesis)")
+    
     # Emit plan formulation result
     writer({"type": "plan_formulation", "strategy": join_strategy, "requires_join": plan.get("requires_join", False)})
     
-    # Determine next agent
-    if join_strategy == "genie_route":
-        print("✓ Plan complete - using GENIE ROUTE (Genie agents)")
-        next_agent = "sql_synthesis_genie"
-    else:
-        print("✓ Plan complete - using TABLE ROUTE (direct SQL synthesis)")
-        next_agent = "sql_synthesis_table"
+    sub_questions = plan.get("sub_questions", [])
     
     # Return only updates (no in-place modifications)
     return {
         "plan": plan,
-        "sub_questions": plan.get("sub_questions", []),
+        "sub_questions": sub_questions,
+        "total_sub_questions": len(sub_questions),
         "requires_multiple_spaces": plan.get("requires_multiple_spaces", False),
         "relevant_space_ids": plan.get("relevant_space_ids", []),
         "requires_join": plan.get("requires_join", False),
         "join_strategy": join_strategy,
+        "join_strategy_route": next_agent,
         "execution_plan": plan.get("execution_plan", ""),
         "genie_route_plan": plan.get("genie_route_plan"),
         "vector_search_relevant_spaces_info": plan.get("vector_search_relevant_spaces_info", []),
@@ -365,20 +415,24 @@ def planning_node(state: AgentState) -> dict:
 
 def clear_vector_search_cache(thread_id: str = None):
     """Clear vector search cache for a specific thread or all threads."""
-    global _vector_search_cache
-    if thread_id:
-        if thread_id in _vector_search_cache:
-            del _vector_search_cache[thread_id]
-            print(f"✓ Vector search cache cleared for thread: {thread_id}")
-    else:
-        _vector_search_cache = {}
-        print("✓ All vector search caches cleared")
+    with _vector_search_cache_lock:
+        if thread_id:
+            if thread_id in _vector_search_cache:
+                del _vector_search_cache[thread_id]
+                print(f"✓ Vector search cache cleared for thread: {thread_id}")
+        else:
+            _vector_search_cache.clear()
+            print("✓ All vector search caches cleared")
 
 
 def get_cache_stats() -> Dict[str, Any]:
     """Get cache statistics for monitoring."""
+    with _vector_search_cache_lock:
+        size = len(_vector_search_cache)
+        threads = list(_vector_search_cache.keys())
     return {
-        "vector_search_cache_size": len(_vector_search_cache),
-        "vector_search_threads": list(_vector_search_cache.keys()),
-        "performance_metrics": _performance_metrics
+        "vector_search_cache_size": size,
+        "vector_search_cache_max_size": _VS_CACHE_MAX_SIZE,
+        "vector_search_threads": threads,
+        "performance_metrics": _performance_metrics,
     }

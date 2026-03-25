@@ -136,7 +136,7 @@ targets:
     variables:
       catalog_name: serverless_dbx_unifiedchat_dev_catalog
       schema_name: multi_agent_genie
-      sql_warehouse_id: 78ad038820b88d95
+      sql_warehouse_id: 32f4d1aae5fcf8ca
       genie_space_ids: "01f11b27d1121e2bb00d6ecd846b1988,01f11b27d23a1ab195fa7ba8efc06d13,01f11b27d3ea149694cf608c3d278673"
       model_name: super_agent_hybrid
       endpoint_name: multi-agent-genie-endpoint-dev

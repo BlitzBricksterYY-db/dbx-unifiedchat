@@ -25,12 +25,27 @@ import { ChatTransport } from '../lib/ChatTransport';
 import type { ClientSession } from '@chat-template/auth';
 import { softNavigateToChatId } from '@/lib/navigation';
 import { useAppConfig } from '@/contexts/AppConfigContext';
+import {
+  AgentSettingsPanel,
+  type AgentSettings,
+  useAgentSettings,
+} from './agent-settings';
+
+type ChatDataCache = {
+  chat: {
+    executionMode: AgentSettings['executionMode'];
+    synthesisRoute: AgentSettings['synthesisRoute'];
+  };
+  messages: ChatMessage[];
+  feedback: FeedbackMap;
+};
 
 export function Chat({
   id,
   initialMessages,
   initialChatModel,
   initialVisibilityType,
+  initialAgentSettings,
   isReadonly,
   initialLastContext,
   feedback = {},
@@ -39,6 +54,7 @@ export function Chat({
   initialMessages: ChatMessage[];
   initialChatModel: string;
   initialVisibilityType: VisibilityType;
+  initialAgentSettings?: AgentSettings;
   isReadonly: boolean;
   session: ClientSession;
   initialLastContext?: LanguageModelUsage;
@@ -57,6 +73,12 @@ export function Chat({
   const [_usage, setUsage] = useState<LanguageModelUsage | undefined>(
     initialLastContext,
   );
+  const {
+    settings: agentSettings,
+    settingsRef: agentSettingsRef,
+    update: updateAgentSettings,
+  } =
+    useAgentSettings(initialAgentSettings);
 
   const [lastPart, setLastPart] = useState<UIMessageChunk | undefined>();
   const lastPartRef = useRef<UIMessageChunk | undefined>(lastPart);
@@ -108,9 +130,11 @@ export function Chat({
     resume: id !== undefined && initialMessages.length > 0, // Enable automatic stream resumption
     transport: new ChatTransport({
       onStreamPart: (part) => {
-        // As soon as we recive a stream part, we fetch the chat history again for new chats
+        // For brand-new chats, wait until the first stream chunk arrives before
+        // navigating so we don't abort the initial request before the chat exists.
         if (isNewChat && !didFetchHistoryOnNewChat.current) {
           fetchChatHistory();
+          softNavigateToChatId(id, chatHistoryEnabled);
           didFetchHistoryOnNewChat.current = true;
         }
         // Reset resume attempts when we successfully receive stream parts
@@ -122,6 +146,7 @@ export function Chat({
       prepareSendMessagesRequest({ messages, id, body }) {
         const lastMessage = messages.at(-1);
         const isUserMessage = lastMessage?.role === 'user';
+        const currentAgentSettings = agentSettingsRef.current;
 
         // For continuations (non-user messages like tool results), we must always
         // send previousMessages because the tool result only exists client-side
@@ -131,15 +156,10 @@ export function Chat({
         return {
           body: {
             id,
-            // Only include message field for user messages (new messages)
-            // For continuation (assistant messages with tool results), omit message field
             ...(isUserMessage ? { message: lastMessage } : {}),
             selectedChatModel: initialChatModel,
             selectedVisibilityType: visibilityType,
             nextMessageId: generateUUID(),
-            // Send previous messages when:
-            // 1. Database is disabled (ephemeral mode) - always need client-side messages
-            // 2. Continuation request (tool results) - tool result only exists client-side
             ...(needsPreviousMessages
               ? {
                   previousMessages: isUserMessage
@@ -147,6 +167,7 @@ export function Chat({
                     : messages,
                 }
               : {}),
+            agentSettings: currentAgentSettings,
             ...body,
           },
         };
@@ -249,8 +270,67 @@ export function Chat({
     },
   });
 
+  const persistAgentSettings = useCallback(
+    async (settings: AgentSettings) => {
+      try {
+        const response = await fetch(`/api/chat/${id}/settings`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(settings),
+        });
+
+        if (!response.ok && response.status !== 404) {
+          throw new Error('Failed to persist chat settings');
+        }
+      } catch (error) {
+        console.warn('[Chat] Unable to persist per-chat agent settings:', error);
+      }
+    },
+    [id],
+  );
+
+  const syncChatSettingsCache = useCallback(
+    (settings: AgentSettings) => {
+      void mutate(
+        `/chat/${id}`,
+        (currentData?: ChatDataCache | null) =>
+          currentData
+            ? {
+                ...currentData,
+                chat: {
+                  ...currentData.chat,
+                  executionMode: settings.executionMode,
+                  synthesisRoute: settings.synthesisRoute,
+                },
+              }
+            : currentData,
+        false,
+      );
+    },
+    [id, mutate],
+  );
+
+  const handleUpdateAgentSettings = useCallback(
+    (patch: Partial<AgentSettings>) => {
+      const nextSettings = { ...agentSettingsRef.current, ...patch };
+      agentSettingsRef.current = nextSettings;
+      updateAgentSettings(patch);
+
+      // Persist to the chat once the thread exists server-side.
+      // New unsaved chats keep the current in-memory settings for the first turn.
+      if (messages.length > 0) {
+        syncChatSettingsCache(nextSettings);
+        void persistAgentSettings(nextSettings);
+      }
+    },
+    [messages.length, persistAgentSettings, syncChatSettingsCache, updateAgentSettings],
+  );
+
   const [searchParams] = useSearchParams();
   const query = searchParams.get('query');
+  const selectedTurnId = searchParams.get('turn');
 
   const [hasAppendedQuery, setHasAppendedQuery] = useState(false);
 
@@ -262,9 +342,8 @@ export function Chat({
       });
 
       setHasAppendedQuery(true);
-      softNavigateToChatId(id, chatHistoryEnabled);
     }
-  }, [query, sendMessage, hasAppendedQuery, id, chatHistoryEnabled]);
+  }, [query, sendMessage, hasAppendedQuery]);
 
   const [attachments, setAttachments] = useState<Array<Attachment>>([]);
 
@@ -276,6 +355,7 @@ export function Chat({
         <Messages
           status={status}
           messages={messages}
+          selectedTurnId={selectedTurnId}
           setMessages={setMessages}
           addToolApprovalResponse={addToolApprovalResponse}
           regenerate={regenerate}
@@ -285,21 +365,29 @@ export function Chat({
           feedback={feedback}
         />
 
-        <div className="sticky bottom-0 z-1 mx-auto flex w-full max-w-4xl gap-2 border-t-0 bg-background px-2 pb-3 md:px-4 md:pb-4">
+        <div className="sticky bottom-0 z-1 mx-auto flex w-full max-w-7xl flex-col gap-1 border-t-0 bg-background px-2 pb-3 md:px-4 md:pb-4">
           {!isReadonly && (
-            <MultimodalInput
-              chatId={id}
-              input={input}
-              setInput={setInput}
-              status={status}
-              stop={stop}
-              attachments={attachments}
-              setAttachments={setAttachments}
-              messages={messages}
-              setMessages={setMessages}
-              sendMessage={sendMessage}
-              selectedVisibilityType={visibilityType}
-            />
+            <>
+              <div className="flex justify-end">
+                <AgentSettingsPanel
+                  settings={agentSettings}
+                  onUpdate={handleUpdateAgentSettings}
+                />
+              </div>
+              <MultimodalInput
+                chatId={id}
+                input={input}
+                setInput={setInput}
+                status={status}
+                stop={stop}
+                attachments={attachments}
+                setAttachments={setAttachments}
+                messages={messages}
+                setMessages={setMessages}
+                sendMessage={sendMessage}
+                selectedVisibilityType={visibilityType}
+              />
+            </>
           )}
         </div>
       </div>

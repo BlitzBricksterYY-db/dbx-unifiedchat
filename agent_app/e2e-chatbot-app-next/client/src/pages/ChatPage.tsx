@@ -82,6 +82,10 @@ export default function ChatPage() {
       initialMessages={messages}
       initialChatModel={modelId}
       initialVisibilityType={chat.visibility}
+      initialAgentSettings={{
+        executionMode: chat.executionMode,
+        synthesisRoute: chat.synthesisRoute,
+      }}
       isReadonly={isReadonly}
       session={session}
       initialLastContext={fromV3Usage(chat.lastContext)}

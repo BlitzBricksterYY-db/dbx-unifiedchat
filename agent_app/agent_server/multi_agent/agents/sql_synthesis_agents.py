@@ -38,14 +38,52 @@ Example usage:
     sql_result = genie_agent(execution_plan)
 """
 
+import contextvars
 import json
 import re
 from typing import Dict, List, Any, Optional
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.runnables import Runnable, RunnableLambda, RunnableParallel
 from langchain_core.tools import StructuredTool
 from langchain.agents import create_agent
 from pydantic import BaseModel, Field
+
+
+class _ProgressCallbackHandler(BaseCallbackHandler):
+    """Emits real-time progress events for tool calls within SQL synthesis agents."""
+
+    def __init__(self, writer, agent_label: str = "sql_synthesis"):
+        self._writer = writer
+        self._agent = agent_label
+        self._tool_round = 0
+
+    def on_tool_start(self, serialized, input_str, **kwargs):
+        self._tool_round += 1
+        name = serialized.get("name", "unknown_tool")
+        short_name = name.split("__")[-1] if "__" in name else name
+        self._writer({
+            "type": "tool_call_start",
+            "agent": self._agent,
+            "tool": short_name,
+            "content": f"🔧 Calling {short_name}...",
+        })
+
+    def on_tool_end(self, output, **kwargs):
+        size = len(str(output)) if output else 0
+        self._writer({
+            "type": "tool_call_end",
+            "agent": self._agent,
+            "content": f"✅ Tool returned ({size} chars)",
+        })
+
+    def on_chat_model_start(self, serialized, messages, **kwargs):
+        if self._tool_round > 0:
+            self._writer({
+                "type": "agent_thinking",
+                "agent": self._agent,
+                "content": "🤔 Analyzing tool results...",
+            })
 
 from databricks_langchain import (
     DatabricksFunctionClient,
@@ -194,6 +232,19 @@ class SQLSynthesisTableAgent:
                 "    separately, or combining would create overly complex SQL\n"
                 "- If sub-questions are closely related and naturally combine (e.g., same table, similar filters):\n"
                 "  * You may generate a single combined SQL query\n\n"
+                "- CRITICAL RULE for 'top N items + their details' patterns:\n"
+                "  When the question asks for 'top N items and their associated details'\n"
+                "  (e.g., 'top 10 medicines and their diagnoses', 'top 5 providers and their procedures'),\n"
+                "  you MUST use multiple separate SQL queries:\n"
+                "  * Query 1: The top N items with their aggregate metric (e.g., top 10 by total cost)\n"
+                "  * Query 2+: For each detail dimension, a separate query\n"
+                "  * IMPORTANT: Each query must be SELF-CONTAINED and independently executable.\n"
+                "    If Query 2 needs the same top-N list as Query 1, embed the top-N selection\n"
+                "    as a subquery or CTE within Query 2 -- do NOT reference Query 1's results.\n"
+                "  * This avoids a single cross-join that explodes rows\n"
+                "    (e.g., 10 medicines x 362 diagnoses = 3,620 rows) and lets each result\n"
+                "    be summarized clearly.\n"
+                "  * NEVER combine top-N aggregation with detail expansion in a single query.\n\n"
                 "## OUTPUT FORMAT:\n"
                 "- Return your response with:\n"
                 "1. Your explanations; If SQL cannot be generated, explain what metadata is missing\n"
@@ -214,12 +265,13 @@ class SQLSynthesisTableAgent:
             )
         )
     
-    def synthesize_sql(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+    def synthesize_sql(self, plan: Dict[str, Any], writer=None) -> Dict[str, Any]:
         """
         Synthesize SQL query based on execution plan.
         
         Args:
             plan: Execution plan from planning agent
+            writer: Optional LangGraph stream writer for real-time progress events
             
         Returns:
             Dictionary with:
@@ -228,7 +280,6 @@ class SQLSynthesisTableAgent:
             - has_sql: bool - Whether SQL was successfully extracted
         """
         plan_result = plan
-        # Invoke agent
         agent_message = {
             "messages": [
                 {
@@ -243,7 +294,10 @@ Use your available UC function tools to gather metadata intelligently.
             ]
         }
         
-        result = self.agent.invoke(agent_message)
+        config = {}
+        if writer:
+            config["callbacks"] = [_ProgressCallbackHandler(writer, "sql_synthesis_table")]
+        result = self.agent.invoke(agent_message, config=config)
         
         # Extract SQL and explanation from response
         if result and "messages" in result:
@@ -291,9 +345,9 @@ Use your available UC function tools to gather metadata intelligently.
         else:
             raise Exception("No response from agent")
     
-    def __call__(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+    def __call__(self, plan: Dict[str, Any], writer=None) -> Dict[str, Any]:
         """Make agent callable."""
-        return self.synthesize_sql(plan)
+        return self.synthesize_sql(plan, writer=writer)
 
 
 # ==============================================================================
@@ -545,16 +599,13 @@ class SQLSynthesisGenieAgent:
                 if not route_plan:
                     return {"error": "No valid parallel tasks to execute"}
                 
-                # Build dynamic parallel tasks - each task invokes the corresponding tool's func
-                # Call the underlying function directly with individual arguments
                 parallel_tasks = {}
                 for space_id, question in route_plan.items():
                     tool = space_id_to_tool[space_id]
-                    # Create a lambda that calls the tool's func with individual kwargs
-                    # Use default argument to capture values properly in closure
+                    ctx = contextvars.copy_context()
                     parallel_tasks[space_id] = RunnableLambda(
-                        lambda inp, sid=space_id, t=tool: t.func(
-                            question=inp[sid], conversation_id=None
+                        lambda inp, sid=space_id, t=tool, c=ctx: c.run(
+                            t.func, question=inp[sid], conversation_id=None
                         )
                     )
                 
@@ -678,6 +729,20 @@ MULTI-QUERY STRATEGY:
 - If sub-questions are closely related and naturally combine (e.g., same Genie space, similar context):
   * You may combine SQL fragments into a single query
 
+CRITICAL RULE for "top N items + their details" patterns:
+  When the question asks for "top N items and their associated details"
+  (e.g., "top 10 medicines and their diagnoses", "top 5 providers and their procedures"),
+  you MUST use multiple separate SQL queries:
+  * Query 1: The top N items with their aggregate metric (e.g., top 10 by total cost)
+  * Query 2+: For each detail dimension, a separate query
+  * IMPORTANT: Each query must be SELF-CONTAINED and independently executable.
+    If Query 2 needs the same top-N list as Query 1, embed the top-N selection
+    as a subquery or CTE within Query 2 -- do NOT reference Query 1's results.
+  * This avoids a single cross-join that explodes rows
+    (e.g., 10 medicines x 362 diagnoses = 3,620 rows) and lets each result
+    be summarized clearly.
+  * NEVER combine top-N aggregation with detail expansion in a single query.
+
 OUTPUT REQUIREMENTS:
 - Generate complete, executable SQL with:
   * Proper JOINs based on execution plan strategy
@@ -742,14 +807,14 @@ OUTPUT REQUIREMENTS:
                         space_id_to_tool[space_id] = tool
                         break
         
-        # Build parallel tasks that call tool.func() directly with individual arguments
         parallel_tasks = {}
         for space_id, question in genie_route_plan.items():
             if space_id in space_id_to_tool:
                 tool = space_id_to_tool[space_id]
+                ctx = contextvars.copy_context()
                 parallel_tasks[space_id] = RunnableLambda(
-                    lambda inp, sid=space_id, t=tool: t.func(
-                        question=inp[sid], conversation_id=None
+                    lambda inp, sid=space_id, t=tool, c=ctx: c.run(
+                        t.func, question=inp[sid], conversation_id=None
                     )
                 )
             else:
@@ -779,7 +844,8 @@ OUTPUT REQUIREMENTS:
     
     def synthesize_sql(
         self, 
-        plan: Dict[str, Any]
+        plan: Dict[str, Any],
+        writer=None,
     ) -> Dict[str, Any]:
         """
         Synthesize SQL using Genie agents with intelligent tool selection.
@@ -839,11 +905,10 @@ Then combine them into a final SQL query.
         }
         
         try:
-            # MLflow autologging is enabled globally at agent initialization
-            # No need to call it again here to avoid context issues
-            
-            # Invoke the agent
-            result = self.sql_synthesis_agent.invoke(agent_message)
+            config = {}
+            if writer:
+                config["callbacks"] = [_ProgressCallbackHandler(writer, "sql_synthesis_genie")]
+            result = self.sql_synthesis_agent.invoke(agent_message, config=config)
             
             # Extract SQL from agent result
             # The agent returns {"messages": [...]}
@@ -918,7 +983,8 @@ Then combine them into a final SQL query.
     
     def __call__(
         self, 
-        plan: Dict[str, Any]
+        plan: Dict[str, Any],
+        writer=None,
     ) -> Dict[str, Any]:
         """Make agent callable with plan dictionary."""
-        return self.synthesize_sql(plan)
+        return self.synthesize_sql(plan, writer=writer)

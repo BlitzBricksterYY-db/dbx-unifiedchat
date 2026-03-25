@@ -42,6 +42,12 @@ export async function getWorkspaceHostname(): Promise<string> {
     const authMethod = getAuthMethod();
 
     if (authMethod === 'cli') {
+      const cachedCliHost = getCachedCliHost();
+      if (cachedCliHost) {
+        cachedWorkspaceHostname = cachedCliHost;
+        return cachedWorkspaceHostname;
+      }
+
       // For CLI auth, we need to call getDatabricksUserIdentity which handles hostname resolution
       // This will trigger the CLI auth flow and properly cache the host
       await getDatabricksUserIdentity();
@@ -52,9 +58,8 @@ export async function getWorkspaceHostname(): Promise<string> {
         cachedWorkspaceHostname = cliHost;
         return cachedWorkspaceHostname;
       } else {
-        throw new Error(
-          'CLI authentication succeeded but hostname was not cached',
-        );
+        cachedWorkspaceHostname = getHostUrl();
+        return cachedWorkspaceHostname;
       }
     } else {
       // For OAuth, use the standard method
@@ -96,42 +101,120 @@ function shouldInjectContext(): boolean {
   return shouldInjectContextForEndpoint(endpointTask);
 }
 
+type ProxyRequestBody = Record<string, unknown> & {
+  input?: unknown;
+  messages?: Array<{
+    role?: string;
+    content?: unknown;
+  }>;
+};
+
+function normalizeResponsesInputContent(content: unknown) {
+  if (typeof content === 'string') {
+    return [{ type: 'input_text', text: content }];
+  }
+
+  if (!Array.isArray(content)) {
+    return [];
+  }
+
+  return content.flatMap((part) => {
+    if (typeof part === 'string') {
+      return [{ type: 'input_text', text: part }];
+    }
+
+    if (!part || typeof part !== 'object') {
+      return [];
+    }
+
+    const typedPart = part as Record<string, unknown>;
+    const text = typedPart.text;
+
+    if (
+      (typedPart.type === 'text' ||
+        typedPart.type === 'input_text' ||
+        typedPart.type === 'output_text') &&
+      typeof text === 'string'
+    ) {
+      return [{ type: 'input_text', text }];
+    }
+
+    return [typedPart];
+  });
+}
+
+function maybeConvertMessagesToResponsesInput(body: ProxyRequestBody) {
+  if (body.input || !Array.isArray(body.messages)) {
+    return body;
+  }
+
+  const { messages, ...rest } = body;
+  return {
+    ...rest,
+    input: messages.map((message) => ({
+      role: message.role,
+      content: normalizeResponsesInputContent(message.content),
+    })),
+  };
+}
+
 // Custom fetch function to transform Databricks responses to OpenAI format
 export const databricksFetch: typeof fetch = async (input, init) => {
   const url = input.toString();
   let requestInit = init;
 
-  // Extract context from headers (passed via streamText headers option)
+  // Extract context and agent settings from headers (passed via streamText headers option)
   const headers = new Headers(requestInit?.headers);
   const conversationId = headers.get(CONTEXT_HEADER_CONVERSATION_ID);
   const userId = headers.get(CONTEXT_HEADER_USER_ID);
-  // Remove context headers so they don't get sent to the API
+  const executionMode = headers.get('x-agent-execution-mode');
+  const synthesisRoute = headers.get('x-agent-synthesis-route');
+  const useApiProxy = headers.get('x-use-api-proxy') === 'true';
+  // Remove custom headers so they don't get sent to the API
   headers.delete(CONTEXT_HEADER_CONVERSATION_ID);
   headers.delete(CONTEXT_HEADER_USER_ID);
+  headers.delete('x-agent-execution-mode');
+  headers.delete('x-agent-synthesis-route');
+  headers.delete('x-use-api-proxy');
   requestInit = { ...requestInit, headers };
 
-  // Inject context into request body if appropriate
-  if (
-    conversationId &&
-    userId &&
-    requestInit?.body &&
-    typeof requestInit.body === 'string'
-  ) {
-    if (shouldInjectContext()) {
-      try {
-        const body = JSON.parse(requestInit.body);
-        const enhancedBody = {
+  if (requestInit?.body && typeof requestInit.body === 'string') {
+    try {
+      let body = JSON.parse(requestInit.body) as ProxyRequestBody;
+
+      if (useApiProxy) {
+        body = maybeConvertMessagesToResponsesInput(body);
+      }
+
+      // Inject context and agent settings into request body if appropriate
+      if (conversationId && userId && shouldInjectContext()) {
+        const existingContext =
+          body.context && typeof body.context === 'object' ? body.context : {};
+        const existingCustomInputs =
+          body.custom_inputs && typeof body.custom_inputs === 'object'
+            ? body.custom_inputs
+            : {};
+
+        body = {
           ...body,
           context: {
-            ...body.context,
+            ...existingContext,
             conversation_id: conversationId,
             user_id: userId,
           },
+          custom_inputs: {
+            ...existingCustomInputs,
+            ...(executionMode ? { execution_mode: executionMode } : {}),
+            ...(synthesisRoute && synthesisRoute !== 'auto'
+              ? { force_synthesis_route: synthesisRoute }
+              : {}),
+          },
         };
-        requestInit = { ...requestInit, body: JSON.stringify(enhancedBody) };
-      } catch {
-        // If JSON parsing fails, pass through unchanged
       }
+
+      requestInit = { ...requestInit, body: JSON.stringify(body) };
+    } catch {
+      // If JSON parsing fails, pass through unchanged
     }
   }
 
@@ -224,22 +307,24 @@ export const databricksFetch: typeof fetch = async (input, init) => {
 };
 
 type CachedProvider = ReturnType<typeof createDatabricksProvider>;
-let oauthProviderCache: CachedProvider | null = null;
-let oauthProviderCacheTime = 0;
+type ProviderMode = 'direct' | 'proxy';
+const providerCache = new Map<
+  ProviderMode,
+  { provider: CachedProvider; timestamp: number }
+>();
 const PROVIDER_CACHE_DURATION = 5 * 60 * 1000; // Cache provider for 5 minutes
 
 // Helper function to get or create the Databricks provider with OAuth
-async function getOrCreateDatabricksProvider(): Promise<CachedProvider> {
-  // Check if we have a cached provider that's still fresh
-  if (
-    oauthProviderCache &&
-    Date.now() - oauthProviderCacheTime < PROVIDER_CACHE_DURATION
-  ) {
-    console.log('Using cached OAuth provider');
-    return oauthProviderCache;
+async function getOrCreateDatabricksProvider(
+  mode: ProviderMode,
+): Promise<CachedProvider> {
+  const cached = providerCache.get(mode);
+  if (cached && Date.now() - cached.timestamp < PROVIDER_CACHE_DURATION) {
+    console.log(`Using cached OAuth provider (${mode})`);
+    return cached.provider;
   }
 
-  console.log('Creating new OAuth provider');
+  console.log(`Creating new OAuth provider (${mode})`);
   // Ensure we have a valid token before creating provider
   await getProviderToken();
   const hostname = await getWorkspaceHostname();
@@ -249,13 +334,15 @@ async function getOrCreateDatabricksProvider(): Promise<CachedProvider> {
     // When using endpoints such as Agent Bricks or custom agents, we need to use remote tool calling to handle the tool calls
     useRemoteToolCalling: true,
     baseURL: `${hostname}/serving-endpoints`,
-    formatUrl: ({ baseUrl, path }) => API_PROXY ?? `${baseUrl}${path}`,
+    formatUrl: ({ baseUrl, path }) =>
+      mode === 'proxy' && API_PROXY ? API_PROXY : `${baseUrl}${path}`,
     fetch: async (...[input, init]: Parameters<typeof fetch>) => {
       // Always get fresh token for each request (will use cache if valid)
       const currentToken = await getProviderToken();
       const headers = new Headers(init?.headers);
       headers.set('Authorization', `Bearer ${currentToken}`);
-      if (API_PROXY) {
+      headers.set('x-use-api-proxy', String(mode === 'proxy' && Boolean(API_PROXY)));
+      if (mode === 'proxy' && API_PROXY) {
         headers.set('x-mlflow-return-trace-id', 'true');
       }
 
@@ -266,8 +353,7 @@ async function getOrCreateDatabricksProvider(): Promise<CachedProvider> {
     },
   });
 
-  oauthProviderCache = provider;
-  oauthProviderCacheTime = Date.now();
+  providerCache.set(mode, { provider, timestamp: Date.now() });
   return provider;
 }
 
@@ -323,19 +409,17 @@ export class OAuthAwareProvider implements SmartProvider {
       return cached.model;
     }
 
-    // Get the OAuth provider
-    const provider = await getOrCreateDatabricksProvider();
-
     const model = await (async () => {
+      if (id === 'title-model' || id === 'artifact-model') {
+        const provider = await getOrCreateDatabricksProvider('direct');
+        return provider.chatCompletions('databricks-gpt-5-4-nano');
+      }
       if (API_PROXY) {
+        const provider = await getOrCreateDatabricksProvider('proxy');
         // For API proxy we always use the responses agent
         return provider.responses(id);
       }
-      if (id === 'title-model' || id === 'artifact-model') {
-        return provider.chatCompletions(
-          'databricks-meta-llama-3-3-70b-instruct',
-        );
-      }
+      const provider = await getOrCreateDatabricksProvider('direct');
       // Server-side environment validation
       if (!process.env.DATABRICKS_SERVING_ENDPOINT) {
         throw new Error(

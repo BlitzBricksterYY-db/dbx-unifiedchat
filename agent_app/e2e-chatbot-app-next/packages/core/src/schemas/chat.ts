@@ -24,9 +24,15 @@ const previousMessageSchema = z.object({
   parts: z.array(z.any()), // Permissive to handle text, tool calls, tool results
 });
 
+const agentSettingsSchema = z
+  .object({
+    executionMode: z.enum(['parallel', 'sequential']).default('parallel'),
+    synthesisRoute: z.enum(['auto', 'table_route', 'genie_route']).default('auto'),
+  })
+  .optional();
+
 export const postRequestBodySchema = z.object({
   id: z.string().uuid(),
-  // Optional for continuation/regeneration scenarios (no new user message)
   message: z
     .object({
       id: z.string().uuid(),
@@ -36,8 +42,8 @@ export const postRequestBodySchema = z.object({
     .optional(),
   selectedChatModel: z.enum(['chat-model', 'chat-model-reasoning']),
   selectedVisibilityType: z.enum(['public', 'private']),
-  // Optional field for ephemeral mode: frontend sends previous conversation history
   previousMessages: z.array(previousMessageSchema).optional(),
+  agentSettings: agentSettingsSchema,
 });
 
 export type PostRequestBody = z.infer<typeof postRequestBodySchema>;

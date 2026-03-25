@@ -5,14 +5,17 @@ Converted from SuperAgentHybridResponsesAgent (Model Serving) to
 MLflow GenAI Server decorated functions (Databricks Apps).
 """
 
+import contextvars
 import json
 import logging
+import threading
 import time
 from typing import AsyncGenerator
 from uuid import uuid4
 
 import litellm
 import mlflow
+from mlflow.entities import SpanType
 from mlflow.genai.agent_server import invoke, stream
 from mlflow.types.responses import (
     ResponsesAgentRequest,
@@ -28,7 +31,7 @@ from agent_server.utils import get_session_id
 from agent_server.multi_agent.core.graph import create_super_agent_hybrid
 from agent_server.multi_agent.core.state import RESET_STATE_TEMPLATE
 
-mlflow.langchain.autolog(run_tracer_inline=False)
+mlflow.langchain.autolog(run_tracer_inline=True)
 
 logging.getLogger("mlflow.utils.autologging_utils").setLevel(logging.ERROR)
 litellm.suppress_debug_info = True
@@ -81,20 +84,28 @@ except Exception as e:
     logger.warning(f"Failed to load config at import time: {e}")
 
 _store = None
+_store_lock = threading.Lock()
 
 
 def _get_store():
     """Lazy initialization of DatabricksStore for long-term memory."""
     global _store
-    if _store is None and LAKEBASE_INSTANCE_NAME:
+    if _store is not None:
+        return _store
+    if not LAKEBASE_INSTANCE_NAME:
+        return None
+    with _store_lock:
+        if _store is not None:
+            return _store
         from databricks_langchain import DatabricksStore
         logger.info(f"Initializing DatabricksStore with instance: {LAKEBASE_INSTANCE_NAME}")
-        _store = DatabricksStore(
+        store = DatabricksStore(
             instance_name=LAKEBASE_INSTANCE_NAME,
             embedding_endpoint=EMBEDDING_ENDPOINT,
             embedding_dims=EMBEDDING_DIMS,
         )
-        _store.setup()
+        store.setup()
+        _store = store
         logger.info("DatabricksStore initialized")
     return _store
 
@@ -174,6 +185,14 @@ _CUSTOM_FORMATTERS = {
     "genie_agent_call": lambda d: f"Calling Genie agent for space: {d.get('space_id', 'unknown')}",
     "meta_answer_content": lambda d: f"\n\n{d.get('content', '')}",
     "clarification_content": lambda d: f"\n\n{d.get('content', '')}",
+    "tool_call_start": lambda d: d.get("content", "Calling " + d.get("tool", "tool") + "..."),
+    "tool_call_end": lambda d: d.get("content", "Tool returned result"),
+    "agent_step": lambda d: d.get("content", f"Step: {d.get('step', '')}"),
+    "agent_result": lambda d: d.get("content", f"Result: {d.get('result', '')}"),
+    "tools_available": lambda d: d.get("content", "Tools loaded"),
+    "sql_synthesis_start": lambda d: f"SQL synthesis starting ({d.get('route', 'unknown')} route)",
+    "summarize_step": lambda d: d.get("content", "Summarize step"),
+    "summary_complete": lambda d: d.get("content", "Summary complete"),
 }
 
 
@@ -244,6 +263,13 @@ async def stream_handler(
     thread_id = _get_or_create_thread_id(request)
     user_id = _get_user_id(request)
 
+    mlflow.update_current_trace(
+        metadata={
+            "chat.thread_id": thread_id,
+            **({"chat.user_id": user_id} if user_id else {}),
+        }
+    )
+
     ci = dict(request.custom_inputs or {})
     ci["thread_id"] = thread_id
     if user_id:
@@ -262,9 +288,15 @@ async def stream_handler(
     if user_id:
         run_config["configurable"]["user_id"] = user_id
 
+    # Agent settings from UI (via custom_inputs)
+    execution_mode = ci.get("execution_mode", "parallel")
+    force_synthesis_route = ci.get("force_synthesis_route", "auto")
+
     initial_state = {
         **RESET_STATE_TEMPLATE,
         "original_query": latest_query,
+        "execution_mode": execution_mode,
+        "force_synthesis_route": force_synthesis_route,
         "messages": [
             SystemMessage(content="""You are a multi-agent Q&A analysis system.
 Your role is to help users query and analyze cross-domain data.
@@ -286,33 +318,110 @@ Guidelines:
     first_message = True
     seen_ids: set = set()
 
-    # Run the sync LangGraph workflow in a thread to keep the async entry point non-blocking
     import asyncio
 
+    _SENTINEL = object()
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+
     def _run_workflow():
-        """Execute the sync LangGraph workflow inside a CheckpointSaver context manager."""
+        """Stream events from the sync LangGraph workflow into an asyncio.Queue."""
         from databricks_langchain import CheckpointSaver
 
-        with CheckpointSaver(instance_name=LAKEBASE_INSTANCE_NAME) as checkpointer:
-            app = _workflow.compile(checkpointer=checkpointer)
-            logger.info(f"Executing workflow with checkpointer (thread: {thread_id})")
-            events = list(
-                app.stream(
-                    initial_state,
-                    run_config,
-                    stream_mode=["updates", "messages", "custom", "tasks"],
+        try:
+            with mlflow.start_span(
+                name="langgraph_workflow",
+                span_type=SpanType.AGENT,
+                attributes={
+                    "thread_id": thread_id,
+                    "execution_mode": execution_mode,
+                    "force_synthesis_route": force_synthesis_route,
+                },
+            ) as span:
+                span.set_inputs(
+                    {
+                        "original_query": latest_query,
+                        "thread_id": thread_id,
+                        "user_id": user_id,
+                        "execution_mode": execution_mode,
+                        "force_synthesis_route": force_synthesis_route,
+                    }
                 )
-            )
-        return events
+                last_state: dict = {}
+                with CheckpointSaver(instance_name=LAKEBASE_INSTANCE_NAME) as checkpointer:
+                    app = _workflow.compile(checkpointer=checkpointer)
+                    logger.info(f"Executing workflow with checkpointer (thread: {thread_id})")
+                    for event in app.stream(
+                        initial_state,
+                        run_config,
+                        stream_mode=["updates", "messages", "custom", "tasks"],
+                    ):
+                        if event[0] == "updates" and isinstance(event[1], dict):
+                            last_state.update(event[1])
+                        loop.call_soon_threadsafe(queue.put_nowait, event)
 
-    loop = asyncio.get_event_loop()
-    events = await loop.run_in_executor(None, _run_workflow)
+                workflow_output: dict = {"status": "completed"}
+                if summary := last_state.get("final_summary"):
+                    workflow_output["final_summary"] = summary[:4000] if len(summary) > 4000 else summary
+                if sql := last_state.get("sql_query"):
+                    workflow_output["sql_query"] = sql[:2000] if len(sql) > 2000 else sql
+                if er := last_state.get("execution_result"):
+                    workflow_output["execution_result_status"] = er.get("status")
+                    workflow_output["row_count"] = er.get("row_count")
+                span.set_outputs(workflow_output)
+        except Exception as exc:
+            loop.call_soon_threadsafe(queue.put_nowait, exc)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
+
+    trace_context = contextvars.copy_context()
+    loop.run_in_executor(None, trace_context.run, _run_workflow)
 
     progress_steps: list[str] = []
-    details_emitted = False
+    progress_item_id = str(uuid4())
+    progress_started = False
+    details_finalized = False
     in_summarize = False
+    streaming_item_id = str(uuid4())
+    text_deltas_emitted = False
 
-    for event in events:
+    def _emit_progress_step(step_text: str):
+        """Append a step to the live progress block (returns events to yield)."""
+        nonlocal progress_started
+        events = []
+        if not progress_started:
+            progress_started = True
+            events.append(ResponsesAgentStreamEvent(
+                **_create_text_delta(
+                    delta='<details open>\n<summary>Processing Steps</summary>\n',
+                    id=progress_item_id,
+                ),
+            ))
+        events.append(ResponsesAgentStreamEvent(
+            **_create_text_delta(
+                delta=f'<div class="ps">{step_text}</div>\n',
+                id=progress_item_id,
+            ),
+        ))
+        return events
+
+    def _finalize_progress():
+        """Close the live progress block with a closing tag delta."""
+        nonlocal details_finalized
+        events = []
+        if progress_started and not details_finalized:
+            details_finalized = True
+            events.append(ResponsesAgentStreamEvent(
+                **_create_text_delta(delta="\n</details>\n\n", id=progress_item_id),
+            ))
+        return events
+
+    while True:
+        event = await queue.get()
+        if event is _SENTINEL:
+            break
+        if isinstance(event, Exception):
+            raise event
         event_type = event[0]
         event_data = event[1]
 
@@ -332,11 +441,24 @@ Guidelines:
                 logger.warning(f"Error processing task event: {e}")
             continue
 
-        # ── custom: collect progress, pass through clarification/meta/error ──
+        # ── custom: stream progress live, handle text deltas and special events ──
         if event_type == "custom":
             try:
                 et = event_data.get("type", "") if isinstance(event_data, dict) else ""
-                if et in ("meta_answer_content", "clarification_content", "clarification_requested"):
+                if et == "text_delta":
+                    delta_content = event_data.get("content", "")
+                    if delta_content:
+                        if not text_deltas_emitted:
+                            for ev in _finalize_progress():
+                                yield ev
+                        if first_token_time is None:
+                            first_token_time = time.time()
+                            logger.info(f"TTFT: {first_token_time - workflow_start_time:.3f}s")
+                        text_deltas_emitted = True
+                        yield ResponsesAgentStreamEvent(
+                            **_create_text_delta(delta=delta_content, id=streaming_item_id),
+                        )
+                elif et in ("meta_answer_content", "clarification_content", "clarification_requested"):
                     yield ResponsesAgentStreamEvent(
                         type="response.output_item.done",
                         item=_create_text_output_item(text=_format_custom_event(event_data), id=str(uuid4())),
@@ -346,41 +468,35 @@ Guidelines:
                         type="response.output_item.done",
                         item=_create_text_output_item(text=_format_custom_event(event_data), id=str(uuid4())),
                     )
-                elif et == "summary_start" and not details_emitted:
-                    details_emitted = True
+                elif et == "code_enrichment_progress":
+                    step_text = event_data.get("content", "")
+                    if step_text:
+                        progress_steps.append(step_text)
+                        for ev in _emit_progress_step(step_text):
+                            yield ev
+                elif et == "summary_start":
                     in_summarize = True
-                    if progress_steps:
-                        block = "<details>\n<summary>Processing Steps</summary>\n\n"
-                        for step in progress_steps:
-                            block += f"- {step}\n"
-                        block += "\n</details>\n\n"
-                        yield ResponsesAgentStreamEvent(
-                            type="response.output_item.done",
-                            item=_create_text_output_item(text=block, id=str(uuid4())),
-                        )
+                    streaming_item_id = str(uuid4())
+                    text_deltas_emitted = False
+                elif et == "summary_complete":
+                    pass
                 else:
-                    progress_steps.append(_format_custom_event(event_data))
+                    step_text = _format_custom_event(event_data)
+                    progress_steps.append(step_text)
+                    for ev in _emit_progress_step(step_text):
+                        yield ev
             except Exception as e:
                 logger.warning(f"Error processing custom event: {e}")
             continue
 
-        # ── messages: stream LLM deltas (only during summarize for clean output) ──
+        # ── messages: skip (text_delta custom events handle all streaming) ──
         if event_type == "messages":
-            try:
-                chunk = event_data[0] if isinstance(event_data, (list, tuple)) else event_data
-                if isinstance(chunk, AIMessageChunk) and (content := chunk.content):
-                    if in_summarize:
-                        if first_token_time is None:
-                            first_token_time = time.time()
-                            logger.info(f"TTFT: {first_token_time - workflow_start_time:.3f}s")
-                        yield ResponsesAgentStreamEvent(**_create_text_delta(delta=content, id=chunk.id))
-            except Exception as e:
-                logger.warning(f"Error processing message chunk: {e}")
             continue
 
-        # ── updates: collect progress, emit final AIMessage from summarize ──
+        # ── updates: stream node progress, only emit AIMessages from final nodes ──
         if event_type == "updates":
             events_dict = event_data
+            node_names = list(events_dict.keys())
             new_msgs = [
                 msg for v in events_dict.values()
                 for msg in v.get("messages", [])
@@ -388,25 +504,41 @@ Guidelines:
             ]
 
             seen_ids.update(msg.id for msg in new_msgs)
-            if first_message:
-                first_message = False
-                if events_dict:
-                    node = tuple(events_dict.keys())[0]
-                    update = events_dict[node]
-                    if node != "summarize":
-                        step = f"Step: {node}"
-                        extra = [k for k in update if k != "messages"]
-                        if extra:
-                            step += f" ({', '.join(extra)})"
-                        progress_steps.append(step)
-                        if "next_agent" in update:
-                            progress_steps.append(f"Routing → {update['next_agent']}")
 
-            for msg in new_msgs:
-                if in_summarize or isinstance(msg, AIMessage):
-                    for se in output_to_responses_items_stream([msg]):
-                        yield se
+            for node_name, update in events_dict.items():
+                if node_name != "summarize":
+                    step = f"Step: {node_name}"
+                    extra = [k for k in update if k != "messages"]
+                    if extra:
+                        step += f" ({', '.join(extra)})"
+                    progress_steps.append(step)
+                    for ev in _emit_progress_step(step):
+                        yield ev
+                    if "next_agent" in update:
+                        routing = f"Routing → {update['next_agent']}"
+                        progress_steps.append(routing)
+                        for ev in _emit_progress_step(routing):
+                            yield ev
+
+            is_final_node = "summarize" in node_names
+            if not is_final_node:
+                for update in events_dict.values():
+                    if update.get("is_meta_question") or update.get("is_irrelevant"):
+                        is_final_node = True
+                        break
+
+            if is_final_node:
+                for ev in _finalize_progress():
+                    yield ev
+                if not text_deltas_emitted:
+                    for msg in new_msgs:
+                        if isinstance(msg, AIMessage):
+                            for se in output_to_responses_items_stream([msg]):
+                                yield se
             continue
+
+    for ev in _finalize_progress():
+        yield ev
 
     ttcl = time.time() - workflow_start_time
     logger.info(

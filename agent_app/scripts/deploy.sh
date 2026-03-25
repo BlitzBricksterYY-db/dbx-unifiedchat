@@ -18,7 +18,7 @@ APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="$APP_DIR/.env"
 
 TARGET="dev"
-PROFILE=""
+PROFILE="dev"
 RUN_AFTER=false
 SYNC_FIRST=false
 
@@ -35,6 +35,17 @@ done
 # Resolve profile from .env if not passed
 if [[ -z "$PROFILE" && -f "$ENV_FILE" ]]; then
   PROFILE=$(grep -E "^DATABRICKS_CONFIG_PROFILE=.+" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]' || true)
+fi
+
+# Clear shell-level auth settings so .env / --profile wins consistently.
+for var in DATABRICKS_CONFIG_PROFILE DATABRICKS_HOST DATABRICKS_CLIENT_ID DATABRICKS_CLIENT_SECRET; do
+  if [[ -n "${!var:-}" ]]; then
+    unset "$var"
+  fi
+done
+
+if [[ -n "$PROFILE" ]]; then
+  export DATABRICKS_CONFIG_PROFILE="$PROFILE"
 fi
 
 PROFILE_ARGS=()

@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+.accordion-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.accordion-group > details {
+  display: contents;
+}
+.accordion-group > details > summary {
+  padding: 8px 16px;
+  background: #eee;
+  cursor: pointer;
+  list-style: none;
+  order: 1;
+}
+.accordion-group > details > *:not(summary) {
+  width: 100%;
+  order: 99;
+  flex-basis: 100%;
+}
+</style>
+</head>
+<body>
+<div class="accordion-group">
+  <details name="tabs"><summary>Tab 1</summary><div>Content 1</div></details>
+  <details name="tabs"><summary>Tab 2</summary><div>Content 2</div></details>
+  <details name="tabs"><summary>Tab 3</summary><div>Content 3</div></details>
+</div>
+</body>
+</html>

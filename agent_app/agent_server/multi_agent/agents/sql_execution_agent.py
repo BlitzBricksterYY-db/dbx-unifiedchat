@@ -86,7 +86,7 @@ class SQLExecutionAgent:
     def execute_sql(
         self, 
         sql_query: str, 
-        max_rows: int = 100,
+        max_rows: int = 500,
         return_format: str = "dict"
     ) -> Dict[str, Any]:
         """
@@ -143,21 +143,14 @@ class SQLExecutionAgent:
                 extracted_sql = sql_match.group(1).strip()
         
         # Step 2: Enforce LIMIT clause (for safety and token management)
-        # Always enforce max_rows limit, even if query already has LIMIT
-        limit_pattern = re.search(r'\bLIMIT\s+(\d+)\b', extracted_sql, re.IGNORECASE)
-        if limit_pattern:
-            existing_limit = int(limit_pattern.group(1))
+        # Only match a trailing LIMIT at the end of the statement, not inside CTEs/subqueries
+        trailing_limit = re.search(r'\s+LIMIT\s+(\d+)(?:\s+OFFSET\s+\d+)?\s*;?\s*$', extracted_sql, re.IGNORECASE)
+        if trailing_limit:
+            existing_limit = int(trailing_limit.group(1))
             if existing_limit > max_rows:
-                # Replace existing LIMIT with max_rows if it exceeds the limit
-                extracted_sql = re.sub(
-                    r'\bLIMIT\s+\d+\b', 
-                    f'LIMIT {max_rows}', 
-                    extracted_sql, 
-                    flags=re.IGNORECASE
-                )
-                print(f"⚠️  Reduced LIMIT from {existing_limit} to {max_rows} (max_rows enforcement)")
+                extracted_sql = extracted_sql[:trailing_limit.start()] + f' LIMIT {max_rows}' + extracted_sql[trailing_limit.end():]
+                print(f"⚠️  Reduced trailing LIMIT from {existing_limit} to {max_rows} (max_rows enforcement)")
         else:
-            # Add LIMIT if not present
             extracted_sql = f"{extracted_sql.rstrip(';')} LIMIT {max_rows}"
         
         try:
@@ -207,13 +200,14 @@ class SQLExecutionAgent:
                     # Fetch results (limited by LIMIT clause already enforced)
                     results = cursor.fetchall()
                     
-                    # Use actual result count (fetchall is safe because of LIMIT enforcement)
+                    # Post-execution safety truncation
+                    if len(results) > max_rows:
+                        results = results[:max_rows]
                     row_count = len(results)
                     
                     print(f"✅ Query executed successfully!")
                     print(f"📊 Rows returned: {row_count} (LIMIT enforced at {max_rows})")
                     print(f"📋 Columns: {', '.join(columns)}\n")
-                    print(f"⚡ Optimization: Query has LIMIT {max_rows} - safe to fetch all rows")
                     
                     # Step 5: Convert results to list of dicts for compatibility
                     result_data = [dict(zip(columns, row)) for row in results]
@@ -294,7 +288,7 @@ class SQLExecutionAgent:
     def execute_sql_parallel(
         self,
         sql_queries: List[str],
-        max_rows: int = 100,
+        max_rows: int = 500,
         return_format: str = "dict",
         max_workers: int = 4
     ) -> List[Dict[str, Any]]:
@@ -320,6 +314,7 @@ class SQLExecutionAgent:
             Each result includes a "query_number" field (1-indexed).
         """
         import concurrent.futures
+        import contextvars
         
         # Fast path: skip threading overhead for single query
         if len(sql_queries) <= 1:
@@ -335,7 +330,7 @@ class SQLExecutionAgent:
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(sql_queries), max_workers)) as executor:
             future_to_idx = {
-                executor.submit(self.execute_sql, query, max_rows, return_format): idx
+                executor.submit(contextvars.copy_context().run, self.execute_sql, query, max_rows, return_format): idx
                 for idx, query in enumerate(sql_queries)
             }
             
@@ -361,6 +356,6 @@ class SQLExecutionAgent:
         
         return results
     
-    def __call__(self, sql_query: str, max_rows: int = 100, return_format: str = "dict") -> Dict[str, Any]:
+    def __call__(self, sql_query: str, max_rows: int = 500, return_format: str = "dict") -> Dict[str, Any]:
         """Make agent callable."""
         return self.execute_sql(sql_query, max_rows, return_format)

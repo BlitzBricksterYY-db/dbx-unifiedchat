@@ -135,7 +135,11 @@ function PureMessageActions({
       <Action
         tooltip="Thumbs up"
         onClick={() => handleFeedback('thumbs_up')}
-        className={feedback === 'thumbs_up' ? 'text-green-600' : ''}
+        className={
+          feedback === 'thumbs_up'
+            ? 'bg-green-100 text-green-700 ring-1 ring-green-300 hover:bg-green-100 hover:text-green-700 dark:bg-green-950/50 dark:text-green-300 dark:ring-green-800'
+            : ''
+        }
         data-testid="thumbs-up-button"
       >
         <ThumbsUp />
@@ -143,7 +147,11 @@ function PureMessageActions({
       <Action
         tooltip="Thumbs down"
         onClick={() => handleFeedback('thumbs_down')}
-        className={feedback === 'thumbs_down' ? 'text-red-600' : ''}
+        className={
+          feedback === 'thumbs_down'
+            ? 'bg-red-100 text-red-700 ring-1 ring-red-300 hover:bg-red-100 hover:text-red-700 dark:bg-red-950/50 dark:text-red-300 dark:ring-red-800'
+            : ''
+        }
         data-testid="thumbs-down-button"
       >
         <ThumbsDown />

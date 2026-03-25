@@ -25,21 +25,37 @@ Example usage:
 
 import json
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 
 import os
 
+import mlflow
 from langchain_core.runnables import Runnable
-from databricks_langchain import DatabricksVectorSearch
+from databricks_langchain import VectorSearchRetrieverTool
 from databricks.sdk import WorkspaceClient
+from mlflow.entities import SpanType
 
 
-def _get_pat_workspace_client() -> WorkspaceClient:
-    """Build a WorkspaceClient with auth_type='pat' so databricks-vectorsearch can consume it."""
+def _build_workspace_client() -> WorkspaceClient:
+    """Build a WorkspaceClient for VectorSearchRetrieverTool.
+
+    Local dev with DATABRICKS_CONFIG_PROFILE uses databricks-cli auth, which
+    VectorSearchClient rejects.  When explicit HOST + TOKEN are available we
+    temporarily hide the profile env var to force PAT auth.
+
+    In deployed environments (Databricks Apps / Model Serving) where neither
+    HOST nor TOKEN is set, WorkspaceClient() falls back to model-serving
+    credential strategy automatically.
+    """
     host = os.environ.get("DATABRICKS_HOST")
     token = os.environ.get("DATABRICKS_TOKEN")
     if host and token:
-        return WorkspaceClient(host=host, token=token)
+        saved = os.environ.pop("DATABRICKS_CONFIG_PROFILE", None)
+        try:
+            return WorkspaceClient(host=host, token=token)
+        finally:
+            if saved is not None:
+                os.environ["DATABRICKS_CONFIG_PROFILE"] = saved
     return WorkspaceClient()
 
 
@@ -60,13 +76,26 @@ class PlanningAgent:
         """
         self.llm = llm
         self.vector_search_index = vector_search_index
-        self._workspace_client = _get_pat_workspace_client()
+        self._vs_tool = self._build_vs_tool()
         self.name = "Planning"
-    
+
+    def _build_vs_tool(self) -> VectorSearchRetrieverTool:
+        return VectorSearchRetrieverTool(
+            index_name=self.vector_search_index,
+            tool_name="search_genie_spaces",
+            tool_description="Search for relevant Genie spaces by semantic similarity",
+            num_results=5,
+            columns=["space_id", "space_title", "searchable_content"],
+            filters={"chunk_type": "space_summary"},
+            query_type="ANN",
+            include_score=True,
+            workspace_client=_build_workspace_client(),
+        )
+
     def search_relevant_spaces(self, query: str, num_results: int = 5) -> List[Dict[str, Any]]:
         """
-        Search for relevant Genie spaces using vector search.
-        
+        Search for relevant Genie spaces using VectorSearchRetrieverTool.
+
         Args:
             query: User's question
             num_results: Number of results to return
@@ -78,29 +107,45 @@ class PlanningAgent:
             - searchable_content: Space description/content
             - score: Relevance score from vector search
         """
-        vs = DatabricksVectorSearch(
-            index_name=self.vector_search_index,
-            columns=["space_id", "space_title", "searchable_content"],
-        )
+        with mlflow.start_span(
+            name="vector_search_spaces",
+            span_type=SpanType.RETRIEVER,
+            attributes={
+                "index_name": self.vector_search_index,
+                "num_results": num_results,
+                "tool_name": self._vs_tool.name,
+            },
+        ) as span:
+            span.set_inputs({"query": query, "k": num_results})
 
-        docs_with_scores = vs.similarity_search_with_score(
-            query=query,
-            k=num_results,
-            filter={"chunk_type": "space_summary"},
-            query_type="ANN",
-        )
+            docs = self._vs_tool._vector_store.similarity_search(
+                query=query,
+                k=num_results,
+                filter={"chunk_type": "space_summary"},
+                query_type="ANN",
+            )
 
-        relevant_spaces = []
-        for doc, score in docs_with_scores:
-            space_id = doc.metadata.get("space_id", "")
-            if not space_id:
-                continue
-            relevant_spaces.append({
-                "space_id": space_id,
-                "space_title": doc.metadata.get("space_title", ""),
-                "searchable_content": doc.page_content,
-                "score": score,
-            })
+            relevant_spaces = []
+            for doc in docs:
+                space_id = doc.metadata.get("space_id", "")
+                if not space_id:
+                    continue
+                relevant_spaces.append({
+                    "space_id": space_id,
+                    "space_title": doc.metadata.get("space_title", ""),
+                    "searchable_content": doc.page_content,
+                    "score": doc.metadata.get("score", 0.0),
+                })
+
+            span.set_outputs(
+                {
+                    "result_count": len(relevant_spaces),
+                    "spaces": [
+                        {"space_id": s["space_id"], "space_title": s["space_title"], "score": s["score"]}
+                        for s in relevant_spaces
+                    ],
+                }
+            )
 
         return relevant_spaces
     
@@ -108,7 +153,8 @@ class PlanningAgent:
         self, 
         query: str, 
         relevant_spaces: List[Dict[str, Any]],
-        original_query: str = None
+        original_query: str = None,
+        force_synthesis_route: str = "auto",
     ) -> Dict[str, Any]:
         """
         Create execution plan based on query and relevant spaces.
@@ -133,6 +179,18 @@ class PlanningAgent:
         """
         # Use original_query if provided, otherwise use query as original
         original_query_display = original_query if original_query is not None else query
+        forced_route_display = force_synthesis_route or "auto"
+        forced_route_instructions = ""
+        if forced_route_display == "genie_route":
+            forced_route_instructions = """
+- UI override: Genie Route is selected.
+- You must use Genie Route and must create `genie_route_plan`.
+"""
+        elif forced_route_display == "table_route":
+            forced_route_instructions = """
+- UI override: Table Route is selected.
+- You must use Table Route and must keep `genie_route_plan` null.
+"""
         
         planning_prompt = f"""
 You are a query planning expert. Analyze the following question and create an execution plan.
@@ -140,6 +198,8 @@ You are a query planning expert. Analyze the following question and create an ex
 User original query this turn: {original_query_display}
 
 Question: {query}
+
+Forced synthesis route from UI: {forced_route_display}
 
 Potentially relevant Genie spaces:
 {json.dumps(relevant_spaces, indent=2)}
@@ -154,12 +214,14 @@ Break down the question and determine:
     - "table_route": Directly synthesize SQL across multiple tables
     - "genie_route": Query each Genie Space Agent separately, then combine SQL queries
     - If user explicitly asks for "genie_route", use it; otherwise, use "table_route"
+    - If Genie Route is selected from UI, you must use Genie Route and must create `genie_route_plan`
     - always populate the join_strategy field in the JSON output.
 5. Execution plan: A brief description of how to execute the plan.
     - For genie_route: Return "genie_route_plan": {{'space_id_1':'partial_question_1', 'space_id_2':'partial_question_2'}}
     - For table_route: Return "genie_route_plan": null
     - Each partial_question should be similar to original but scoped to that space
     - Add "Please limit to top 10 rows" to each partial question
+{forced_route_instructions}
 
 Return your analysis as JSON:
 {{

@@ -210,6 +210,33 @@
   }
 }
 
+.markdown-content ul,
+.markdown-content ol {
+  margin: 0.75rem 0;
+  padding-left: 1.5rem;
+}
+
+.markdown-content ul {
+  list-style: disc;
+}
+
+.markdown-content ol {
+  list-style: decimal;
+}
+
+.markdown-content li {
+  display: list-item;
+  margin: 0.25rem 0;
+}
+
+.markdown-content ul ul {
+  list-style: circle;
+}
+
+.markdown-content ol ol {
+  list-style: lower-alpha;
+}
+
 .skeleton {
   * {
     pointer-events: none !important;
@@ -298,3 +325,64 @@
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
 }
+
+/* Processing steps: grey out past steps, highlight the current (last) one.
+   Uses both class selector (.ps) and structural fallback (details > div)
+   in case the markdown renderer strips class attributes. */
+details > .ps,
+details > summary ~ div {
+  opacity: 0.4;
+  font-size: 0.9em;
+  line-height: 1.6;
+  transition: opacity 0.15s ease;
+}
+details > .ps:last-of-type,
+details > summary ~ div:last-of-type {
+  opacity: 1;
+  font-size: 0.95em;
+}
+
+/* Accordion tabs */
+.accordion-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 1rem;
+}
+.accordion-group > details {
+  display: contents;
+}
+.accordion-group > details > summary {
+  padding: 6px 12px;
+  background: var(--color-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  list-style: none;
+  order: 1;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: background 0.2s ease;
+}
+.accordion-group > details > summary::-webkit-details-marker {
+  display: none;
+}
+.accordion-group > details > summary:hover {
+  background: var(--color-accent);
+}
+.accordion-group > details[open] > summary {
+  background: var(--color-primary);
+  color: var(--color-primary-foreground);
+  border-color: var(--color-primary);
+}
+.accordion-group > details > .accordion-content {
+  width: 100%;
+  order: 99;
+  flex-basis: 100%;
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+}
+

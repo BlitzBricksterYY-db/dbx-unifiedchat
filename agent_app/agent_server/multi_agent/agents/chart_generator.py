@@ -1,19 +1,20 @@
 """
-Chart Generator for Multi-Agent System
+Chart Generator for Multi-Agent System.
 
 Three-stage pipeline:
-  1. LLM generates config only (~300 bytes) from a 50-row sample
-  2. Python assembles real data with aggregation (<=30 chart points, <=200 download rows)
-  3. Size guard ensures total JSON < 50KB
+  1. LLM generates a declarative intent spec from a sampled result set.
+  2. Python validates and resolves that intent into deterministic chart data.
+  3. Size guard ensures the final payload stays below the UI transport limit.
 """
 
 import json
 import logging
+import math
 import re
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from langchain_core.runnables import Runnable
 
@@ -23,6 +24,64 @@ MAX_CHART_POINTS = 30
 MAX_DOWNLOAD_ROWS = 200
 MAX_JSON_BYTES = 50_000
 SAMPLE_ROWS_FOR_LLM = 50
+MAX_REFERENCE_LINES = 3
+
+SUPPORTED_FORMATS = ("currency", "number", "percent")
+SUPPORTED_CHART_TYPES = (
+    "bar",
+    "line",
+    "scatter",
+    "pie",
+    "stackedBar",
+    "normalizedStackedBar",
+    "area",
+    "stackedArea",
+    "heatmap",
+    "boxplot",
+    "dualAxis",
+    "rankingSlope",
+    "deltaComparison",
+)
+SUPPORTED_LAYOUTS = ("grouped", "stacked", "normalized")
+SUPPORTED_TRANSFORMS = (
+    "topN",
+    "frequency",
+    "timeBucket",
+    "histogram",
+    "percentOfTotal",
+    "heatmap",
+    "boxplot",
+    "rankingSlope",
+    "deltaComparison",
+)
+SUPPORTED_TIME_BUCKETS = ("day", "week", "month", "quarter", "year")
+SUPPORTED_AGGREGATIONS = ("sum", "avg", "count", "min", "max")
+SERIES_RENDER_TYPES = ("bar", "line", "area")
+_DEDUPED_METRIC_TOKENS = (
+    "total_",
+    "avg_",
+    "average_",
+    "distinct_",
+    "current_age",
+    "year_of_birth",
+    "enrollment_period_count",
+)
+
+CHART_CAPABILITY_MODEL: Dict[str, Dict[str, Any]] = {
+    "bar": {"layouts": {"grouped", "stacked", "normalized"}},
+    "line": {"layouts": {"grouped"}},
+    "scatter": {"layouts": set()},
+    "pie": {"layouts": set()},
+    "stackedBar": {"layouts": {"stacked"}},
+    "normalizedStackedBar": {"layouts": {"normalized"}},
+    "area": {"layouts": {"grouped", "stacked"}},
+    "stackedArea": {"layouts": {"stacked"}},
+    "heatmap": {"layouts": set()},
+    "boxplot": {"layouts": set()},
+    "dualAxis": {"layouts": set()},
+    "rankingSlope": {"layouts": set()},
+    "deltaComparison": {"layouts": set()},
+}
 
 
 def _json_default(o: Any) -> Any:
@@ -44,39 +103,64 @@ class ChartGenerator:
         columns: List[str],
         data: List[Dict[str, Any]],
         original_query: str = "",
+        result_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        End-to-end: LLM config -> Python assembly -> size guard.
+        End-to-end: LLM intent -> validated resolved spec -> deterministic data -> size guard.
         Returns the final chart payload or None if not plottable / on error.
         """
         if not data or not columns:
             return None
 
+        result_context = result_context or {}
+
         try:
-            config = self._get_llm_config(columns, data, original_query)
-            if config is None or not config.get("plottable", False):
+            llm_intent = self._get_llm_config(columns, data, original_query, result_context)
+            if llm_intent is None or not llm_intent.get("plottable", False):
                 return None
 
-            chart_data, aggregated, agg_note = self._assemble_data(columns, data, config)
+            resolved_config, normalization_notes = self._resolve_intent_spec(
+                columns,
+                data,
+                llm_intent,
+                result_context,
+            )
+            if resolved_config is None:
+                return None
+
+            chart_data, aggregated, agg_note = self._assemble_data(
+                columns,
+                data,
+                resolved_config,
+                result_context,
+            )
             if not chart_data:
                 return None
 
-            download_data = data[:MAX_DOWNLOAD_ROWS]
-
+            notes = [note for note in [agg_note, *normalization_notes] if note]
             payload = {
                 "config": {
-                    "chartType": config.get("chartType", "bar"),
-                    "title": config.get("title", ""),
-                    "xAxisField": config.get("xAxisField"),
-                    "groupByField": config.get("groupByField"),
-                    "series": config.get("series", []),
+                    "chartType": resolved_config.get("chartType", "bar"),
+                    "title": resolved_config.get("title", ""),
+                    "xAxisField": resolved_config.get("xAxisField"),
+                    "groupByField": resolved_config.get("groupByField"),
+                    "yAxisField": resolved_config.get("yAxisField"),
+                    "series": resolved_config.get("series", []),
+                    "layout": resolved_config.get("layout"),
                     "toolbox": True,
+                    "supportedChartTypes": resolved_config.get("supportedChartTypes", ["bar"]),
+                    "referenceLines": resolved_config.get("referenceLines", []),
+                    "compareLabels": (
+                        resolved_config.get("compareLabels")
+                        or (resolved_config.get("transform") or {}).get("compareLabels")
+                    ),
+                    "transform": resolved_config.get("transform"),
                 },
                 "chartData": chart_data,
-                "downloadData": download_data,
+                "downloadData": data[:MAX_DOWNLOAD_ROWS],
                 "totalRows": len(data),
                 "aggregated": aggregated,
-                "aggregationNote": agg_note,
+                "aggregationNote": " | ".join(notes) if notes else None,
             }
 
             payload = self._size_guard(payload)
@@ -95,45 +179,18 @@ class ChartGenerator:
         columns: List[str],
         data: List[Dict[str, Any]],
         original_query: str,
+        result_context: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
-        sample = data[:SAMPLE_ROWS_FOR_LLM]
-        sample_json = json.dumps(sample, default=_json_default)
-        if len(sample_json) > 4000:
-            sample_json = sample_json[:4000] + "..."
-
-        prompt = f"""You are a data-visualization expert. Given a query result, decide how to chart it.
-
-User query: {original_query}
-Columns: {columns}
-Total rows: {len(data)}
-Sample data ({len(sample)} rows):
-{sample_json}
-
-Return ONLY valid JSON (no markdown, no explanation):
-{{
-  "plottable": true/false,
-  "chartType": "bar"|"line"|"scatter"|"pie",
-  "title": "short chart title",
-  "xAxisField": "column_for_x_axis",
-  "groupByField": "column_for_grouping" or null,
-  "series": [
-    {{"field": "numeric_column", "name": "Display Name", "format": "currency"|"number"|"percent"}}
-  ],
-  "sortBy": {{"field": "col", "order": "desc"}} or null,
-  "aggregation": null or {{"type": "topN", "n": 20, "metric": "col", "otherLabel": "Other"}}
-}}
-
-Rules:
-- plottable=false ONLY for single scalars, all-text, or no numeric dimension
-- High row count is NEVER a reason to skip; specify aggregation instead
-- aggregation types: topN, timeBucket, histogram, frequency
-- Keep series to <=3 fields
-"""
+        prompt = self._build_prompt(columns, data, original_query, result_context)
         try:
             content = ""
-            for chunk in self.llm.stream(prompt):
-                if chunk.content:
-                    content += chunk.content
+            if hasattr(self.llm, "stream"):
+                for chunk in self.llm.stream(prompt):
+                    if getattr(chunk, "content", None):
+                        content += chunk.content
+            elif hasattr(self.llm, "invoke"):
+                result = self.llm.invoke(prompt)
+                content = getattr(result, "content", "") or ""
             content = content.strip()
 
             match = re.search(r"\{[\s\S]*\}", content)
@@ -144,32 +201,578 @@ Rules:
             logger.warning(f"ChartGenerator LLM parse error: {e}")
             return None
 
+    def _build_prompt(
+        self,
+        columns: List[str],
+        data: List[Dict[str, Any]],
+        original_query: str,
+        result_context: Dict[str, Any],
+    ) -> str:
+        sample = data[:SAMPLE_ROWS_FOR_LLM]
+        sample_json = json.dumps(sample, default=_json_default)
+        if len(sample_json) > 4000:
+            sample_json = sample_json[:4000] + "..."
+
+        label = result_context.get("label") or ""
+        sql_explanation = result_context.get("sql_explanation") or ""
+        row_grain_hint = result_context.get("row_grain_hint") or ""
+
+        return f"""You are a data-visualization expert who creates visually diverse, insightful charts. Given a query result, choose the BEST chart type for the data shape — not the most common one.
+
+User query: {original_query}
+Result label: {label}
+Result explanation: {sql_explanation}
+Row grain hint: {row_grain_hint}
+Columns: {columns}
+Total rows: {len(data)}
+Sample data ({len(sample)} rows):
+{sample_json}
+
+You may ONLY choose options from this capability model:
+- chart types: {", ".join(SUPPORTED_CHART_TYPES)}
+- layouts: {", ".join(SUPPORTED_LAYOUTS)}
+- transforms: {", ".join(SUPPORTED_TRANSFORMS)}
+- series render types: {", ".join(SERIES_RENDER_TYPES)}
+- time buckets: {", ".join(SUPPORTED_TIME_BUCKETS)}
+- aggregate functions: {", ".join(SUPPORTED_AGGREGATIONS)}
+
+CHART SELECTION GUIDE — pick the type that best fits the data:
+- bar/grouped bar: comparing discrete categories on ONE metric (e.g. top 10 providers by spend)
+- line: trends over time with a date/time x-axis
+- area/stackedArea: trends over time where you want to show volume or composition changing
+- scatter: relationship between TWO numeric variables (e.g. age vs. cost)
+- pie: share/composition when there are <=6 categories and one metric
+- stackedBar: composition across categories when you have a groupBy dimension
+- normalizedStackedBar: percent-of-total composition across categories
+- heatmap: density or magnitude across TWO categorical dimensions (e.g. benefit_type vs. service_year)
+- boxplot: distribution spread of a numeric field across groups
+- dualAxis: comparing TWO metrics with very different scales (e.g. count on left, dollars on right)
+- rankingSlope: how entity rankings change between two periods
+- deltaComparison: period-over-period change (e.g. this year vs last year)
+
+Return ONLY valid JSON (no markdown, no explanation):
+{{
+  "plottable": true,
+  "chartType": "<choose the best type from the guide above>",
+  "title": "short descriptive chart title",
+  "xAxisField": "category_or_time_field",
+  "groupByField": "optional_group_field_or_period_field",
+  "layout": "grouped"|"stacked"|"normalized"|null,
+  "series": [
+    {{
+      "field": "numeric_column",
+      "name": "Display Name",
+      "format": "currency"|"number"|"percent",
+      "chartType": "bar"|"line"|"area"|null,
+      "axis": "primary"|"secondary"|null
+    }}
+  ],
+  "sortBy": {{"field": "field_name", "order": "asc"|"desc"}} or null,
+  "transform": null or {{
+    "type": "topN"|"frequency"|"timeBucket"|"histogram"|"percentOfTotal"|"heatmap"|"boxplot"|"rankingSlope"|"deltaComparison",
+    "...": "transform-specific fields"
+  }},
+  "referenceLines": [
+    {{"value": 0, "label": "optional label", "axis": "primary"|"secondary"|null}}
+  ]
+}}
+
+Examples for EACH chart type:
+- Trend over time: chartType=line, xAxisField="service_date", transform={{"type":"timeBucket","field":"service_date","bucket":"month","metric":"paid_amount","function":"sum"}}
+- Stacked area trend: chartType=stackedArea, layout=stacked, xAxisField="service_date", groupByField="benefit_type", transform={{"type":"timeBucket","field":"service_date","bucket":"quarter","metric":"paid_amount","function":"sum"}}
+- Distribution histogram: chartType=bar, transform={{"type":"histogram","field":"paid_amount","bins":12}}
+- Top N categories: chartType=bar, transform={{"type":"topN","metric":"total_paid_amount","n":10,"otherLabel":"Other"}}, sortBy={{"field":"total_paid_amount","order":"desc"}}
+- Stacked composition: chartType=stackedBar, layout=stacked, groupByField="benefit_type", transform={{"type":"topN","metric":"paid_amount","n":8,"otherLabel":"Other"}}
+- Percent composition: chartType=normalizedStackedBar, layout=normalized, transform={{"type":"percentOfTotal","metric":"member_count"}}
+- Scatter correlation: chartType=scatter, xAxisField="current_age", series=[{{"field":"total_paid","name":"Total Paid","format":"currency"}}]
+- Pie share: chartType=pie, xAxisField="gender", series=[{{"field":"member_count","name":"Members","format":"number"}}]
+- Heatmap: chartType=heatmap, xAxisField="service_year", groupByField="benefit_type", transform={{"type":"heatmap","metric":"paid_amount","function":"sum"}}
+- Boxplot spread: chartType=boxplot, xAxisField="benefit_type", transform={{"type":"boxplot","field":"paid_amount"}}
+- Dual axis comparison: chartType=dualAxis, series=[{{"field":"total_paid","name":"Total Paid","format":"currency","chartType":"bar","axis":"primary"}},{{"field":"claim_count","name":"Claims","format":"number","chartType":"line","axis":"secondary"}}]
+- Ranking change: chartType=rankingSlope, xAxisField="provider_name", transform={{"type":"rankingSlope","entityField":"provider_name","periodField":"service_year","metric":"paid_amount","function":"sum","topN":10}}
+- Period delta: chartType=deltaComparison, xAxisField="benefit_type", transform={{"type":"deltaComparison","entityField":"benefit_type","periodField":"service_year","metric":"paid_amount","function":"sum"}}
+
+Rules:
+- DO NOT default to bar chart — actively consider which type best reveals the insight
+- plottable=false ONLY for single scalars, all-text, or no numeric dimension
+- High row count is NEVER a reason to skip; prefer a transform
+- Keep total series to <=3
+- If two numeric fields exist and no date, strongly consider scatter or dualAxis
+- If a date field exists, prefer line, area, or stackedArea over bar
+- If <=6 categories with one metric, consider pie
+- If two categorical dimensions with a metric, consider heatmap
+- If you see period/year columns, consider rankingSlope or deltaComparison
+- Prefer charts that match the current result label/explanation, not a previous result
+- If row grain indicates repeated detail rows (diagnosis, procedure, coverage, code-level rows),
+  do NOT choose a configuration that would sum repeated patient-level totals across those rows
+- Do NOT invent fields or chart options outside the capability model
+"""
+
     # ------------------------------------------------------------------
-    # Stage 2: Python assembly
+    # Stage 2: Python validation + assembly
     # ------------------------------------------------------------------
+
+    def _resolve_intent_spec(
+        self,
+        columns: List[str],
+        data: List[Dict[str, Any]],
+        intent: Dict[str, Any],
+        result_context: Dict[str, Any],
+    ) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+        notes: List[str] = []
+        kinds = self._infer_field_kinds(columns, data)
+
+        x_field = self._coerce_field(intent.get("xAxisField"), columns)
+        group_field = self._coerce_field(intent.get("groupByField"), columns)
+
+        series = self._normalize_series(intent.get("series"), columns, data, notes)
+        transform = self._normalize_transform(
+            intent.get("transform") or intent.get("aggregation"),
+            columns,
+            kinds,
+            x_field,
+            group_field,
+            series,
+            notes,
+        )
+
+        chart_type = self._normalize_chart_type(
+            intent.get("chartType"),
+            transform,
+            series,
+            x_field,
+            group_field,
+            kinds,
+            notes,
+        )
+        layout = self._normalize_layout(intent.get("layout"), chart_type, group_field, notes)
+
+        if chart_type == "stackedBar":
+            layout = "stacked"
+        elif chart_type == "normalizedStackedBar":
+            layout = "normalized"
+        elif chart_type == "stackedArea":
+            layout = "stacked"
+        elif chart_type == "area" and layout == "stacked":
+            chart_type = "stackedArea"
+
+        if chart_type in {"heatmap", "boxplot", "rankingSlope", "deltaComparison"} and not transform:
+            transform = {"type": chart_type}
+
+        if chart_type == "heatmap":
+            x_field = x_field or self._pick_categorical_field(columns, kinds)
+            group_field = group_field or self._pick_secondary_dimension(columns, kinds, x_field)
+        elif chart_type == "boxplot":
+            x_field = x_field or self._pick_categorical_field(columns, kinds)
+        elif chart_type in {"rankingSlope", "deltaComparison"}:
+            x_field = x_field or self._pick_categorical_field(columns, kinds)
+            if transform and not transform.get("periodField"):
+                transform["periodField"] = group_field or self._pick_date_or_categorical_field(columns, kinds, exclude=x_field)
+            group_field = transform.get("periodField") if transform else group_field
+        else:
+            x_field = x_field or self._pick_default_x_field(columns, kinds)
+
+        if chart_type == "dualAxis" and len(series) < 2:
+            chart_type = "bar"
+            notes.append("Downgraded dualAxis to bar because fewer than two valid series remained")
+
+        if chart_type == "pie":
+            layout = None
+            group_field = None
+            series = series[:1]
+
+        if chart_type == "scatter":
+            layout = None
+            group_field = None
+            if len(series) < 1:
+                return None, notes
+
+        effective_series = transform.get("syntheticSeries") if transform else None
+        if not (effective_series or series) and chart_type not in {"heatmap", "rankingSlope", "deltaComparison"}:
+            return None, notes
+
+        if not x_field and chart_type not in {"boxplot", "dualAxis"}:
+            notes.append("Skipped chart because no suitable x-axis field was available")
+            return None, notes
+
+        if not self._is_chart_type_supported(chart_type, layout):
+            notes.append(f"Downgraded unsupported chart combination to bar")
+            chart_type = "bar"
+            layout = "grouped" if group_field else None
+
+        reference_lines = self._normalize_reference_lines(intent.get("referenceLines"), notes)
+        sort_by = self._normalize_sort(intent.get("sortBy"), columns)
+        supported_types = self._resolve_supported_chart_types(chart_type, group_field, layout, transform)
+
+        resolved = {
+            "chartType": chart_type,
+            "title": intent.get("title") or "",
+            "xAxisField": x_field,
+            "groupByField": group_field,
+            "yAxisField": transform.get("yField") if transform else None,
+            "series": series,
+            "layout": layout,
+            "transform": transform,
+            "sortBy": sort_by,
+            "referenceLines": reference_lines,
+            "supportedChartTypes": supported_types,
+            "compareLabels": transform.get("compareLabels") if transform else None,
+            "resultContext": result_context,
+        }
+
+        if transform and transform.get("syntheticSeries"):
+            resolved["series"] = transform["syntheticSeries"]
+
+        return resolved, notes
+
+    def _normalize_series(
+        self,
+        raw_series: Any,
+        columns: Sequence[str],
+        data: List[Dict[str, Any]],
+        notes: List[str],
+    ) -> List[Dict[str, Any]]:
+        kinds = self._infer_field_kinds(columns, data)
+        numeric_fields = [field for field, kind in kinds.items() if kind == "numeric"]
+        series_list = raw_series if isinstance(raw_series, list) else []
+        normalized: List[Dict[str, Any]] = []
+
+        for item in series_list[:3]:
+            if not isinstance(item, dict):
+                continue
+            field = self._coerce_field(item.get("field"), columns)
+            if not field or kinds.get(field) != "numeric":
+                continue
+            fmt = item.get("format") if item.get("format") in SUPPORTED_FORMATS else "number"
+            render_type = item.get("chartType")
+            if render_type not in SERIES_RENDER_TYPES:
+                render_type = None
+            axis = item.get("axis") if item.get("axis") in {"primary", "secondary"} else "primary"
+            normalized.append(
+                {
+                    "field": field,
+                    "name": item.get("name") or field.replace("_", " ").title(),
+                    "format": fmt,
+                    "chartType": render_type,
+                    "axis": axis,
+                }
+            )
+
+        if normalized:
+            return normalized
+
+        for field in numeric_fields[:2]:
+            normalized.append(
+                {
+                    "field": field,
+                    "name": field.replace("_", " ").title(),
+                    "format": self._infer_format(field),
+                    "chartType": None,
+                    "axis": "primary",
+                }
+            )
+
+        if normalized and len(series_list) == 0:
+            notes.append("Filled missing series from numeric columns")
+        return normalized
+
+    def _normalize_transform(
+        self,
+        raw_transform: Any,
+        columns: Sequence[str],
+        kinds: Dict[str, str],
+        x_field: Optional[str],
+        group_field: Optional[str],
+        series: List[Dict[str, Any]],
+        notes: List[str],
+    ) -> Optional[Dict[str, Any]]:
+        if not raw_transform:
+            return None
+        if not isinstance(raw_transform, dict):
+            notes.append("Ignored malformed transform payload from the model")
+            return None
+
+        transform_type = raw_transform.get("type")
+        if transform_type not in SUPPORTED_TRANSFORMS:
+            notes.append(f"Ignored unsupported transform '{transform_type}'")
+            return None
+
+        metric = self._coerce_field(raw_transform.get("metric"), columns)
+        if not metric and series:
+            metric = series[0]["field"]
+
+        normalized: Dict[str, Any] = {"type": transform_type}
+
+        if transform_type == "topN":
+            normalized["metric"] = metric
+            normalized["n"] = _clamp_int(raw_transform.get("n"), default=10, minimum=2, maximum=20)
+            normalized["otherLabel"] = raw_transform.get("otherLabel") or "Other"
+            return normalized
+
+        if transform_type == "frequency":
+            normalized["field"] = self._coerce_field(raw_transform.get("field"), columns) or x_field
+            normalized["topN"] = _clamp_int(raw_transform.get("topN"), default=10, minimum=2, maximum=20)
+            normalized["syntheticSeries"] = [
+                {
+                    "field": "count",
+                    "name": "Count",
+                    "format": "number",
+                    "chartType": None,
+                    "axis": "primary",
+                }
+            ]
+            return normalized
+
+        if transform_type == "timeBucket":
+            field = self._coerce_field(raw_transform.get("field"), columns) or x_field
+            if not field or kinds.get(field) != "date":
+                notes.append("Skipped invalid timeBucket field; using fallback chart")
+                return None
+            normalized["field"] = field
+            normalized["bucket"] = (
+                raw_transform.get("bucket")
+                if raw_transform.get("bucket") in SUPPORTED_TIME_BUCKETS
+                else "month"
+            )
+            normalized["metric"] = metric
+            normalized["function"] = (
+                raw_transform.get("function")
+                if raw_transform.get("function") in SUPPORTED_AGGREGATIONS
+                else ("count" if not metric else "sum")
+            )
+            return normalized
+
+        if transform_type == "histogram":
+            field = self._coerce_field(raw_transform.get("field"), columns) or metric
+            if not field or kinds.get(field) != "numeric":
+                notes.append("Skipped invalid histogram field; using fallback chart")
+                return None
+            normalized["field"] = field
+            normalized["bins"] = _clamp_int(raw_transform.get("bins"), default=12, minimum=5, maximum=20)
+            normalized["syntheticSeries"] = [
+                {
+                    "field": "count",
+                    "name": "Count",
+                    "format": "number",
+                    "chartType": None,
+                    "axis": "primary",
+                }
+            ]
+            return normalized
+
+        if transform_type == "percentOfTotal":
+            normalized["metric"] = metric
+            normalized["within"] = "x" if group_field else "global"
+            return normalized
+
+        if transform_type == "heatmap":
+            normalized["xField"] = x_field or self._pick_categorical_field(columns, kinds)
+            normalized["yField"] = self._coerce_field(raw_transform.get("yField"), columns) or group_field
+            normalized["metric"] = metric
+            normalized["function"] = (
+                raw_transform.get("function")
+                if raw_transform.get("function") in SUPPORTED_AGGREGATIONS
+                else ("count" if not metric else "sum")
+            )
+            normalized["syntheticSeries"] = [
+                {
+                    "field": metric or "value",
+                    "name": (metric or "value").replace("_", " ").title(),
+                    "format": self._infer_format(metric or "value"),
+                    "chartType": None,
+                    "axis": "primary",
+                }
+            ]
+            return normalized if normalized["xField"] and normalized["yField"] else None
+
+        if transform_type == "boxplot":
+            field = self._coerce_field(raw_transform.get("field"), columns) or metric
+            if not field or kinds.get(field) != "numeric":
+                notes.append("Skipped invalid boxplot field; using fallback chart")
+                return None
+            normalized["field"] = field
+            normalized["groupField"] = x_field
+            normalized["syntheticSeries"] = [
+                {
+                    "field": field,
+                    "name": field.replace("_", " ").title(),
+                    "format": self._infer_format(field),
+                    "chartType": None,
+                    "axis": "primary",
+                }
+            ]
+            return normalized
+
+        if transform_type in {"rankingSlope", "deltaComparison"}:
+            entity_field = x_field or self._pick_categorical_field(columns, kinds)
+            period_field = self._coerce_field(raw_transform.get("periodField"), columns) or group_field
+            if not entity_field or not period_field:
+                notes.append(f"Skipped invalid {transform_type} transform; using fallback chart")
+                return None
+            normalized["entityField"] = entity_field
+            normalized["periodField"] = period_field
+            normalized["metric"] = metric
+            normalized["topN"] = _clamp_int(raw_transform.get("topN"), default=10, minimum=2, maximum=15)
+            normalized["function"] = (
+                raw_transform.get("function")
+                if raw_transform.get("function") in SUPPORTED_AGGREGATIONS
+                else ("count" if not metric else "sum")
+            )
+            return normalized
+
+        return None
+
+    def _normalize_chart_type(
+        self,
+        requested: Any,
+        transform: Optional[Dict[str, Any]],
+        series: List[Dict[str, Any]],
+        x_field: Optional[str],
+        group_field: Optional[str],
+        kinds: Dict[str, str],
+        notes: List[str],
+    ) -> str:
+        chart_type = requested if requested in SUPPORTED_CHART_TYPES or requested == "combo" else None
+
+        if transform:
+            transform_type = transform["type"]
+            if transform_type == "heatmap":
+                chart_type = "heatmap"
+            elif transform_type == "boxplot":
+                chart_type = "boxplot"
+            elif transform_type == "rankingSlope":
+                chart_type = "rankingSlope"
+            elif transform_type == "deltaComparison":
+                chart_type = "deltaComparison"
+            elif transform_type == "histogram":
+                chart_type = chart_type or "bar"
+            elif transform_type == "timeBucket":
+                chart_type = chart_type or "line"
+
+        if chart_type == "combo":
+            chart_type = "dualAxis"
+
+        if chart_type:
+            return chart_type
+
+        if group_field and len(series) >= 1:
+            return "stackedBar"
+        if x_field and kinds.get(x_field) == "date":
+            return "line"
+
+        num_numeric = sum(1 for k in kinds.values() if k == "numeric")
+        num_categorical = sum(1 for k in kinds.values() if k == "categorical")
+
+        if num_numeric >= 2 and x_field and kinds.get(x_field) == "numeric":
+            return "scatter"
+        if num_categorical <= 6 and num_categorical >= 2 and len(series) == 1:
+            return "pie"
+        if len(series) >= 2:
+            return "dualAxis"
+        if len(series) == 1:
+            return "bar"
+
+        notes.append("Defaulted chart type to bar")
+        return "bar"
+
+    def _normalize_layout(
+        self,
+        requested: Any,
+        chart_type: str,
+        group_field: Optional[str],
+        notes: List[str],
+    ) -> Optional[str]:
+        if chart_type in {"stackedBar", "stackedArea"}:
+            return "stacked"
+        if chart_type == "normalizedStackedBar":
+            return "normalized"
+        if chart_type in {"pie", "heatmap", "boxplot", "dualAxis", "rankingSlope", "deltaComparison", "scatter"}:
+            return None
+        if requested in SUPPORTED_LAYOUTS:
+            return requested
+        if group_field and chart_type in {"bar", "area", "line"}:
+            return "grouped"
+        if requested and requested not in SUPPORTED_LAYOUTS:
+            notes.append(f"Ignored unsupported layout '{requested}'")
+        return None
+
+    def _normalize_reference_lines(self, raw: Any, notes: List[str]) -> List[Dict[str, Any]]:
+        if not isinstance(raw, list):
+            return []
+        normalized: List[Dict[str, Any]] = []
+        for item in raw[:MAX_REFERENCE_LINES]:
+            if not isinstance(item, dict):
+                continue
+            value = _numeric(item.get("value"))
+            axis = item.get("axis") if item.get("axis") in {"primary", "secondary"} else "primary"
+            normalized.append(
+                {
+                    "value": value,
+                    "label": item.get("label") or "",
+                    "axis": axis,
+                }
+            )
+        if raw and not normalized:
+            notes.append("Dropped invalid reference line definitions")
+        return normalized
+
+    def _normalize_sort(self, raw: Any, columns: Sequence[str]) -> Optional[Dict[str, str]]:
+        if not isinstance(raw, dict):
+            return None
+        field = raw.get("field")
+        if field not in columns and field not in {"count", "delta", "value"}:
+            return None
+        order = raw.get("order") if raw.get("order") in {"asc", "desc"} else "desc"
+        return {"field": field, "order": order}
+
+    def _resolve_supported_chart_types(
+        self,
+        chart_type: str,
+        group_field: Optional[str],
+        layout: Optional[str],
+        transform: Optional[Dict[str, Any]],
+    ) -> List[str]:
+        if chart_type in {"heatmap", "boxplot", "rankingSlope", "deltaComparison"}:
+            return [chart_type]
+        if chart_type == "dualAxis":
+            return ["dualAxis", "bar", "line"]
+        if transform and transform.get("type") == "histogram":
+            return ["bar", "line"]
+        if layout == "normalized":
+            return ["normalizedStackedBar", "stackedBar", "bar"]
+        if layout == "stacked" and chart_type in {"stackedArea", "area"}:
+            return ["stackedArea", "area", "line"]
+        if layout == "stacked":
+            return ["stackedBar", "bar", "line"]
+        if group_field:
+            return ["bar", "line", "area", "stackedBar", "normalizedStackedBar"]
+        return ["bar", "line", "scatter", "pie"]
 
     def _assemble_data(
         self,
         columns: List[str],
         data: List[Dict[str, Any]],
         config: Dict[str, Any],
-    ) -> tuple[List[Dict], bool, Optional[str]]:
-        """Returns (chart_data, aggregated, aggregation_note)."""
-        aggregation = config.get("aggregation")
-        sort_by = config.get("sortBy")
-
-        if aggregation:
-            chart_data, note = self._apply_aggregation(data, config, aggregation)
+        result_context: Dict[str, Any],
+    ) -> Tuple[List[Dict], bool, Optional[str]]:
+        transform = config.get("transform")
+        if transform:
+            chart_data, note = self._apply_transform(data, config, transform, result_context)
             return chart_data[:MAX_CHART_POINTS], True, note
 
         working = list(data)
+        sort_by = config.get("sortBy")
         if sort_by:
             field = sort_by.get("field", "")
-            desc = sort_by.get("order", "desc") == "desc"
+            reverse = sort_by.get("order", "desc") == "desc"
             try:
-                working.sort(key=lambda r: _numeric(r.get(field, 0)), reverse=desc)
+                working.sort(key=lambda row: _sort_value(row.get(field)), reverse=reverse)
             except Exception:
                 pass
+
+        if config.get("layout") == "normalized" and config.get("groupByField"):
+            normalized_data = self._normalize_percent_by_group(working, config)
+            return normalized_data[:MAX_CHART_POINTS], True, "Converted grouped values to percent-of-total composition"
 
         if len(working) > MAX_CHART_POINTS:
             note = f"Showing first {MAX_CHART_POINTS} of {len(working)} rows"
@@ -177,32 +780,46 @@ Rules:
 
         return working, False, None
 
-    def _apply_aggregation(
+    def _apply_transform(
         self,
         data: List[Dict[str, Any]],
         config: Dict[str, Any],
-        aggregation: Dict[str, Any],
-    ) -> tuple[List[Dict], str]:
-        agg_type = aggregation.get("type", "topN")
-        metric = aggregation.get("metric", "")
-        x_field = config.get("xAxisField", "")
-
-        if agg_type == "topN":
-            n = aggregation.get("n", 20)
-            other_label = aggregation.get("otherLabel", "Other")
-            return self._agg_top_n(data, x_field, metric, config.get("series", []), n, other_label)
-
-        if agg_type == "frequency":
-            field = aggregation.get("field", x_field)
-            top_n = aggregation.get("topN", 20)
-            counts: Dict[str, int] = defaultdict(int)
-            for row in data:
-                counts[str(row.get(field, ""))] += 1
-            sorted_items = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
-            chart_data = [{field: k, "count": v} for k, v in sorted_items[:top_n]]
-            note = f"Top {top_n} of {len(counts)} unique values by frequency"
-            return chart_data, note
-
+        transform: Dict[str, Any],
+        result_context: Dict[str, Any],
+    ) -> Tuple[List[Dict], str]:
+        transform_type = transform.get("type")
+        if transform_type == "topN":
+            return self._agg_top_n(
+                data=data,
+                x_field=config.get("xAxisField", ""),
+                metric=transform.get("metric", ""),
+                group_field=config.get("groupByField"),
+                series=config.get("series", []),
+                n=transform.get("n", 10),
+                other_label=transform.get("otherLabel", "Other"),
+                result_context=result_context,
+            )
+        if transform_type == "frequency":
+            return self._agg_frequency(
+                data,
+                transform.get("field") or config.get("xAxisField", ""),
+                transform.get("topN", 10),
+                config.get("xAxisField") or transform.get("field") or "value",
+            )
+        if transform_type == "timeBucket":
+            return self._agg_time_bucket(data, config, transform, result_context)
+        if transform_type == "histogram":
+            return self._agg_histogram(data, transform)
+        if transform_type == "percentOfTotal":
+            return self._agg_percent_of_total(data, config, transform, result_context)
+        if transform_type == "heatmap":
+            return self._agg_heatmap(data, transform, result_context)
+        if transform_type == "boxplot":
+            return self._agg_boxplot(data, transform)
+        if transform_type == "rankingSlope":
+            return self._agg_period_comparison(data, transform, comparison_type="rankingSlope")
+        if transform_type == "deltaComparison":
+            return self._agg_period_comparison(data, transform, comparison_type="deltaComparison")
         return data[:MAX_CHART_POINTS], f"Showing first {MAX_CHART_POINTS} rows"
 
     def _agg_top_n(
@@ -213,31 +830,474 @@ Rules:
         series: List[Dict],
         n: int,
         other_label: str,
-    ) -> tuple[List[Dict], str]:
+        result_context: Dict[str, Any],
+        group_field: Optional[str] = None,
+    ) -> Tuple[List[Dict], str]:
         groups: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        grouped_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        group_values: Dict[str, Dict[str, Dict[str, float]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
         series_fields = [s["field"] for s in series] if series else ([metric] if metric else [])
+        deduped_fields: set[str] = set()
 
         for row in data:
             key = str(row.get(x_field, ""))
-            for f in series_fields:
-                groups[key][f] += _numeric(row.get(f, 0))
+            grouped_rows[key].append(row)
+
+        for key, rows in grouped_rows.items():
+            for field in series_fields:
+                values = [_numeric(row.get(field, 0)) for row in rows]
+                if self._should_dedupe_metric(field, rows, result_context):
+                    groups[key][field] = max(values) if values else 0.0
+                    deduped_fields.add(field)
+                else:
+                    groups[key][field] = sum(values)
 
         sort_field = metric or (series_fields[0] if series_fields else "")
-        sorted_keys = sorted(groups.keys(), key=lambda k: groups[k].get(sort_field, 0), reverse=True)
-
+        sorted_keys = sorted(groups.keys(), key=lambda item: groups[item].get(sort_field, 0), reverse=True)
         top_keys = sorted_keys[:n]
         rest_keys = sorted_keys[n:]
 
-        chart_data = [{x_field: k, **{f: groups[k][f] for f in series_fields}} for k in top_keys]
+        if not group_field:
+            chart_data = [{x_field: key, **{field: groups[key][field] for field in series_fields}} for key in top_keys]
+        else:
+            for row in data:
+                row_key = str(row.get(x_field, ""))
+                if row_key not in top_keys:
+                    continue
+                group_value = str(row.get(group_field, ""))
+                for field in series_fields:
+                    group_values[row_key][group_value][field] += _numeric(row.get(field, 0))
+            chart_data = []
+            for key in top_keys:
+                for group_value, values in sorted(group_values[key].items()):
+                    chart_data.append({x_field: key, group_field: group_value, **values})
 
         if rest_keys:
-            other = {x_field: other_label}
-            for f in series_fields:
-                other[f] = sum(groups[k][f] for k in rest_keys)
-            chart_data.append(other)
+            if not group_field:
+                other = {x_field: other_label}
+                for field in series_fields:
+                    other[field] = sum(groups[key][field] for key in rest_keys)
+                chart_data.append(other)
+            else:
+                other_groups: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+                for row in data:
+                    row_key = str(row.get(x_field, ""))
+                    if row_key not in rest_keys:
+                        continue
+                    group_value = str(row.get(group_field, ""))
+                    for field in series_fields:
+                        other_groups[group_value][field] += _numeric(row.get(field, 0))
+                for group_value, values in sorted(other_groups.items()):
+                    chart_data.append({x_field: other_label, group_field: group_value, **values})
 
         note = f"Top {n} of {len(groups)} categories by {sort_field}"
+        if deduped_fields:
+            deduped_list = ", ".join(sorted(deduped_fields))
+            note += f"; repeated-grain guardrail used max/unique semantics for {deduped_list}"
         return chart_data, note
+
+    def _agg_frequency(
+        self,
+        data: List[Dict[str, Any]],
+        field: str,
+        top_n: int,
+        x_field: str,
+    ) -> Tuple[List[Dict], str]:
+        counts: Dict[str, int] = defaultdict(int)
+        for row in data:
+            counts[str(row.get(field, ""))] += 1
+        sorted_items = sorted(counts.items(), key=lambda item: item[1], reverse=True)
+        chart_data = [{x_field: key, "count": value} for key, value in sorted_items[:top_n]]
+        note = f"Top {top_n} of {len(counts)} unique values by frequency"
+        return chart_data, note
+
+    def _agg_time_bucket(
+        self,
+        data: List[Dict[str, Any]],
+        config: Dict[str, Any],
+        transform: Dict[str, Any],
+        result_context: Dict[str, Any],
+    ) -> Tuple[List[Dict], str]:
+        field = transform["field"]
+        metric = transform.get("metric")
+        function = transform.get("function", "sum")
+        bucket = transform.get("bucket", "month")
+        group_field = config.get("groupByField")
+        series = config.get("series", [])
+        series_fields = [series[0]["field"]] if not metric and series else []
+        metric_fields = [metric] if metric else series_fields or ["count"]
+
+        grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        for row in data:
+            dt = _coerce_datetime(row.get(field))
+            if not dt:
+                continue
+            bucket_label = _bucket_datetime(dt, bucket)
+            group_value = str(row.get(group_field, "")) if group_field else ""
+            grouped[(bucket_label, group_value)].append(row)
+
+        chart_data: List[Dict[str, Any]] = []
+        for (bucket_label, group_value), rows in sorted(grouped.items(), key=lambda item: item[0][0]):
+            row_out: Dict[str, Any] = {config["xAxisField"]: bucket_label}
+            if group_field:
+                row_out[group_field] = group_value
+            for field_name in metric_fields:
+                if field_name == "count":
+                    row_out["count"] = len(rows)
+                    continue
+                values = [_numeric(r.get(field_name, 0)) for r in rows]
+                row_out[field_name] = _aggregate_values(values, function, field_name, rows, result_context, self._should_dedupe_metric)
+            chart_data.append(row_out)
+
+        note = f"Bucketed {len(chart_data)} points by {bucket}"
+        return chart_data, note
+
+    def _agg_histogram(
+        self,
+        data: List[Dict[str, Any]],
+        transform: Dict[str, Any],
+    ) -> Tuple[List[Dict], str]:
+        field = transform["field"]
+        bins = transform.get("bins", 12)
+        values = sorted(_numeric(row.get(field)) for row in data if row.get(field) is not None)
+        if not values:
+            return [], "No numeric values available for histogram"
+        lo, hi = values[0], values[-1]
+        if math.isclose(lo, hi):
+            return [{"bucket": f"{lo:g}", "bucketStart": lo, "bucketEnd": hi, "count": len(values)}], "Single-value histogram"
+        width = (hi - lo) / bins
+        counts = [0 for _ in range(bins)]
+        for value in values:
+            index = min(int((value - lo) / width), bins - 1)
+            counts[index] += 1
+        chart_data = []
+        for index, count in enumerate(counts):
+            start = lo + index * width
+            end = lo + (index + 1) * width
+            chart_data.append(
+                {
+                    "bucket": f"{start:.1f}–{end:.1f}",
+                    "bucketStart": start,
+                    "bucketEnd": end,
+                    "count": count,
+                }
+            )
+        return chart_data, f"Histogram with {bins} bins for {field}"
+
+    def _agg_percent_of_total(
+        self,
+        data: List[Dict[str, Any]],
+        config: Dict[str, Any],
+        transform: Dict[str, Any],
+        result_context: Dict[str, Any],
+    ) -> Tuple[List[Dict], str]:
+        metric = transform.get("metric") or (config.get("series", [{}])[0].get("field") if config.get("series") else "")
+        if not metric:
+            return [], "Percent-of-total skipped because no metric was available"
+        x_field = config.get("xAxisField")
+        group_field = config.get("groupByField")
+        if not x_field:
+            return [], "Percent-of-total skipped because no x-axis field was available"
+        if group_field:
+            grouped = self._pivot_group_metric(data, x_field, group_field, metric, result_context)
+            normalized: List[Dict[str, Any]] = []
+            for x_value, groups in grouped.items():
+                total = sum(groups.values()) or 1.0
+                for group_value, value in groups.items():
+                    normalized.append(
+                        {
+                            x_field: x_value,
+                            group_field: group_value,
+                            metric: round((value / total) * 100, 4),
+                        }
+                    )
+            return normalized, f"Converted grouped {metric} values to percent-of-total within each {x_field}"
+
+        totals: Dict[str, float] = defaultdict(float)
+        grouped_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for row in data:
+            key = str(row.get(x_field, ""))
+            grouped_rows[key].append(row)
+        for key, rows in grouped_rows.items():
+            values = [_numeric(row.get(metric, 0)) for row in rows]
+            totals[key] = _aggregate_values(values, "sum", metric, rows, result_context, self._should_dedupe_metric)
+        grand_total = sum(totals.values()) or 1.0
+        chart_data = [{x_field: key, metric: round((value / grand_total) * 100, 4)} for key, value in totals.items()]
+        chart_data.sort(key=lambda row: row[metric], reverse=True)
+        return chart_data, f"Converted {metric} values to percent-of-total"
+
+    def _agg_heatmap(
+        self,
+        data: List[Dict[str, Any]],
+        transform: Dict[str, Any],
+        result_context: Dict[str, Any],
+    ) -> Tuple[List[Dict], str]:
+        x_field = transform["xField"]
+        y_field = transform["yField"]
+        metric = transform.get("metric")
+        function = transform.get("function", "sum")
+        cells: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        for row in data:
+            cells[(str(row.get(x_field, "")), str(row.get(y_field, "")))].append(row)
+        chart_data: List[Dict[str, Any]] = []
+        value_field = metric or "value"
+        for (x_value, y_value), rows in sorted(cells.items()):
+            if metric:
+                values = [_numeric(row.get(metric, 0)) for row in rows]
+                value = _aggregate_values(values, function, metric, rows, result_context, self._should_dedupe_metric)
+            else:
+                value = len(rows)
+            chart_data.append({x_field: x_value, y_field: y_value, value_field: value})
+        note = f"Built heatmap matrix with {len(chart_data)} populated cells"
+        return chart_data, note
+
+    def _agg_boxplot(
+        self,
+        data: List[Dict[str, Any]],
+        transform: Dict[str, Any],
+    ) -> Tuple[List[Dict], str]:
+        field = transform["field"]
+        group_field = transform.get("groupField")
+        grouped_values: Dict[str, List[float]] = defaultdict(list)
+        if group_field:
+            for row in data:
+                grouped_values[str(row.get(group_field, ""))].append(_numeric(row.get(field)))
+        else:
+            grouped_values[field] = [_numeric(row.get(field)) for row in data]
+
+        chart_data: List[Dict[str, Any]] = []
+        for label, values in grouped_values.items():
+            clean = sorted(value for value in values if not math.isnan(value))
+            if not clean:
+                continue
+            q1, median, q3 = _quartiles(clean)
+            chart_data.append(
+                {
+                    transform.get("groupField") or "label": label,
+                    "min": clean[0],
+                    "q1": q1,
+                    "median": median,
+                    "q3": q3,
+                    "max": clean[-1],
+                }
+            )
+        chart_data.sort(key=lambda row: str(next(iter(row.values()))))
+        note = f"Summarized {field} into boxplot statistics"
+        return chart_data, note
+
+    def _agg_period_comparison(
+        self,
+        data: List[Dict[str, Any]],
+        transform: Dict[str, Any],
+        comparison_type: str,
+    ) -> Tuple[List[Dict], str]:
+        entity_field = transform["entityField"]
+        period_field = transform["periodField"]
+        metric = transform.get("metric")
+        function = transform.get("function", "sum")
+        top_n = transform.get("topN", 10)
+
+        grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        periods: List[str] = []
+        for row in data:
+            entity = str(row.get(entity_field, ""))
+            period = str(row.get(period_field, ""))
+            if not entity or not period:
+                continue
+            grouped[(entity, period)].append(row)
+            periods.append(period)
+
+        ordered_periods = sorted({period for period in periods})
+        if len(ordered_periods) < 2:
+            return [], f"{comparison_type} skipped because fewer than two periods were available"
+        start_label, end_label = ordered_periods[0], ordered_periods[-1]
+
+        entity_values: Dict[str, Dict[str, float]] = defaultdict(dict)
+        for (entity, period), rows in grouped.items():
+            if metric:
+                values = [_numeric(row.get(metric, 0)) for row in rows]
+                entity_values[entity][period] = _aggregate_values(values, function, metric, rows, {}, self._should_dedupe_metric)
+            else:
+                entity_values[entity][period] = float(len(rows))
+
+        comparison_rows: List[Dict[str, Any]] = []
+        for entity, period_map in entity_values.items():
+            start_value = period_map.get(start_label, 0.0)
+            end_value = period_map.get(end_label, 0.0)
+            comparison_rows.append(
+                {
+                    entity_field: entity,
+                    "startLabel": start_label,
+                    "endLabel": end_label,
+                    "startValue": start_value,
+                    "endValue": end_value,
+                    "delta": end_value - start_value,
+                }
+            )
+
+        if comparison_type == "rankingSlope":
+            start_ranks = self._rank_rows(comparison_rows, entity_field, "startValue")
+            end_ranks = self._rank_rows(comparison_rows, entity_field, "endValue")
+            for row in comparison_rows:
+                row["startRank"] = start_ranks[row[entity_field]]
+                row["endRank"] = end_ranks[row[entity_field]]
+            comparison_rows.sort(key=lambda row: min(row["startRank"], row["endRank"]))
+            note = f"Compared {len(comparison_rows)} entities across {start_label} and {end_label} with rank alignment"
+        else:
+            comparison_rows.sort(key=lambda row: abs(row["delta"]), reverse=True)
+            note = f"Computed deltas across {start_label} and {end_label}"
+
+        trimmed = comparison_rows[:top_n]
+        transform["compareLabels"] = [start_label, end_label]
+        return trimmed, note
+
+    def _normalize_percent_by_group(self, rows: List[Dict[str, Any]], config: Dict[str, Any]) -> List[Dict[str, Any]]:
+        x_field = config["xAxisField"]
+        group_field = config["groupByField"]
+        series_fields = [series["field"] for series in config.get("series", [])]
+        totals: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        for row in rows:
+            key = str(row.get(x_field, ""))
+            for field in series_fields:
+                totals[key][field] += _numeric(row.get(field, 0))
+
+        normalized: List[Dict[str, Any]] = []
+        for row in rows:
+            key = str(row.get(x_field, ""))
+            new_row = {x_field: key, group_field: row.get(group_field, "")}
+            for field in series_fields:
+                total = totals[key][field] or 1.0
+                new_row[field] = round((_numeric(row.get(field, 0)) / total) * 100, 4)
+            normalized.append(new_row)
+        return normalized
+
+    def _pivot_group_metric(
+        self,
+        data: List[Dict[str, Any]],
+        x_field: str,
+        group_field: str,
+        metric: str,
+        result_context: Dict[str, Any],
+    ) -> Dict[str, Dict[str, float]]:
+        grouped: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+        grouped_rows: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+        for row in data:
+            x_value = str(row.get(x_field, ""))
+            group_value = str(row.get(group_field, ""))
+            grouped[x_value][group_value].append(_numeric(row.get(metric, 0)))
+            grouped_rows[x_value][group_value].append(row)
+
+        resolved: Dict[str, Dict[str, float]] = defaultdict(dict)
+        for x_value, groups in grouped.items():
+            for group_value, values in groups.items():
+                rows = grouped_rows[x_value][group_value]
+                resolved[x_value][group_value] = _aggregate_values(values, "sum", metric, rows, result_context, self._should_dedupe_metric)
+        return resolved
+
+    def _should_dedupe_metric(
+        self,
+        field: str,
+        rows: List[Dict[str, Any]],
+        result_context: Dict[str, Any],
+    ) -> bool:
+        """Avoid summing repeated higher-level metrics across detail rows."""
+        if len(rows) <= 1:
+            return False
+
+        values = [_numeric(row.get(field, 0)) for row in rows]
+        repeated_grain = bool(result_context.get("row_grain_hint"))
+        lower_field = field.lower()
+
+        if len({round(value, 9) for value in values}) == 1:
+            return True
+
+        if repeated_grain and any(token in lower_field for token in _DEDUPED_METRIC_TOKENS):
+            return True
+
+        return False
+
+    def _infer_field_kinds(self, columns: Sequence[str], data: List[Dict[str, Any]]) -> Dict[str, str]:
+        kinds: Dict[str, str] = {}
+        sample = data[: min(len(data), 25)]
+        for column in columns:
+            values = [row.get(column) for row in sample if row.get(column) is not None]
+            if not values:
+                kinds[column] = "text"
+                continue
+            if all(_is_numeric_like(value) for value in values):
+                kinds[column] = "numeric"
+            elif all(_is_date_like(value) for value in values):
+                kinds[column] = "date"
+            else:
+                kinds[column] = "text"
+        return kinds
+
+    def _coerce_field(self, candidate: Any, columns: Sequence[str]) -> Optional[str]:
+        return candidate if isinstance(candidate, str) and candidate in columns else None
+
+    def _pick_default_x_field(self, columns: Sequence[str], kinds: Dict[str, str]) -> Optional[str]:
+        return self._pick_date_or_categorical_field(columns, kinds)
+
+    def _pick_date_or_categorical_field(
+        self,
+        columns: Sequence[str],
+        kinds: Dict[str, str],
+        exclude: Optional[str] = None,
+    ) -> Optional[str]:
+        for preferred_kind in ("date", "text"):
+            for column in columns:
+                if column == exclude:
+                    continue
+                if kinds.get(column) == preferred_kind:
+                    return column
+        return None
+
+    def _pick_categorical_field(self, columns: Sequence[str], kinds: Dict[str, str]) -> Optional[str]:
+        for column in columns:
+            if kinds.get(column) == "text":
+                return column
+        for column in columns:
+            if kinds.get(column) == "date":
+                return column
+        return None
+
+    def _pick_secondary_dimension(
+        self,
+        columns: Sequence[str],
+        kinds: Dict[str, str],
+        primary: Optional[str],
+    ) -> Optional[str]:
+        for column in columns:
+            if column == primary:
+                continue
+            if kinds.get(column) in {"text", "date"}:
+                return column
+        return None
+
+    def _infer_format(self, field: str) -> str:
+        lowered = field.lower()
+        if any(token in lowered for token in ("cost", "amount", "price", "paid", "charge", "copay", "coinsurance")):
+            return "currency"
+        if any(token in lowered for token in ("percent", "pct", "ratio", "share")):
+            return "percent"
+        return "number"
+
+    def _is_chart_type_supported(self, chart_type: str, layout: Optional[str]) -> bool:
+        capability = CHART_CAPABILITY_MODEL.get(chart_type)
+        if not capability:
+            return False
+        if layout is None:
+            return True
+        return layout in capability.get("layouts", set())
+
+    def _rank_rows(
+        self,
+        rows: List[Dict[str, Any]],
+        entity_field: str,
+        value_field: str,
+    ) -> Dict[str, int]:
+        sorted_rows = sorted(rows, key=lambda row: row.get(value_field, 0), reverse=True)
+        return {str(row.get(entity_field, "")): index + 1 for index, row in enumerate(sorted_rows)}
 
     # ------------------------------------------------------------------
     # Stage 3: Size guard
@@ -249,10 +1309,10 @@ Rules:
             return payload
 
         logger.warning(f"Chart payload {len(raw.encode())}B exceeds {MAX_JSON_BYTES}B, trimming downloadData")
-        dl = payload.get("downloadData", [])
-        while dl and len(json.dumps(payload, default=_json_default).encode()) > MAX_JSON_BYTES:
-            dl = dl[: len(dl) // 2]
-            payload["downloadData"] = dl
+        download_data = payload.get("downloadData", [])
+        while download_data and len(json.dumps(payload, default=_json_default).encode()) > MAX_JSON_BYTES:
+            download_data = download_data[: len(download_data) // 2]
+            payload["downloadData"] = download_data
 
         if len(json.dumps(payload, default=_json_default).encode()) > MAX_JSON_BYTES:
             payload.pop("downloadData", None)
@@ -272,3 +1332,112 @@ def _numeric(val: Any) -> float:
         return float(val)
     except (ValueError, TypeError):
         return 0.0
+
+
+def _is_numeric_like(val: Any) -> bool:
+    if isinstance(val, bool):
+        return False
+    try:
+        float(val)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def _is_date_like(val: Any) -> bool:
+    if isinstance(val, (date, datetime)):
+        return True
+    if not isinstance(val, str):
+        return False
+    try:
+        datetime.fromisoformat(val.replace("Z", "+00:00"))
+        return True
+    except ValueError:
+        return False
+
+
+def _coerce_datetime(val: Any) -> Optional[datetime]:
+    if isinstance(val, datetime):
+        return val
+    if isinstance(val, date):
+        return datetime.combine(val, datetime.min.time())
+    if isinstance(val, str):
+        try:
+            return datetime.fromisoformat(val.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def _bucket_datetime(dt: datetime, bucket: str) -> str:
+    if bucket == "day":
+        return dt.strftime("%Y-%m-%d")
+    if bucket == "week":
+        year, week, _ = dt.isocalendar()
+        return f"{year}-W{week:02d}"
+    if bucket == "month":
+        return dt.strftime("%Y-%m")
+    if bucket == "quarter":
+        quarter = ((dt.month - 1) // 3) + 1
+        return f"{dt.year}-Q{quarter}"
+    return dt.strftime("%Y")
+
+
+def _aggregate_values(
+    values: Sequence[float],
+    function: str,
+    field: str,
+    rows: List[Dict[str, Any]],
+    result_context: Dict[str, Any],
+    dedupe_checker: Any,
+) -> float:
+    if not values:
+        return 0.0
+    if function == "count":
+        return float(len(rows))
+    if function == "min":
+        return min(values)
+    if function == "max":
+        return max(values)
+    if function == "avg":
+        return sum(values) / len(values)
+    if dedupe_checker(field, rows, result_context):
+        return max(values)
+    return sum(values)
+
+
+def _quartiles(values: Sequence[float]) -> Tuple[float, float, float]:
+    sorted_values = sorted(values)
+    if not sorted_values:
+        return 0.0, 0.0, 0.0
+    median = _median(sorted_values)
+    midpoint = len(sorted_values) // 2
+    lower = sorted_values[:midpoint]
+    upper = sorted_values[midpoint + (0 if len(sorted_values) % 2 == 0 else 1):]
+    q1 = _median(lower or sorted_values)
+    q3 = _median(upper or sorted_values)
+    return q1, median, q3
+
+
+def _median(values: Sequence[float]) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / 2
+
+
+def _clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        coerced = default
+    return max(minimum, min(coerced, maximum))
+
+
+def _sort_value(value: Any) -> Any:
+    if _is_numeric_like(value):
+        return _numeric(value)
+    return str(value or "")

@@ -2,6 +2,26 @@ bundle:
   name: multi_agent_genie_app_dev
 
 resources:
+  schemas:
+    multi_agent_genie_schema:
+      name: multi_agent_genie
+      catalog_name: serverless_dbx_unifiedchat_dev_catalog
+      grants:
+        - principal: "16a587d9-78e1-427b-a28b-a7636fd3d7dc"
+          privileges:
+            - USE_SCHEMA
+            - SELECT
+            - EXECUTE
+      lifecycle:
+        prevent_destroy: true
+
+    # healthverity_claims_sample_patient_dataset_dev is a Delta Sharing catalog (read-only),
+    # schema grants must be applied manually by the catalog owner:
+    #   GRANT USE_SCHEMA ON SCHEMA healthverity_claims_sample_patient_dataset_dev.hv_claims_sample
+    #     TO `16a587d9-78e1-427b-a28b-a7636fd3d7dc`;
+    #   GRANT SELECT ON SCHEMA healthverity_claims_sample_patient_dataset_dev.hv_claims_sample
+    #     TO `16a587d9-78e1-427b-a28b-a7636fd3d7dc`;
+
   apps:
     agent_migration:
       name: "multi-agent-genie-app-dev"
@@ -31,7 +51,9 @@ resources:
           - name: LLM_ENDPOINT_EXECUTION
             value: "databricks-claude-haiku-4-5"
           - name: LLM_ENDPOINT_SUMMARIZE
-            value: "databricks-claude-haiku-4-5"
+            value: "databricks-gpt-5-4"
+          - name: LLM_ENDPOINT_DETECT_CODE_LOOKUP
+            value: "databricks-gpt-5-4-mini"
           - name: EMBEDDING_MODEL
             value: "databricks-gte-large-en"
           - name: VS_ENDPOINT_NAME
@@ -47,7 +69,7 @@ resources:
           - name: SOURCE_TABLE
             value: "enriched_genie_docs_chunks"
           - name: SQL_WAREHOUSE_ID
-            value: "78ad038820b88d95"
+            value: "32f4d1aae5fcf8ca"
           - name: GENIE_SPACE_IDS
             value: "01f11b27d1121e2bb00d6ecd846b1988,01f11b27d23a1ab195fa7ba8efc06d13,01f11b27d3ea149694cf608c3d278673"
           - name: LAKEBASE_INSTANCE_NAME
@@ -58,11 +80,18 @@ resources:
             value: "1024"
           - name: MLFLOW_EXPERIMENT_ID
             value_from: experiment
+          - name: MLFLOW_TRACKING_URI
+            value: "databricks"
+          - name: MLFLOW_REGISTRY_URI
+            value: "databricks-uc"
 
       resources:
+        # Artifact location on UC Volume so trace uploads go through the workspace
+        # Files API (reachable from App container), not the blob storage proxy
+        # (us-east-1.storage.cloud.databricks.com, which App containers cannot reach).
         - name: 'experiment'
           experiment:
-            experiment_id: "180708593508920"
+            experiment_id: "4357851413903846"
             permission: 'CAN_MANAGE'
 
         # Serving endpoints (LLM)
@@ -133,8 +162,15 @@ resources:
         # SQL warehouse
         - name: 'sql-warehouse'
           sql_warehouse:
-            id: '78ad038820b88d95'
+            id: '32f4d1aae5fcf8ca'
             permission: 'CAN_USE'
+
+        # UC Volume (for trace artifacts via Files API)
+        - name: 'trace-volume'
+          uc_securable:
+            securable_full_name: 'serverless_dbx_unifiedchat_dev_catalog.multi_agent_genie.volume'
+            securable_type: 'VOLUME'
+            permission: 'WRITE_VOLUME'
 
         # Vector search index
         - name: 'vs-index'
@@ -149,26 +185,26 @@ resources:
             securable_full_name: 'serverless_dbx_unifiedchat_dev_catalog.multi_agent_genie.enriched_genie_docs_chunks'
             securable_type: 'TABLE'
             permission: 'SELECT'
-        - name: 'hv-diagnosis'
-          uc_securable:
-            securable_full_name: 'healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.diagnosis'
-            securable_type: 'TABLE'
-            permission: 'SELECT'
-        - name: 'hv-enrollment'
-          uc_securable:
-            securable_full_name: 'healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.enrollment'
-            securable_type: 'TABLE'
-            permission: 'SELECT'
-        - name: 'hv-medical-claim'
-          uc_securable:
-            securable_full_name: 'healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.medical_claim'
-            securable_type: 'TABLE'
-            permission: 'SELECT'
-        - name: 'hv-pharmacy-claim'
-          uc_securable:
-            securable_full_name: 'healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.pharmacy_claim'
-            securable_type: 'TABLE'
-            permission: 'SELECT'
+        # - name: 'hv-diagnosis'
+        #   uc_securable:
+        #     securable_full_name: 'healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.diagnosis'
+        #     securable_type: 'TABLE'
+        #     permission: 'SELECT'
+        # - name: 'hv-enrollment'
+        #   uc_securable:
+        #     securable_full_name: 'healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.enrollment'
+        #     securable_type: 'TABLE'
+        #     permission: 'SELECT'
+        # - name: 'hv-medical-claim'
+        #   uc_securable:
+        #     securable_full_name: 'healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.medical_claim'
+        #     securable_type: 'TABLE'
+        #     permission: 'SELECT'
+        # - name: 'hv-pharmacy-claim'
+        #   uc_securable:
+        #     securable_full_name: 'healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.pharmacy_claim'
+        #     securable_type: 'TABLE'
+        #     permission: 'SELECT'
         # NOTE: procedure and provider tables need manual grants after deploy:
         #   GRANT SELECT ON TABLE healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.procedure TO `<sp-app-id>`;
         #   GRANT SELECT ON TABLE healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.provider TO `<sp-app-id>`;

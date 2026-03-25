@@ -1,6 +1,8 @@
 import { config } from 'dotenv';
 import postgres from 'postgres';
 import * as readline from 'node:readline';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { getDatabricksToken } from '@chat-template/auth';
 import {
   getPostgresUrlFromEnv,
@@ -8,7 +10,12 @@ import {
   buildConnectionUrl,
 } from '@chat-template/db';
 
-config({ path: '.env' });
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const envPath = join(__dirname, '..', '..', '.env');
+config({ path: envPath });
+
+const forceReset = process.argv.includes('--yes') || process.argv.includes('--force');
 
 async function getConnectionUrl() {
   // Use POSTGRES_URL if available
@@ -56,13 +63,19 @@ async function resetDatabase() {
   console.log('  • The entire ai_chatbot schema\n');
   console.log('This action CANNOT be undone!\n');
 
-  const confirmed = await promptConfirmation(
-    'Are you sure you want to continue? Type "yes" or "y" to confirm: ',
-  );
+  const confirmed = forceReset
+    ? true
+    : await promptConfirmation(
+        'Are you sure you want to continue? Type "yes" or "y" to confirm: ',
+      );
 
   if (!confirmed) {
     console.log('\n❌ Database reset cancelled.');
     process.exit(0);
+  }
+
+  if (forceReset) {
+    console.log('Force mode enabled, skipping confirmation prompt.');
   }
 
   console.log('\n🗑️  Resetting database schema and migrations...');
@@ -71,14 +84,10 @@ async function resetDatabase() {
     const connectionUrl = await getConnectionUrl();
     const sql = postgres(connectionUrl);
 
-    // Drop the ai_chatbot schema cascade (includes all tables)
+    // Drop the ai_chatbot schema cascade (includes all app tables and migration metadata)
     console.log('Dropping ai_chatbot schema if it exists...');
     await sql`DROP SCHEMA IF EXISTS ai_chatbot CASCADE`;
     console.log('✅ Schema dropped');
-
-    // Drop drizzle migrations table from drizzle schema if it exists
-    await sql`DROP TABLE IF EXISTS drizzle.__drizzle_migrations CASCADE`;
-    console.log('✅ Drizzle schema migrations table dropped if existed');
 
     console.log(
       '\n✅ Database reset complete! All data and migrations removed.',

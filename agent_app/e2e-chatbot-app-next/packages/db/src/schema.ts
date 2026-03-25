@@ -36,6 +36,14 @@ export const chat = createTable('Chat', {
   visibility: varchar('visibility', { enum: ['public', 'private'] })
     .notNull()
     .default('private'),
+  executionMode: varchar('executionMode', { enum: ['parallel', 'sequential'] })
+    .notNull()
+    .default('parallel'),
+  synthesisRoute: varchar('synthesisRoute', {
+    enum: ['auto', 'table_route', 'genie_route'],
+  })
+    .notNull()
+    .default('auto'),
   lastContext: jsonb('lastContext').$type<LanguageModelV3Usage | null>(),
 });
 

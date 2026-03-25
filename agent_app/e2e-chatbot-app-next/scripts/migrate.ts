@@ -8,9 +8,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Load environment variables from project root
-// When running with tsx, __dirname is scripts
+// When running with tsx, __dirname is scripts under e2e-chatbot-app-next.
+// The shared deployment env lives in the parent agent_app directory.
 const projectRoot = join(__dirname, '..');
-const envPath = join(projectRoot, '.env');
+const envPath = join(projectRoot, '..', '.env');
 config({
   path: envPath,
 });
@@ -79,7 +80,11 @@ async function main() {
     console.log('📂 Migrations folder:', migrationsFolder);
     console.log('🔄 Applying pending migrations...');
 
-    await migrate(db, { migrationsFolder });
+    await migrate(db, {
+      migrationsFolder,
+      migrationsSchema: schemaName,
+      migrationsTable: '__drizzle_migrations',
+    });
 
     console.log('✅ All migrations applied successfully');
 

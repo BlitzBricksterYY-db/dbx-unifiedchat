@@ -62,17 +62,66 @@ def extract_summarize_context(state: AgentState) -> dict:
     
     return {
         "messages": truncate_message_history(messages, max_turns=5),
+        "original_query": state.get("original_query"),
+        "question_clear": state.get("question_clear", False),
+        "pending_clarification": state.get("pending_clarification"),
         "sql_query": state.get("sql_query"),
-        "sql_queries": state.get("sql_queries", []),
-        "sql_query_labels": state.get("sql_query_labels", []),
+        "sql_queries": state.get("sql_queries") or [],
+        "sql_query_labels": state.get("sql_query_labels") or [],
         "execution_result": state.get("execution_result"),
-        "execution_results": state.get("execution_results", []),
+        "execution_results": state.get("execution_results") or [],
         "execution_error": state.get("execution_error"),
         "sql_synthesis_explanation": state.get("sql_synthesis_explanation"),
+        "sql_synthesis_explanations": state.get("sql_synthesis_explanations") or [],
         "synthesis_error": state.get("synthesis_error"),
         # For logging: track original size
         "_original_message_count": len(messages)
     }
+
+
+def _result_label(result_item: Dict[str, Any], idx: int, fallback_labels: List[str]) -> str | None:
+    """Resolve the display label for a result set."""
+    label = result_item.get("query_label")
+    if label:
+        return label
+    if idx < len(fallback_labels) and fallback_labels[idx]:
+        return fallback_labels[idx]
+    return None
+
+
+def _build_artifact_entries(state: AgentState) -> List[Dict[str, Any]]:
+    """Build normalized result/sql/label entries for downstream rendering."""
+    execution_results = list(state.get("execution_results") or [])
+    exec_result = state.get("execution_result")
+    if not execution_results and exec_result:
+        execution_results = [exec_result]
+
+    fallback_sql_queries = list(state.get("sql_queries") or [])
+    if not fallback_sql_queries and state.get("sql_query"):
+        fallback_sql_queries = [state["sql_query"]]
+    fallback_labels = list(state.get("sql_query_labels") or [])
+
+    entries: List[Dict[str, Any]] = []
+    for idx, result_item in enumerate(execution_results):
+        if not result_item:
+            continue
+        entries.append(
+            {
+                "index": idx,
+                "label": _result_label(result_item, idx, fallback_labels),
+                "sql": result_item.get("sql") or (
+                    fallback_sql_queries[idx] if idx < len(fallback_sql_queries) else None
+                ),
+                "status": result_item.get("status") or (
+                    "success" if result_item.get("success") else "failed"
+                ),
+                "sql_explanation": result_item.get("sql_explanation"),
+                "skip_reason": result_item.get("skip_reason"),
+                "row_grain_hint": result_item.get("row_grain_hint"),
+                "result": result_item,
+            }
+        )
+    return entries
 
 
 def get_cached_summarize_agent():
@@ -90,11 +139,11 @@ def get_cached_summarize_agent():
         try:
             from databricks_langchain import ChatDatabricks
             from .summarize_agent import ResultSummarizeAgent
-            llm = ChatDatabricks(endpoint=llm_endpoint, temperature=0.1, max_tokens=5000)
+            llm = ChatDatabricks(endpoint=llm_endpoint, temperature=0.1, max_tokens=10000)
             get_cached_summarize_agent._cached_agent = ResultSummarizeAgent(llm)
         except ImportError:
             # Fallback: Create a simple wrapper
-            llm = ChatDatabricks(endpoint=llm_endpoint, temperature=0.1, max_tokens=5000)
+            llm = ChatDatabricks(endpoint=llm_endpoint, temperature=0.1, max_tokens=10000)
             get_cached_summarize_agent._cached_agent = _SimpleSummarizeAgent(llm)
         except Exception as e:
              raise ImportError(
@@ -150,17 +199,17 @@ class _SimpleSummarizeAgent:
         self.name = "ResultSummarize"
         self.llm = llm
     
-    def __call__(self, state: dict) -> str:
+    def __call__(self, state: dict, writer=None) -> str:
         """Generate summary from state."""
-        # Build prompt from state
         prompt = self._build_summary_prompt(state)
         
-        # Stream LLM response
         print("🤖 Streaming summary generation...")
         summary = ""
         for chunk in self.llm.stream(prompt):
             if chunk.content:
                 summary += chunk.content
+                if writer:
+                    writer({"type": "text_delta", "content": chunk.content})
         
         summary = summary.strip()
         print(f"✓ Summary stream complete ({len(summary)} chars)")
@@ -185,9 +234,9 @@ class _SimpleSummarizeAgent:
 """
         
         # NEW: Check for multiple SQL queries and results
-        sql_queries = state.get('sql_queries', [])
-        query_labels = state.get('sql_query_labels', [])
-        execution_results = state.get('execution_results', [])
+        sql_queries = state.get('sql_queries') or []
+        query_labels = state.get('sql_query_labels') or []
+        execution_results = state.get('execution_results') or []
         
         # Fallback to single query/result for backward compatibility
         if not sql_queries and sql_query:
@@ -225,8 +274,8 @@ class _SimpleSummarizeAgent:
 
 """
             
-            MAX_PREVIEW_ROWS = 20
-            MAX_JSON_CHARS = 2000
+            MAX_PREVIEW_ROWS = 200
+            MAX_JSON_CHARS = 20000
             
             if execution_results:
                 if len(execution_results) == 1:
@@ -346,10 +395,12 @@ def _get_cached_chart_generator():
 @measure_node_time("summarize")
 def summarize_node(state: AgentState) -> dict:
     """
-    Orchestrates: LLM summary -> chart generation -> SQL download.
+    Orchestrates: LLM summary -> chart generation -> SQL download -> code enrichment.
     This is the final node that all workflow paths go through.
     """
     import json as _json
+    import concurrent.futures
+    import contextvars
 
     writer = get_stream_writer()
 
@@ -357,29 +408,159 @@ def summarize_node(state: AgentState) -> dict:
     print("RESULT SUMMARIZE NODE")
     print("=" * 80)
 
+    # --- 0. Kick off code enrichment in background (parallel with summary) ---
+    artifact_entries = _build_artifact_entries(state)
+    execution_results = [entry["result"] for entry in artifact_entries]
+
+    enrichment_futures = []
+    enrichment_pool = None
+    enrichable_results = [
+        (idx, result_item)
+        for idx, result_item in enumerate(execution_results)
+        if result_item and result_item.get("success") and result_item.get("columns")
+    ]
+    if enrichable_results:
+        try:
+            from ..tools.web_search import enrich_codes
+            from databricks_langchain import ChatDatabricks
+            config = get_config()
+            enrich_llm = ChatDatabricks(
+                endpoint=config.llm.detect_code_lookup_endpoint,
+                temperature=0,
+                max_tokens=1500,
+            )
+            enrichment_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(4, len(enrichable_results))
+            )
+            for idx, result_item in enrichable_results:
+                entry = artifact_entries[idx] if idx < len(artifact_entries) else {}
+                section_title = (
+                    entry.get("label")
+                    if entry.get("label")
+                    else f"Query {idx + 1}"
+                )
+                enrichment_futures.append(
+                    (
+                        idx,
+                        section_title,
+                        enrichment_pool.submit(
+                            contextvars.copy_context().run,
+                            enrich_codes,
+                            result_item["columns"],
+                            result_item["result"],
+                            enrich_llm,
+                            None,
+                            section_title,
+                            False,
+                        ),
+                    )
+                )
+            print(f"⚡ Code enrichment submitted for {len(enrichment_futures)} result set(s)")
+        except Exception as e:
+            print(f"⚠ Code enrichment setup failed: {e}")
+            enrichment_futures = []
+
+    # --- Sub-steps visible in Processing Steps ---
+    successful_results = [r for r in execution_results if r and r.get("success")]
+    total_rows = sum(r.get("row_count", len(r.get("result", []))) for r in successful_results)
+    writer({
+        "type": "summarize_step",
+        "content": f"SUMMARIZE: Preparing context ({len(successful_results)} result set(s), {total_rows} rows)",
+    })
+
     context = extract_summarize_context(state)
-    writer({"type": "summary_start", "content": "Generating summary..."})
 
     summarize_agent = get_cached_summarize_agent()
     config = get_config()
     track_agent_model_usage("summarize", config.llm.summarize_endpoint)
-
-    if "original_query" not in context:
-        context["original_query"] = state.get("original_query", "N/A")
-
-    # --- 1. LLM text summary (streams to user) ---
-    summary = summarize_agent(context)
-
-    # --- 2. Chart generation per result set ---
-    execution_results = state.get("execution_results", [])
-    exec_result = state.get("execution_result")
-    if not execution_results and exec_result:
-        execution_results = [exec_result]
-
     chart_gen = _get_cached_chart_generator()
     original_query = state.get("original_query", "")
 
-    for idx, result_item in enumerate(execution_results):
+    MAX_PREVIEW_ROWS = 200
+
+    # --- 0b. Kick off chart generation in background (parallel with summary) ---
+    chart_futures = {}
+    chart_pool = None
+    chartable_entries = [
+        entry
+        for entry in artifact_entries
+        if entry.get("result")
+        and entry["result"].get("success")
+        and entry["result"].get("columns")
+        and entry["result"].get("result")
+    ]
+    if chart_gen and chartable_entries:
+        try:
+            chart_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(4, len(chartable_entries))
+            )
+            for entry in chartable_entries:
+                result_item = entry["result"]
+                chart_futures[entry["index"]] = (
+                    entry,
+                    chart_pool.submit(
+                        contextvars.copy_context().run,
+                        chart_gen.generate_chart,
+                        result_item.get("columns", []),
+                        result_item.get("result", []),
+                        original_query,
+                        {
+                            "label": entry.get("label"),
+                            "sql_explanation": entry.get("sql_explanation"),
+                            "row_grain_hint": entry.get("row_grain_hint"),
+                        },
+                    ),
+                )
+            print(f"⚡ Chart generation submitted for {len(chart_futures)} result set(s)")
+        except Exception as e:
+            print(f"⚠ Chart generation setup failed: {e}")
+            chart_futures = {}
+            if chart_pool:
+                chart_pool.shutdown(wait=False)
+                chart_pool = None
+
+    writer({
+        "type": "summarize_step",
+        "content": f"SUMMARIZE: Streaming summary (model: {config.llm.summarize_endpoint})...",
+    })
+    writer({"type": "summary_start", "content": "Generating summary..."})
+
+    # --- 1. LLM text summary (streams to user via writer deltas) ---
+    if hasattr(summarize_agent, "generate_summary"):
+        summary = summarize_agent.generate_summary(context, writer=writer)
+    else:
+        summary = summarize_agent(context, writer=writer)
+
+    # --- 2. Collect chart generation result (already running in background) ---
+    for entry in artifact_entries:
+        idx = entry["index"]
+        future_entry = chart_futures.get(idx)
+        if not future_entry:
+            continue
+        future_meta, future = future_entry
+        try:
+            payload = future.result(timeout=30)
+            if payload:
+                label = future_meta.get("label")
+                if label:
+                    payload.setdefault("config", {})
+                    payload["config"]["title"] = label
+                chart_json = _json.dumps(payload, default=str)
+                chart_block = f"\n\n```echarts-chart\n{chart_json}\n```\n"
+                summary += chart_block
+                writer({"type": "text_delta", "content": chart_block})
+                print(f"✓ Chart block inserted for result {idx} ({len(chart_json)} bytes)")
+        except Exception as e:
+            print(f"⚠ Chart generation failed for result {idx}: {e}")
+    if chart_pool:
+        chart_pool.shutdown(wait=False)
+
+    # --- 3. Downloadable paginated tables (rendered after charts) ---
+    import base64
+    from .summarize_agent import ResultSummarizeAgent
+    for entry in artifact_entries:
+        idx = entry["index"]
+        result_item = entry["result"]
         if not result_item or not result_item.get("success"):
             continue
         columns = result_item.get("columns", [])
@@ -387,25 +568,94 @@ def summarize_node(state: AgentState) -> dict:
         if not columns or not data:
             continue
 
-        if chart_gen:
-            try:
-                payload = chart_gen.generate_chart(columns, data, original_query)
-                if payload:
-                    chart_json = _json.dumps(payload, default=str)
-                    summary += f"\n\n```echarts-chart\n{chart_json}\n```\n"
-                    print(f"✓ Chart block inserted for result {idx} ({len(chart_json)} bytes)")
-            except Exception as e:
-                print(f"⚠ Chart generation failed for result {idx}: {e}")
+        preview_rows = data[:MAX_PREVIEW_ROWS]
+        preview_row_count = len(preview_rows)
+        source_row_count = result_item.get("row_count") or len(data)
+        table_payload = {
+            "columns": columns,
+            "rows": preview_rows,
+            "totalRows": preview_row_count,
+            "previewRowCount": preview_row_count,
+            "isPreview": source_row_count > preview_row_count,
+            "filename": f"results_{idx + 1}.csv" if len(execution_results) > 1 else "results.csv",
+            "title": entry.get("label"),
+            "sql": ResultSummarizeAgent.resolve_sql_download_text(entry),
+            "sqlFilename": ResultSummarizeAgent.get_sql_download_filename(
+                entry,
+                total_entries=len(artifact_entries),
+            ),
+        }
+        table_json = _json.dumps(table_payload, default=str)
+        table_b64 = base64.b64encode(table_json.encode()).decode()
+        table_filename = table_payload["filename"]
+        table_block = (
+            f"\n\n```table-download:{table_filename}:{table_b64}\n"
+            f"{table_json}\n"
+            "```\n"
+        )
+        summary += table_block
+        writer({"type": "text_delta", "content": table_block})
 
-    # --- 3. SQL download (collapsible) ---
-    sql_queries = state.get("sql_queries", [])
-    if not sql_queries and state.get("sql_query"):
-        sql_queries = [state["sql_query"]]
-    labels = state.get("sql_query_labels", [])
+    # --- 3. SQL download / explanation / plan (collapsible, streamed as delta) ---
+    plan = state.get("plan")
 
-    if sql_queries:
+    has_accordion = False
+    if artifact_entries or plan or enrichment_futures or any(
+        entry.get("sql_explanation") or entry.get("skip_reason") for entry in artifact_entries
+    ):
+        writer({"type": "text_delta", "content": "\n\n<div class=\"accordion-group\">\n\n"})
+        has_accordion = True
+
+    if artifact_entries:
+        sql_block = ResultSummarizeAgent.format_sql_download(
+            artifact_entries,
+            total_entries=len(artifact_entries),
+        )
+        summary += sql_block
+        writer({"type": "text_delta", "content": sql_block})
+
+    # --- 3b. SQL Explanation (collapsible, streamed as delta) ---
+    if any(entry.get("sql_explanation") or entry.get("skip_reason") for entry in artifact_entries):
         from .summarize_agent import ResultSummarizeAgent
-        summary += ResultSummarizeAgent.format_sql_download(sql_queries, labels)
+        explanation_block = ResultSummarizeAgent.format_sql_explanation(
+            artifact_entries=artifact_entries,
+        )
+        summary += explanation_block
+        writer({"type": "text_delta", "content": explanation_block})
+
+    # --- 3c. Plan Executed (collapsible, streamed as delta) ---
+    if plan:
+        from .summarize_agent import ResultSummarizeAgent
+        plan_block = ResultSummarizeAgent.format_plan_executed(plan)
+        summary += plan_block
+        writer({"type": "text_delta", "content": plan_block})
+
+    # --- 4. Collect code enrichment result (likely already done by now) ---
+    if enrichment_futures:
+        try:
+            sections = []
+            for _idx, _section_title, future in enrichment_futures:
+                enriched_ref = future.result(timeout=20)
+                if enriched_ref:
+                    sections.append(enriched_ref.strip())
+            if sections:
+                combined_ref = (
+                    "\n\n<details name=\"sql-accordion\"><summary>Code Reference</summary>\n\n"
+                    "<div class=\"accordion-content\">\n\n"
+                    + "\n\n".join(sections)
+                    + "\n\n</div>\n</details>\n"
+                )
+                summary += combined_ref
+                writer({"type": "text_delta", "content": combined_ref})
+                print(f"✓ Code reference appended ({len(sections)} section(s))")
+        except Exception as e:
+            print(f"⚠ Code enrichment skipped: {e}")
+        finally:
+            if enrichment_pool:
+                enrichment_pool.shutdown(wait=False)
+
+    if has_accordion:
+        writer({"type": "text_delta", "content": "\n\n</div>\n"})
 
     writer({"type": "summary_complete", "content": f"Summary generated ({len(summary)} chars)"})
 

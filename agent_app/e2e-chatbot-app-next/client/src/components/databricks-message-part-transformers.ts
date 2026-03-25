@@ -2,6 +2,9 @@ import type { ChatMessage } from '@chat-template/core';
 import { createDatabricksMessageCitationMarkdown } from './databricks-message-citation';
 import type { TextUIPart } from 'ai';
 
+const LEADING_PROCESSING_STEPS_RE =
+  /^\s*(<details(?:\s+open)?>\s*<summary>Processing Steps<\/summary>[\s\S]*?<\/details>)\s*/;
+
 /**
  * Creates segments of parts that can be rendered as a single component.
  * Used to render citations as part of the associated text.
@@ -56,6 +59,45 @@ export const isNamePart = (
 export const formatNamePart = (part: ChatMessage['parts'][number]) => {
   if (!isNamePart(part)) return null;
   return part.text?.replace('<name>', '').replace('</name>', '');
+};
+
+/**
+ * Some agent streams emit a standalone progress block and then repeat the same
+ * block at the start of the final text item. Strip only the repeated leading
+ * block so the rest of the final response still renders.
+ */
+export const dedupeProcessingStepsTextParts = (
+  parts: ChatMessage['parts'],
+): ChatMessage['parts'] => {
+  const seenBlocks = new Set<string>();
+
+  return parts.flatMap((part) => {
+    if (part.type !== 'text' || typeof part.text !== 'string') {
+      return [part];
+    }
+
+    const match = part.text.match(LEADING_PROCESSING_STEPS_RE);
+    if (!match) {
+      return [part];
+    }
+
+    const block = match[1].trim();
+    if (!block) {
+      return [part];
+    }
+
+    if (!seenBlocks.has(block)) {
+      seenBlocks.add(block);
+      return [part];
+    }
+
+    const dedupedText = part.text.slice(match[0].length).trimStart();
+    if (!dedupedText) {
+      return [];
+    }
+
+    return [{ ...part, text: dedupedText }];
+  });
 };
 
 /**

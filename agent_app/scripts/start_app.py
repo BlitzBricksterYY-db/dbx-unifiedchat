@@ -31,6 +31,7 @@ from dotenv import load_dotenv
 # Readiness patterns
 BACKEND_READY = [r"Uvicorn running on", r"Application startup complete", r"Started server process"]
 FRONTEND_READY = [r"Server is running on http://localhost"]
+CHATBOT_DIR = Path("e2e-chatbot-app-next")
 
 
 def check_port_available(port: int) -> bool:
@@ -76,6 +77,7 @@ class ProcessManager:
         self.frontend_log = None
         self.port = port
         self.no_ui = no_ui
+        self.chatbot_dependencies_ready = False
 
     def check_ports(self):
         """Check that required ports are available, auto-killing stale processes."""
@@ -153,7 +155,7 @@ class ProcessManager:
             self.failed.set()
 
     def clone_frontend_if_needed(self):
-        if Path("e2e-chatbot-app-next").exists():
+        if CHATBOT_DIR.exists():
             return True
 
         print("Cloning e2e-chatbot-app-next...")
@@ -182,9 +184,56 @@ class ProcessManager:
             cwd="temp-app-templates",
             check=True,
         )
-        Path("temp-app-templates/e2e-chatbot-app-next").rename("e2e-chatbot-app-next")
+        Path("temp-app-templates/e2e-chatbot-app-next").rename(CHATBOT_DIR)
         shutil.rmtree("temp-app-templates", ignore_errors=True)
         return True
+
+    def run_database_migrations(self):
+        if not CHATBOT_DIR.exists():
+            print(f"WARNING: Chatbot app directory not found at {CHATBOT_DIR}. Skipping migrations.")
+            return
+
+        self.ensure_chatbot_dependencies()
+        print("Running chatbot database migrations...")
+        result = subprocess.run(
+            ["npm", "run", "db:migrate"],
+            cwd=CHATBOT_DIR,
+            capture_output=True,
+            text=True,
+        )
+
+        if result.stdout:
+            print(result.stdout.rstrip())
+        if result.returncode != 0:
+            if result.stderr:
+                print(result.stderr.rstrip())
+            print("ERROR: Chatbot database migrations failed.")
+            sys.exit(result.returncode)
+
+        print("✓ Chatbot database migrations complete")
+
+    def ensure_chatbot_dependencies(self):
+        if self.chatbot_dependencies_ready:
+            return
+
+        print("Running npm install...")
+        result = subprocess.run(
+            ["npm", "install"],
+            cwd=CHATBOT_DIR,
+            capture_output=True,
+            text=True,
+        )
+
+        if result.stdout:
+            print(result.stdout.rstrip())
+        if result.returncode != 0:
+            if result.stderr:
+                print(result.stderr.rstrip())
+            print("ERROR: npm install failed.")
+            sys.exit(result.returncode)
+
+        self.chatbot_dependencies_ready = True
+        print("✓ Frontend dependencies installed")
 
     def start_process(self, cmd, name, log_file, patterns, cwd=None):
         print(f"Starting {name}...")
@@ -245,6 +294,8 @@ class ProcessManager:
             self.frontend_log = open("frontend.log", "w", buffering=1)
 
         try:
+            self.run_database_migrations()
+
             # Build backend command, passing through all arguments
             backend_cmd = ["uv", "run", "start-server"]
             if backend_args:
@@ -257,8 +308,9 @@ class ProcessManager:
 
             if not self.no_ui:
                 # Setup and start frontend
-                frontend_dir = Path("e2e-chatbot-app-next")
-                for cmd, desc in [("npm install", "install"), ("npm run build", "build")]:
+                frontend_dir = CHATBOT_DIR
+                self.ensure_chatbot_dependencies()
+                for cmd, desc in [("npm run build", "build")]:
                     print(f"Running npm {desc}...")
                     result = subprocess.run(
                         cmd.split(), cwd=frontend_dir, capture_output=True, text=True

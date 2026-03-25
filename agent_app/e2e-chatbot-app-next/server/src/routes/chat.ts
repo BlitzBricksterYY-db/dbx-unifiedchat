@@ -13,6 +13,7 @@ import {
   pipeUIMessageStreamToResponse,
 } from 'ai';
 import type { LanguageModelV3Usage } from '@ai-sdk/provider';
+import { z } from 'zod';
 
 // Convert ai's LanguageModelUsage to @ai-sdk/provider's LanguageModelV3Usage
 function toV3Usage(usage: LanguageModelUsage): LanguageModelV3Usage {
@@ -45,6 +46,7 @@ import {
   updateChatVisiblityById,
   isDatabaseAvailable,
   updateChatTitleById,
+  updateChatAgentSettingsById,
 } from '@chat-template/db';
 import {
   type ChatMessage,
@@ -64,6 +66,11 @@ import { storeMessageMeta } from '../lib/message-meta-store';
 import { drainStreamToWriter, fallbackToGenerateText } from '../lib/stream-fallback';
 
 export const chatRouter: RouterType = Router();
+
+const chatAgentSettingsSchema = z.object({
+  executionMode: z.enum(['parallel', 'sequential']),
+  synthesisRoute: z.enum(['auto', 'table_route', 'genie_route']),
+});
 
 const streamCache = new StreamCache();
 // Apply auth middleware to all chat routes
@@ -98,11 +105,16 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
       message,
       selectedChatModel,
       selectedVisibilityType,
+      agentSettings,
     }: {
       id: string;
       message?: ChatMessage;
       selectedChatModel: string;
       selectedVisibilityType: VisibilityType;
+      agentSettings?: {
+        executionMode: 'parallel' | 'sequential';
+        synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+      };
     } = requestBody;
 
     const session = req.session;
@@ -131,6 +143,8 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
           userId: session.user.id,
           title: 'New chat',
           visibility: selectedVisibilityType,
+          executionMode: agentSettings?.executionMode ?? 'parallel',
+          synthesisRoute: agentSettings?.synthesisRoute ?? 'auto',
         });
 
         generateTitleFromUserMessage({ message })
@@ -158,6 +172,14 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
         const error = new ChatSDKError('forbidden:chat');
         const response = error.toResponse();
         return res.status(response.status).json(response.json);
+      }
+
+      if (dbAvailable && agentSettings) {
+        await updateChatAgentSettingsById({
+          chatId: id,
+          executionMode: agentSettings.executionMode,
+          synthesisRoute: agentSettings.synthesisRoute,
+        });
       }
     }
 
@@ -246,10 +268,12 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
 
     const model = await myProvider.languageModel(selectedChatModel);
     const modelMessages = await convertToModelMessages(uiMessages);
+    const chatAgentSettings = requestBody.agentSettings;
     const requestHeaders = {
       [CONTEXT_HEADER_CONVERSATION_ID]: id,
       [CONTEXT_HEADER_USER_ID]: session.user.email ?? session.user.id,
-      // Forward OBO user token to the backend/serving endpoint
+      'x-agent-execution-mode': chatAgentSettings?.executionMode ?? 'parallel',
+      'x-agent-synthesis-route': chatAgentSettings?.synthesisRoute ?? 'auto',
       ...(req.headers['x-forwarded-access-token']
         ? { 'x-forwarded-access-token': req.headers['x-forwarded-access-token'] as string }
         : {}),
@@ -523,6 +547,37 @@ chatRouter.post('/title', requireAuth, async (req: Request, res: Response) => {
     res.status(500).json({ error: 'Failed to generate title' });
   }
 });
+
+/**
+ * PATCH /api/chat/:id/settings - Update per-chat agent settings
+ */
+chatRouter.patch(
+  '/:id/settings',
+  [requireAuth, requireChatAccess],
+  async (req: Request, res: Response) => {
+    try {
+      const id = getIdFromRequest(req);
+      if (!id) return;
+
+      const parsed = chatAgentSettingsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: 'Invalid agent settings' });
+      }
+
+      const { executionMode, synthesisRoute } = parsed.data;
+      await updateChatAgentSettingsById({
+        chatId: id,
+        executionMode,
+        synthesisRoute,
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error updating chat agent settings:', error);
+      res.status(500).json({ error: 'Failed to update chat agent settings' });
+    }
+  },
+);
 
 /**
  * PATCH /api/chat/:id/visibility - Update chat visibility

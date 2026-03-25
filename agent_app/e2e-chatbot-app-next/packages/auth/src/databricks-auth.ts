@@ -55,6 +55,21 @@ const USER_IDENTITY_CACHE_DURATION = 30 * 60 * 1000; // Cache for 30 minutes
 let cachedScimUser: any = null;
 let cacheExpiry = 0;
 
+function invalidateCachedToken(method: AuthMethod): void {
+  if (method === 'oauth') {
+    oauthToken = null;
+    oauthTokenExpiresAt = 0;
+    console.log('[Auth] Cleared cached OAuth token');
+    return;
+  }
+
+  if (method === 'cli') {
+    cliToken = null;
+    cliTokenExpiresAt = 0;
+    console.log('[Auth] Cleared cached CLI token');
+  }
+}
+
 // ============================================================================
 // Authentication Method Detection
 // ============================================================================
@@ -226,7 +241,13 @@ const CLI_HOST_CACHE_DURATION = 10 * 60 * 1000; // Cache for 10 minutes
  */
 export async function getDatabricksUserIdentity(): Promise<string> {
   // Check if we have a valid cached identity
-  if (cliUserIdentity && Date.now() < cliUserIdentityExpiresAt) {
+  const hasFreshCliHost =
+    cliHostCache && Date.now() < cliHostCacheTime + CLI_HOST_CACHE_DURATION;
+  if (
+    cliUserIdentity &&
+    Date.now() < cliUserIdentityExpiresAt &&
+    (hasFreshCliHost || Boolean(process.env.DATABRICKS_HOST))
+  ) {
     return cliUserIdentity;
   }
 
@@ -425,7 +446,7 @@ export async function getDatabaseUsername(): Promise<string> {
 /**
  * Get current user from Databricks SCIM API (for local development)
  */
-async function getDatabricksCurrentUser(): Promise<any> {
+async function getDatabricksCurrentUser(retryAttempted = false): Promise<any> {
   // Check cache first
   if (cachedScimUser && Date.now() < cacheExpiry) {
     console.log(
@@ -482,6 +503,16 @@ async function getDatabricksCurrentUser(): Promise<any> {
 
   if (!scimResponse.ok) {
     const errorText = await scimResponse.text();
+    if (
+      !retryAttempted &&
+      (scimResponse.status === 401 || scimResponse.status === 403)
+    ) {
+      console.warn(
+        `[getDatabricksCurrentUser] SCIM request returned ${scimResponse.status}; clearing cached token and retrying once`,
+      );
+      invalidateCachedToken(method);
+      return getDatabricksCurrentUser(true);
+    }
     throw new Error(
       `Failed to get SCIM user: ${scimResponse.status} ${errorText}`,
     );

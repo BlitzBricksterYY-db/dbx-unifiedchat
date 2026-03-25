@@ -107,6 +107,7 @@ class LLMConfig:
     execution_endpoint: str
     summarize_endpoint: str
     chart_endpoint: str
+    detect_code_lookup_endpoint: str
     
     @classmethod
     def from_env(cls) -> 'LLMConfig':
@@ -120,6 +121,7 @@ class LLMConfig:
             execution_endpoint=os.getenv("LLM_ENDPOINT_EXECUTION", d),
             summarize_endpoint=os.getenv("LLM_ENDPOINT_SUMMARIZE", d),
             chart_endpoint=os.getenv("LLM_ENDPOINT_CHART", d),
+            detect_code_lookup_endpoint=os.getenv("LLM_ENDPOINT_DETECT_CODE_LOOKUP", "databricks-gpt-5-4-mini"),
         )
 
     @classmethod
@@ -134,6 +136,7 @@ class LLMConfig:
             execution_endpoint=_mc_get(mc, "llm_endpoint_execution", d),
             summarize_endpoint=_mc_get(mc, "llm_endpoint_summarize", d),
             chart_endpoint=_mc_get(mc, "llm_endpoint_chart", d),
+            detect_code_lookup_endpoint=_mc_get(mc, "llm_endpoint_detect_code_lookup", "databricks-gpt-5-4-mini"),
         )
 
 
@@ -381,6 +384,7 @@ class AgentConfig:
         print(f"  SQL Synthesis (Genie) Agent: {self.llm.sql_synthesis_genie_endpoint}")
         print(f"  SQL Execution Agent: {self.llm.execution_endpoint}")
         print(f"  Summarize Agent: {self.llm.summarize_endpoint}")
+        print(f"  Detect Code Lookup: {self.llm.detect_code_lookup_endpoint}")
         print(f"\nVector Search:")
         print(f"  Function: {self.vector_search.function_name}")
         print(f"  Endpoint: {self.vector_search.endpoint_name}")

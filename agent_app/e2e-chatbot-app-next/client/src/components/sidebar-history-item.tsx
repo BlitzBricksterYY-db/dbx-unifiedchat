@@ -15,16 +15,35 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from './ui/dropdown-menu';
-import { memo } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { useChatVisibility } from '@/hooks/use-chat-visibility';
+import { useChatData } from '@/hooks/useChatData';
 import {
   CircleCheck,
+  ChevronDownIcon,
   GlobeIcon,
+  LoaderIcon,
   LockIcon,
   MoreHorizontalIcon,
   ShareIcon,
   TrashIcon,
 } from 'lucide-react';
+import type { ChatMessage } from '@chat-template/core';
+
+function getTurnLabel(message: ChatMessage, index: number) {
+  const text = message.parts
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text.trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ');
+
+  if (!text) {
+    return `Turn ${index + 1}`;
+  }
+
+  return text.length > 48 ? `${text.slice(0, 45)}...` : text;
+}
 
 const PureChatItem = ({
   chat,
@@ -41,11 +60,35 @@ const PureChatItem = ({
     chatId: chat.id,
     initialVisibilityType: chat.visibility,
   });
+  const [isExpanded, setIsExpanded] = useState(isActive);
+  // Lazy-load: only fetch when active or when user has expanded this item
+  const { chatData, isLoading } = useChatData(chat.id, isActive || isExpanded);
+  const turnMessages = useMemo(
+    () =>
+      (chatData?.messages ?? []).filter((message) => message.role === 'user'),
+    [chatData?.messages],
+  );
 
-  return (
+  useEffect(() => {
+    if (isActive) {
+      setIsExpanded(true);
+    }
+  }, [isActive]);
+
+  const hasTurnData = isLoading || turnMessages.length > 0;
+
+  const chatRow = (
     <SidebarMenuItem data-testid="chat-history-item">
       <SidebarMenuButton asChild isActive={isActive}>
         <Link to={`/chat/${chat.id}`} onClick={() => setOpenMobile(false)}>
+          <ChevronDownIcon
+            className={`size-3 shrink-0 text-sidebar-foreground/50 transition-transform ${isExpanded ? '' : '-rotate-90'}`}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsExpanded((v) => !v);
+            }}
+          />
           <span>{chat.title}</span>
         </Link>
       </SidebarMenuButton>
@@ -107,8 +150,38 @@ const PureChatItem = ({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      {isExpanded && (
+        <div className="mt-1 ml-3 border-sidebar-border/60 border-l pl-2">
+          {isLoading ? (
+            <div className="flex items-center gap-2 px-2 py-1 text-sidebar-foreground/60 text-xs">
+              <LoaderIcon className="size-3 animate-spin" />
+              <span>Loading turns...</span>
+            </div>
+          ) : hasTurnData ? (
+            turnMessages.map((message, index) => (
+              <Link
+                key={message.id}
+                to={`/chat/${chat.id}?turn=${message.id}`}
+                onClick={() => setOpenMobile(false)}
+                className="flex w-full rounded-md px-2 py-1 text-left text-sidebar-foreground/80 text-xs transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+              >
+                <span className="truncate">
+                  {index + 1}. {getTurnLabel(message, index)}
+                </span>
+              </Link>
+            ))
+          ) : (
+            <div className="px-2 py-1 text-sidebar-foreground/40 text-xs">
+              No turns yet
+            </div>
+          )}
+        </div>
+      )}
     </SidebarMenuItem>
   );
+
+  return chatRow;
 };
 
 export const ChatItem = memo(PureChatItem, (prevProps, nextProps) => {
