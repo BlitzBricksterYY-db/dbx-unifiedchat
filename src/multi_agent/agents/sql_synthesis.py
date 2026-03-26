@@ -292,21 +292,27 @@ def sql_synthesis_table_node(state: AgentState) -> dict:
         
         # Extract all SQL queries using helper function
         sql_queries, query_labels = extract_sql_queries_from_agent_result(result, "sql_synthesis_table")
-        
+
+        # If count_only mode, wrap each query to return only counts
+        if state.get("count_only") and sql_queries:
+            print("🔢 Count-only mode: wrapping queries with SELECT COUNT(*)")
+            sql_queries = [f"SELECT COUNT(*) AS count FROM ({q})" for q in sql_queries]
+            writer({"type": "agent_thinking", "agent": "sql_synthesis_table", "content": "🔢 Count-only mode enabled — wrapping queries to return row counts only"})
+
         if sql_queries:
             # Multi-query support
             print(f"✓ Extracted {len(sql_queries)} SQL quer{'y' if len(sql_queries) == 1 else 'ies'}")
             for i, query in enumerate(sql_queries, 1):
                 label_info = f" [{query_labels[i-1]}]" if i <= len(query_labels) and query_labels[i-1] else ""
                 print(f"  Query {i}{label_info} preview: {query[:100]}...")
-            
+
             if explanation:
                 print(f"Agent Explanation: {explanation[:200]}...")
-            
+
             # Emit detailed success events
             writer({"type": "sql_generated", "agent": "sql_synthesis_table", "query_preview": sql_queries[0][:200], "content": f"💻 {len(sql_queries)} SQL Quer{'y' if len(sql_queries) == 1 else 'ies'} Generated"})
             writer({"type": "agent_result", "agent": "sql_synthesis_table", "result": "success", "content": f"✅ SQL synthesis complete: {explanation[:150]}..."})
-            
+
             # Return updates for successful synthesis
             return {
                 "sql_queries": sql_queries,
@@ -447,22 +453,28 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
         
         # Extract all SQL queries using helper function
         sql_queries, query_labels = extract_sql_queries_from_agent_result(result, "sql_synthesis_genie")
-        
+
+        # If count_only mode, wrap each query to return only counts
+        if state.get("count_only") and sql_queries:
+            print("🔢 Count-only mode: wrapping queries with SELECT COUNT(*)")
+            sql_queries = [f"SELECT COUNT(*) AS count FROM ({q})" for q in sql_queries]
+            writer({"type": "agent_thinking", "agent": "sql_synthesis_genie", "content": "🔢 Count-only mode enabled — wrapping queries to return row counts only"})
+
         if sql_queries:
             # Multi-query support
             print(f"✓ Extracted {len(sql_queries)} SQL quer{'y' if len(sql_queries) == 1 else 'ies'}")
             for i, query in enumerate(sql_queries, 1):
                 label_info = f" [{query_labels[i-1]}]" if i <= len(query_labels) and query_labels[i-1] else ""
                 print(f"  Query {i}{label_info} preview: {query[:100]}...")
-            
+
             if explanation:
                 print(f"Agent Explanation: {explanation[:200]}...")
-            
+
             # Emit detailed success events
             writer({"type": "sql_generated", "agent": "sql_synthesis_genie", "query_preview": sql_queries[0][:200], "content": f"💻 {len(sql_queries)} SQL Quer{'y' if len(sql_queries) == 1 else 'ies'} Generated"})
             writer({"type": "agent_result", "agent": "sql_synthesis_genie", "result": "success", "content": f"✅ SQL synthesis complete: {explanation[:150]}..."})
             writer({"type": "agent_thinking", "agent": "sql_synthesis_genie", "content": f"🎯 Successfully extracted {len(sql_queries)} SQL queries from {len(genie_route_plan)} Genie agents"})
-            
+
             # Return updates for successful synthesis
             return {
                 "sql_queries": sql_queries,

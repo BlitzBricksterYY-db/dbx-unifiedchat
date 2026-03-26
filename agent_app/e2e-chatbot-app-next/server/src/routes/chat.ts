@@ -70,6 +70,7 @@ export const chatRouter: RouterType = Router();
 const chatAgentSettingsSchema = z.object({
   executionMode: z.enum(['parallel', 'sequential']),
   synthesisRoute: z.enum(['auto', 'table_route', 'genie_route']),
+  countOnly: z.boolean(),
 });
 
 const streamCache = new StreamCache();
@@ -114,6 +115,7 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
       agentSettings?: {
         executionMode: 'parallel' | 'sequential';
         synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+        countOnly: boolean;
       };
     } = requestBody;
 
@@ -145,6 +147,7 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
           visibility: selectedVisibilityType,
           executionMode: agentSettings?.executionMode ?? 'parallel',
           synthesisRoute: agentSettings?.synthesisRoute ?? 'auto',
+          countOnly: agentSettings?.countOnly ?? false,
         });
 
         generateTitleFromUserMessage({ message })
@@ -179,6 +182,7 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
           chatId: id,
           executionMode: agentSettings.executionMode,
           synthesisRoute: agentSettings.synthesisRoute,
+          countOnly: agentSettings.countOnly,
         });
       }
     }
@@ -274,6 +278,7 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
       [CONTEXT_HEADER_USER_ID]: session.user.email ?? session.user.id,
       'x-agent-execution-mode': chatAgentSettings?.executionMode ?? 'parallel',
       'x-agent-synthesis-route': chatAgentSettings?.synthesisRoute ?? 'auto',
+      'x-agent-count-only': String(chatAgentSettings?.countOnly ?? false),
       ...(req.headers['x-forwarded-access-token']
         ? { 'x-forwarded-access-token': req.headers['x-forwarded-access-token'] as string }
         : {}),
@@ -564,11 +569,12 @@ chatRouter.patch(
         return res.status(400).json({ error: 'Invalid agent settings' });
       }
 
-      const { executionMode, synthesisRoute } = parsed.data;
+      const { executionMode, synthesisRoute, countOnly } = parsed.data;
       await updateChatAgentSettingsById({
         chatId: id,
         executionMode,
         synthesisRoute,
+        countOnly,
       });
 
       res.json({ success: true });

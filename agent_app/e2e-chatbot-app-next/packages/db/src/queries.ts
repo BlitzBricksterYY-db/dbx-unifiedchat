@@ -99,6 +99,7 @@ export async function saveChat({
   visibility,
   executionMode = 'parallel',
   synthesisRoute = 'auto',
+  countOnly = false,
 }: {
   id: string;
   userId: string;
@@ -106,6 +107,7 @@ export async function saveChat({
   visibility: VisibilityType;
   executionMode?: 'parallel' | 'sequential';
   synthesisRoute?: 'auto' | 'table_route' | 'genie_route';
+  countOnly?: boolean;
 }) {
   if (!isDatabaseAvailable()) {
     console.log('[saveChat] Database not available, skipping persistence');
@@ -121,6 +123,7 @@ export async function saveChat({
       visibility,
       executionMode,
       synthesisRoute,
+      countOnly,
     });
   } catch (error) {
     console.error('[saveChat] Error saving chat:', error);
@@ -423,10 +426,12 @@ export async function updateChatAgentSettingsById({
   chatId,
   executionMode,
   synthesisRoute,
+  countOnly,
 }: {
   chatId: string;
   executionMode: 'parallel' | 'sequential';
   synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+  countOnly: boolean;
 }) {
   if (!isDatabaseAvailable()) {
     console.log(
@@ -438,7 +443,7 @@ export async function updateChatAgentSettingsById({
   try {
     return await (await ensureDb())
       .update(chat)
-      .set({ executionMode, synthesisRoute })
+      .set({ executionMode, synthesisRoute, countOnly })
       .where(eq(chat.id, chatId));
   } catch (_error) {
     throw new ChatSDKError(

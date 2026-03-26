@@ -8,12 +8,14 @@ export type SynthesisRoute = 'auto' | 'table_route' | 'genie_route';
 export interface AgentSettings {
   executionMode: ExecutionMode;
   synthesisRoute: SynthesisRoute;
+  countOnly: boolean;
 }
 
 function loadSettings(initialSettings?: Partial<AgentSettings>): AgentSettings {
   return {
     executionMode: initialSettings?.executionMode ?? 'parallel',
     synthesisRoute: initialSettings?.synthesisRoute ?? 'auto',
+    countOnly: initialSettings?.countOnly ?? false,
   };
 }
 
@@ -168,7 +170,7 @@ export function AgentSettingsPanel({
           </div>
 
           {/* Synthesis route selector */}
-          <div>
+          <div className="mb-3">
             <label className="mb-1 block text-xs text-zinc-500 dark:text-zinc-400">
               Synthesis Route
             </label>
@@ -200,6 +202,50 @@ export function AgentSettingsPanel({
             <p className="mt-0.5 text-[10px] text-zinc-400">
               Auto lets the planner decide; Table uses UC functions; Genie uses
               Genie agents
+            </p>
+          </div>
+
+          {/* Count only toggle */}
+          <div>
+            <label className="mb-1 block text-xs text-zinc-500 dark:text-zinc-400">
+              Count Only
+            </label>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  setDraftSettings((prev) => ({
+                    ...prev,
+                    countOnly: !prev.countOnly,
+                  }))
+                }
+                role="switch"
+                aria-label="Count only"
+                aria-checked={draftSettings.countOnly}
+                data-testid="count-only-toggle"
+                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                  draftSettings.countOnly
+                    ? 'bg-blue-600'
+                    : 'bg-zinc-200 dark:bg-zinc-700'
+                }`}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                    draftSettings.countOnly
+                      ? 'translate-x-4'
+                      : 'translate-x-0'
+                  }`}
+                />
+              </button>
+              <span
+                data-testid="count-only-value"
+                className="text-xs text-zinc-600 dark:text-zinc-300"
+              >
+                {draftSettings.countOnly ? 'On' : 'Off'}
+              </span>
+            </div>
+            <p className="mt-0.5 text-[10px] text-zinc-400">
+              Return only row counts, no data columns
             </p>
           </div>
 

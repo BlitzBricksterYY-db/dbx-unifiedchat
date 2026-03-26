@@ -101,6 +101,9 @@ class AgentState(TypedDict):
     thread_id: Optional[str]
     user_preferences: Optional[Dict[str, Any]]
     
+    # Agent Settings (from UI)
+    count_only: Optional[bool]
+
     # Control Flow
     next_agent: Optional[str]
     messages: Annotated[List, operator.add]

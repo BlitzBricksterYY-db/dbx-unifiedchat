@@ -291,12 +291,14 @@ async def stream_handler(
     # Agent settings from UI (via custom_inputs)
     execution_mode = ci.get("execution_mode", "parallel")
     force_synthesis_route = ci.get("force_synthesis_route", "auto")
+    count_only = ci.get("count_only", False)
 
     initial_state = {
         **RESET_STATE_TEMPLATE,
         "original_query": latest_query,
         "execution_mode": execution_mode,
         "force_synthesis_route": force_synthesis_route,
+        "count_only": count_only,
         "messages": [
             SystemMessage(content="""You are a multi-agent Q&A analysis system.
 Your role is to help users query and analyze cross-domain data.

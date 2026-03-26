@@ -28,6 +28,7 @@ const agentSettingsSchema = z
   .object({
     executionMode: z.enum(['parallel', 'sequential']).default('parallel'),
     synthesisRoute: z.enum(['auto', 'table_route', 'genie_route']).default('auto'),
+    countOnly: z.boolean().default(false),
   })
   .optional();
 

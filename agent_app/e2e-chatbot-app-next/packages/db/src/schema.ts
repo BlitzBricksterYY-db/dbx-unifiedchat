@@ -44,6 +44,7 @@ export const chat = createTable('Chat', {
   })
     .notNull()
     .default('auto'),
+  countOnly: boolean('countOnly').notNull().default(false),
   lastContext: jsonb('lastContext').$type<LanguageModelV3Usage | null>(),
 });
 
