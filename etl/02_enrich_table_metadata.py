@@ -36,6 +36,7 @@ dbutils.widgets.text("enriched_docs_table", os.getenv("ENRICHED_DOCS_TABLE", "en
 dbutils.widgets.text("llm_endpoint", os.getenv("LLM_ENDPOINT", "databricks-claude-sonnet-4-5"))
 dbutils.widgets.text("sample_size", os.getenv("SAMPLE_SIZE", "20"))
 dbutils.widgets.text("max_unique_values", os.getenv("MAX_UNIQUE_VALUES", "50"))
+dbutils.widgets.text("space_id", os.getenv("SPACE_ID", ""))
 
 catalog_name = dbutils.widgets.get("catalog_name")
 schema_name = dbutils.widgets.get("schema_name")
@@ -44,8 +45,11 @@ enriched_docs_table_short = dbutils.widgets.get("enriched_docs_table")
 llm_endpoint = dbutils.widgets.get("llm_endpoint")
 sample_size = int(dbutils.widgets.get("sample_size"))
 max_unique_values = int(dbutils.widgets.get("max_unique_values"))
+space_id = dbutils.widgets.get("space_id").strip()
 
 enriched_docs_table = f"{catalog_name}.{schema_name}.{enriched_docs_table_short}"
+
+incremental_mode = bool(space_id)
 
 print(f"Catalog: {catalog_name}")
 print(f"Schema: {schema_name}")
@@ -54,6 +58,7 @@ print(f"Enriched Docs Table: {enriched_docs_table}")
 print(f"LLM Endpoint: {llm_endpoint}")
 print(f"Sample Size: {sample_size}")
 print(f"Max Unique Values: {max_unique_values}")
+print(f"Mode: {'INCREMENTAL (space_id=' + space_id + ')' if incremental_mode else 'FULL (all spaces)'}")
 
 # COMMAND ----------
 
@@ -553,8 +558,14 @@ genie_exports_path = f"/Volumes/{catalog_name}/{schema_name}/{volume_name}/genie
 print(f"Looking for Genie exports in: {genie_exports_path}")
 
 import glob
-space_files = glob.glob(f"{genie_exports_path}/*.space.json")
-print(f"Found {len(space_files)} Genie space files")
+if incremental_mode:
+    space_files = glob.glob(f"{genie_exports_path}/{space_id}__*.space.json")
+    if not space_files:
+        space_files = glob.glob(f"{genie_exports_path}/*{space_id}*.space.json")
+    print(f"Incremental mode: found {len(space_files)} file(s) for space_id={space_id}")
+else:
+    space_files = glob.glob(f"{genie_exports_path}/*.space.json")
+    print(f"Found {len(space_files)} Genie space files")
 
 # Process each space
 all_enriched_docs = []
@@ -601,13 +612,18 @@ else:
     )
 
 # Save to Delta table
-df_enriched.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(enriched_docs_table)
+if incremental_mode and all_enriched_docs:
+    spark.sql(f"DELETE FROM {enriched_docs_table} WHERE space_id = '{space_id}'")
+    df_enriched.write.mode("append").saveAsTable(enriched_docs_table)
+    print(f"\n✓ Incremental: replaced enriched docs for space_id={space_id} in {enriched_docs_table}")
+else:
+    df_enriched.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(enriched_docs_table)
+    print(f"\n✓ Saved enriched docs to: {enriched_docs_table}")
 
-print(f"\n✓ Saved enriched docs to: {enriched_docs_table}")
-print(f"  Total records: {df_enriched.count()}")
+print(f"  Total records: {spark.table(enriched_docs_table).count()}")
 
 # Display sample
-if df_enriched.count() > 0:
+if spark.table(enriched_docs_table).count() > 0:
     display(spark.table(enriched_docs_table))
 
 # COMMAND ----------
@@ -908,10 +924,15 @@ else:
 
 # Save to Delta table
 chunks_table_name = f"{enriched_docs_table}_chunks"
-df_chunks.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(chunks_table_name)
+if incremental_mode and all_chunks:
+    spark.sql(f"DELETE FROM {chunks_table_name} WHERE space_id = '{space_id}'")
+    df_chunks.write.mode("append").saveAsTable(chunks_table_name)
+    print(f"\n✓ Incremental: replaced chunks for space_id={space_id} in {chunks_table_name}")
+else:
+    df_chunks.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(chunks_table_name)
+    print(f"\n✓ Saved chunks to: {chunks_table_name}")
 
-print(f"\n✓ Saved chunks to: {chunks_table_name}")
-print(f"  Total records: {df_chunks.count()}")
+print(f"  Total records: {spark.table(chunks_table_name).count()}")
 
 # Display samples of each chunk type
 print("\n" + "="*80)

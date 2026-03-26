@@ -74,6 +74,9 @@ variables:
   llm_endpoint_summarize:
     description: LLM endpoint for summarize agent
     default: databricks-claude-haiku-4-5
+  llm_endpoint_agent_rx:
+    description: LLM endpoint for AgentRx (resource modification agent)
+    default: databricks-claude-sonnet-4-5
 
   # ---- Enrichment tuning ----
   sample_size:
@@ -140,6 +143,18 @@ targets:
       genie_space_ids: "01f11b27d1121e2bb00d6ecd846b1988,01f11b27d23a1ab195fa7ba8efc06d13,01f11b27d3ea149694cf608c3d278673"
       model_name: super_agent_hybrid
       endpoint_name: multi-agent-genie-endpoint-dev
+
+  ian:
+    workspace:
+      host: https://fevm-classic-stable-ian-agents.cloud.databricks.com/
+    variables:
+      catalog_name: classic_stable_ian_agents_catalog
+      schema_name: multi_agent_genie
+      sql_warehouse_id: ec8b3f4cd7468502
+      genie_space_ids: "01f123d6e5a217f284404ecad0bd9f0f,01f123d6e3661bdb9b44de20a43adcb4,01f118bb4e4218c6a908c1c5638333d5,01f11730e4761231bfbed96027153c03,01f11730cfe812f0b93fee810708e1a6,01f1172e780a1d61a0822a6c8db74006"
+      vs_endpoint_name: genie_multi_agent_vs
+      model_name: super_agent_hybrid
+      endpoint_name: multi-agent-genie-endpoint
 
   prod:
     workspace:

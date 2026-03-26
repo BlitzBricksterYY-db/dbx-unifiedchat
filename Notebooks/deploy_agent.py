@@ -46,7 +46,7 @@ _WIDGET_KEYS = [
     "volume_name", "enriched_docs_table", "source_table", "uc_function_names",
     "llm_endpoint", "llm_endpoint_clarification", "llm_endpoint_planning",
     "llm_endpoint_sql_synthesis_table", "llm_endpoint_sql_synthesis_genie",
-    "llm_endpoint_execution", "llm_endpoint_summarize",
+    "llm_endpoint_execution", "llm_endpoint_summarize", "llm_endpoint_agent_rx",
     "sample_size", "max_unique_values",
     "vs_endpoint_name", "embedding_model",
     "lakebase_instance_name", "lakebase_embedding_endpoint", "lakebase_embedding_dims",
@@ -84,6 +84,7 @@ cfg = get_config()
 CATALOG = cfg.unity_catalog.catalog_name
 SCHEMA = cfg.unity_catalog.schema_name
 TABLE_NAME = cfg.source_table_fq
+ENRICHED_DOCS_TABLE_NAME = cfg.enriched_docs_table_fq
 VECTOR_SEARCH_INDEX = cfg.vs_index_fq
 UC_FUNCTION_NAMES = cfg.unity_catalog.uc_function_names_fq
 GENIE_SPACE_IDS = cfg.table_metadata.genie_space_ids
@@ -382,6 +383,7 @@ resources = [
     DatabricksServingEndpoint(cfg.llm.sql_synthesis_genie_endpoint),
     DatabricksServingEndpoint(cfg.llm.execution_endpoint),
     DatabricksServingEndpoint(cfg.llm.summarize_endpoint),
+    DatabricksServingEndpoint(cfg.llm.agent_rx_endpoint),
     DatabricksServingEndpoint(EMBEDDING_ENDPOINT),
     
     # Lakebase for state management (CRITICAL!)
@@ -396,8 +398,9 @@ resources = [
     # Genie Spaces (IMPORTANT: Must declare all Genie spaces used!)
     *[DatabricksGenieSpace(genie_space_id=space_id) for space_id in GENIE_SPACE_IDS],
     
-    # Tables (metadata enrichment table + underlying Genie tables)
+    # Tables (enriched metadata tables + underlying Genie tables)
     DatabricksTable(table_name=TABLE_NAME),
+    DatabricksTable(table_name=ENRICHED_DOCS_TABLE_NAME),
     *[DatabricksTable(table_name=table) for table in UNDERLYING_TABLES],
     
     # UC Functions (metadata querying tools)
@@ -426,6 +429,7 @@ with mlflow.start_run():
     mlflow.log_param("llm_endpoint_sql_synthesis_genie", cfg.llm.sql_synthesis_genie_endpoint)
     mlflow.log_param("llm_endpoint_execution", cfg.llm.execution_endpoint)
     mlflow.log_param("llm_endpoint_summarize", cfg.llm.summarize_endpoint)
+    mlflow.log_param("llm_endpoint_agent_rx", cfg.llm.agent_rx_endpoint)
     mlflow.log_param("embedding_endpoint", EMBEDDING_ENDPOINT)
     
     # Log agent configuration strategy

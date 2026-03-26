@@ -14,6 +14,7 @@ from ..agents.planning import planning_node
 from ..agents.sql_synthesis import sql_synthesis_table_node, sql_synthesis_genie_node
 from ..agents.sql_execution import sql_execution_node
 from ..agents.summarize import summarize_node
+from ..agents.agent_rx import agent_rx_node
 
 
 def create_super_agent_hybrid() -> StateGraph:
@@ -42,13 +43,18 @@ def create_super_agent_hybrid() -> StateGraph:
     workflow.add_node("sql_synthesis_genie", sql_synthesis_genie_node)
     workflow.add_node("sql_execution", sql_execution_node)
     workflow.add_node("summarize", summarize_node)
+    workflow.add_node("agent_rx", agent_rx_node)
     
     # Define routing logic based on explicit state
     def route_after_unified(state: AgentState) -> str:
-        """Route after unified node: planning or END (clarification/meta-question/irrelevant)"""
+        """Route after unified node: planning, agent_rx, or END (clarification/meta-question/irrelevant)"""
         # Check if irrelevant question - go directly to END with refusal
         if state.get("is_irrelevant", False):
             return END
+        
+        # Check if resource modification - route to AgentRx
+        if state.get("is_resource_modification", False):
+            return "agent_rx"
         
         # Check if meta-question - go directly to END with answer
         if state.get("is_meta_question", False):
@@ -87,6 +93,7 @@ def create_super_agent_hybrid() -> StateGraph:
         route_after_unified,
         {
             "planning": "planning",
+            "agent_rx": "agent_rx",
             END: END
         }
     )
@@ -122,6 +129,9 @@ def create_super_agent_hybrid() -> StateGraph:
     # SQL execution always goes to summarize
     workflow.add_edge("sql_execution", "summarize")
     
+    # AgentRx goes directly to END (no summarization needed)
+    workflow.add_edge("agent_rx", END)
+    
     # Summarize is the final node before END
     workflow.add_edge("summarize", END)
     
@@ -132,6 +142,7 @@ def create_super_agent_hybrid() -> StateGraph:
     print("  4. SQL Synthesis Agent - Genie Route")
     print("  5. SQL Execution Agent")
     print("  6. Result Summarize Agent - FINAL NODE")
+    print("  7. AgentRx - Resource Modification Agent")
     print("\n✓ Conditional routing configured")
     print("✓ All paths route to summarize node before END")
     print("\n✅ Hybrid Super Agent workflow created successfully!")
