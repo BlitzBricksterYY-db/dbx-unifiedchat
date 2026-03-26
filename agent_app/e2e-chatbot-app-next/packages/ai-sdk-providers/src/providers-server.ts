@@ -172,6 +172,7 @@ export const databricksFetch: typeof fetch = async (input, init) => {
   const clarificationSensitivity = headers.get(
     'x-agent-clarification-sensitivity',
   );
+  const countOnly = headers.get('x-agent-count-only') === 'true';
   const useApiProxy = headers.get('x-use-api-proxy') === 'true';
   // Remove custom headers so they don't get sent to the API
   headers.delete(CONTEXT_HEADER_CONVERSATION_ID);
@@ -179,6 +180,7 @@ export const databricksFetch: typeof fetch = async (input, init) => {
   headers.delete('x-agent-execution-mode');
   headers.delete('x-agent-synthesis-route');
   headers.delete('x-agent-clarification-sensitivity');
+  headers.delete('x-agent-count-only');
   headers.delete('x-use-api-proxy');
   requestInit = { ...requestInit, headers };
 
@@ -215,6 +217,7 @@ export const databricksFetch: typeof fetch = async (input, init) => {
             ...(clarificationSensitivity
               ? { clarification_sensitivity: clarificationSensitivity }
               : {}),
+            ...(countOnly ? { count_only: true } : {}),
           },
         };
       }

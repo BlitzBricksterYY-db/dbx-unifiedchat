@@ -86,6 +86,7 @@ export default function ChatPage() {
         executionMode: chat.executionMode,
         synthesisRoute: chat.synthesisRoute,
         clarificationSensitivity: chat.clarificationSensitivity,
+        countOnly: chat.countOnly,
       }}
       isReadonly={isReadonly}
       session={session}

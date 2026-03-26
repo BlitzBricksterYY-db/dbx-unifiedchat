@@ -421,8 +421,24 @@ def sql_synthesis_table_node(state: AgentState) -> dict:
         explanation = result.get("explanation", "")
         has_sql = result.get("has_sql", False)
         
-        sql_queries, query_labels = extract_sql_queries_from_agent_result(result, "sql_synthesis_table")
-        
+        sql_queries, query_labels = extract_sql_queries_from_agent_result(
+            result, "sql_synthesis_table"
+        )
+
+        if state.get("count_only") and sql_queries:
+            print("Count-only mode: wrapping queries with SELECT COUNT(*)")
+            sql_queries = [
+                f"SELECT COUNT(*) AS count FROM ({query}) AS count_only_subquery"
+                for query in sql_queries
+            ]
+            writer(
+                {
+                    "type": "agent_thinking",
+                    "agent": "sql_synthesis_table",
+                    "content": "Count-only mode enabled - wrapping queries to return row counts only",
+                }
+            )
+
         if sql_queries:
             print(f"✓ Extracted {len(sql_queries)} SQL quer{'y' if len(sql_queries) == 1 else 'ies'}")
             for i, query in enumerate(sql_queries, 1):
@@ -640,8 +656,24 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
         explanation = result.get("explanation", "")
         has_sql = result.get("has_sql", False)
         
-        sql_queries, query_labels = extract_sql_queries_from_agent_result(result, "sql_synthesis_genie")
-        
+        sql_queries, query_labels = extract_sql_queries_from_agent_result(
+            result, "sql_synthesis_genie"
+        )
+
+        if state.get("count_only") and sql_queries:
+            print("Count-only mode: wrapping queries with SELECT COUNT(*)")
+            sql_queries = [
+                f"SELECT COUNT(*) AS count FROM ({query}) AS count_only_subquery"
+                for query in sql_queries
+            ]
+            writer(
+                {
+                    "type": "agent_thinking",
+                    "agent": "sql_synthesis_genie",
+                    "content": "Count-only mode enabled - wrapping queries to return row counts only",
+                }
+            )
+
         if sql_queries:
             print(f"✓ Extracted {len(sql_queries)} SQL quer{'y' if len(sql_queries) == 1 else 'ies'}")
             for i, query in enumerate(sql_queries, 1):

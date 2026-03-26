@@ -15,6 +15,7 @@ export interface AgentSettings {
   executionMode: ExecutionMode;
   synthesisRoute: SynthesisRoute;
   clarificationSensitivity: ClarificationSensitivity;
+  countOnly: boolean;
 }
 
 function normalizeExecutionMode(
@@ -46,6 +47,7 @@ function normalizeSettings(
     clarificationSensitivity: normalizeClarificationSensitivity(
       settings?.clarificationSensitivity,
     ),
+    countOnly: settings?.countOnly ?? false,
   };
 }
 
@@ -65,7 +67,7 @@ export function useAgentSettings(initialSettings?: Partial<AgentSettings>) {
 
   const update = useCallback((patch: Partial<AgentSettings>) => {
     setSettings((prev) => {
-      const next = { ...prev, ...patch };
+      const next = normalizeSettings({ ...prev, ...patch });
       settingsRef.current = next;
       return next;
     });
@@ -186,7 +188,6 @@ export function AgentSettingsPanel({
             Agent Settings
           </div>
 
-          {/* Execution mode toggle */}
           <div className="mb-3">
             <label className="mb-1 block text-xs text-zinc-500 dark:text-zinc-400">
               Execution Mode
@@ -239,8 +240,7 @@ export function AgentSettingsPanel({
             </p>
           </div>
 
-          {/* Synthesis route selector */}
-          <div>
+          <div className="mb-3">
             <label className="mb-1 block text-xs text-zinc-500 dark:text-zinc-400">
               SQL Synthesis Agent Route
             </label>
@@ -328,6 +328,53 @@ export function AgentSettingsPanel({
             <p className="mt-0.5 text-[10px] text-zinc-400">
               Off skips clarification, Low is lenient, High is strict, and On
               always asks before planning
+            </p>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs text-zinc-500 dark:text-zinc-400">
+              Count Only
+            </label>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  setDraftSettings((prev) => {
+                    const next = normalizeSettings({
+                      ...prev,
+                      countOnly: !prev.countOnly,
+                    });
+                    onLiveUpdate(next);
+                    return next;
+                  })
+                }
+                role="switch"
+                aria-label="Count only"
+                aria-checked={draftSettings.countOnly}
+                data-testid="count-only-toggle"
+                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                  draftSettings.countOnly
+                    ? 'bg-blue-600'
+                    : 'bg-zinc-200 dark:bg-zinc-700'
+                }`}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                    draftSettings.countOnly
+                      ? 'translate-x-4'
+                      : 'translate-x-0'
+                  }`}
+                />
+              </button>
+              <span
+                data-testid="count-only-value"
+                className="text-xs text-zinc-600 dark:text-zinc-300"
+              >
+                {draftSettings.countOnly ? 'On' : 'Off'}
+              </span>
+            </div>
+            <p className="mt-0.5 text-[10px] text-zinc-400">
+              Return only row counts, no data columns
             </p>
           </div>
 

@@ -57,6 +57,7 @@ class GraphInput(TypedDict, total=False):
     execution_mode: Optional[str]
     force_synthesis_route: Optional[str]
     clarification_sensitivity: Optional[str]
+    count_only: Optional[bool]
 
     # Fresh-turn per-query state reset fields
     question_clear: bool
@@ -104,6 +105,7 @@ class AgentState(TypedDict):
     # Clarification
     question_clear: bool
     clarification_sensitivity: Optional[str]  # "off" | "low" | "medium" | "high" | "on"
+    count_only: Optional[bool]
 
     # Meta-question handling
     is_meta_question: Optional[bool]

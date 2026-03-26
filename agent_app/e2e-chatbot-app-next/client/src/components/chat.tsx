@@ -41,6 +41,7 @@ type ChatDataCache = {
     executionMode: AgentSettings['executionMode'];
     synthesisRoute: AgentSettings['synthesisRoute'];
     clarificationSensitivity: AgentSettings['clarificationSensitivity'];
+    countOnly: AgentSettings['countOnly'];
   };
   messages: ChatMessage[];
   feedback: FeedbackMap;
@@ -334,6 +335,7 @@ export function Chat({
                   executionMode: settings.executionMode,
                   synthesisRoute: settings.synthesisRoute,
                   clarificationSensitivity: settings.clarificationSensitivity,
+                  countOnly: settings.countOnly,
                 },
               }
             : currentData,

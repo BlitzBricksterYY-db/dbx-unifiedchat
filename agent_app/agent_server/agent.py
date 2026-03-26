@@ -292,6 +292,7 @@ async def stream_handler(
     execution_mode = ci.get("execution_mode", "parallel")
     force_synthesis_route = ci.get("force_synthesis_route", "auto")
     clarification_sensitivity = ci.get("clarification_sensitivity", "medium")
+    count_only = ci.get("count_only", False)
 
     initial_state = {
         **RESET_STATE_TEMPLATE,
@@ -299,6 +300,7 @@ async def stream_handler(
         "execution_mode": execution_mode,
         "force_synthesis_route": force_synthesis_route,
         "clarification_sensitivity": clarification_sensitivity,
+        "count_only": count_only,
         "messages": [
             SystemMessage(content="""You are a multi-agent Q&A analysis system.
 Your role is to help users query and analyze cross-domain data.
@@ -339,6 +341,7 @@ Guidelines:
                     "execution_mode": execution_mode,
                     "force_synthesis_route": force_synthesis_route,
                     "clarification_sensitivity": clarification_sensitivity,
+                    "count_only": count_only,
                 },
             ) as span:
                 span.set_inputs(
@@ -349,6 +352,7 @@ Guidelines:
                         "execution_mode": execution_mode,
                         "force_synthesis_route": force_synthesis_route,
                         "clarification_sensitivity": clarification_sensitivity,
+                        "count_only": count_only,
                     }
                 )
                 last_state: dict = {}
@@ -369,6 +373,7 @@ Guidelines:
                                 "execution_mode": execution_mode,
                                 "force_synthesis_route": force_synthesis_route,
                                 "clarification_sensitivity": clarification_sensitivity,
+                                "count_only": count_only,
                             },
                         )
                     else:
