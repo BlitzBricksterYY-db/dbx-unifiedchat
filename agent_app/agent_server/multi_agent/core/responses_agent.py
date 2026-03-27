@@ -498,8 +498,8 @@ Guidelines:
 - Return results with proper context and explanations"""),
                 HumanMessage(content=latest_query)
             ]
-            # NOTE: current_turn, intent_metadata, turn_history are NOT in RESET_STATE_TEMPLATE
-            # They are managed by unified_intent_context_clarification_node and persist via CheckpointSaver
+            # NOTE: current_turn, turn_history are NOT in RESET_STATE_TEMPLATE
+            # They are managed by the clarification subgraph and persist via CheckpointSaver
         }
         
         # Add user_id to state for long-term memory access
@@ -513,23 +513,25 @@ Guidelines:
         # Execute workflow with CheckpointSaver for distributed serving
         # CRITICAL: CheckpointSaver as context manager ensures all instances share state
         with CheckpointSaver(instance_name=self.lakebase_instance_name) as checkpointer:
-            # Compile graph with checkpointer at runtime
-            # This allows distributed Model Serving to access shared state
+            from langgraph.types import Command
+
             app = self.workflow.compile(checkpointer=checkpointer)
             
             logger.info(f"Executing workflow with checkpointer (thread: {thread_id})")
-            
-            # Stream the workflow execution with enhanced visibility modes
-            # CheckpointSaver will:
-            # 1. Restore previous state from thread_id (if exists) from Lakebase
-            # 2. Merge with initial_state (initial_state takes precedence)
-            # 3. Preserve conversation history across distributed instances
-            # Stream modes:
-            # - updates: State changes after each node
-            # - messages: LLM token-by-token streaming
-            # - custom: Agent-specific events (thinking, decisions, progress)
-            # - tasks: Task lifecycle events (start, finish, errors) for node execution tracking
-            for event in app.stream(initial_state, run_config, stream_mode=["updates", "messages", "custom", "tasks"]):
+
+            # Detect pending interrupt from a prior turn on this thread.
+            # If the clarification subgraph paused via interrupt(), the user's
+            # new message is the answer — resume instead of starting fresh.
+            existing_state = app.get_state(run_config)
+            if existing_state.tasks and any(
+                hasattr(t, "interrupts") and t.interrupts for t in existing_state.tasks
+            ):
+                logger.info(f"Resuming from interrupt on thread {thread_id}")
+                input_data = Command(resume=latest_query)
+            else:
+                input_data = initial_state
+
+            for event in app.stream(input_data, run_config, stream_mode=["updates", "messages", "custom", "tasks"]):
                 event_type = event[0]
                 event_data = event[1]
                 

@@ -2,14 +2,18 @@
 CLI entry point for local agent development and testing.
 
 Usage:
-    python -m src.multi_agent.main --query "Show me patient data"
-    python -m src.multi_agent.main --interactive
-    python -m src.multi_agent.main --query "Follow up" --thread-id conv-123
+    python -m agent_server.multi_agent.main --query "Show me patient data"
+    python -m agent_server.multi_agent.main --interactive
+    python -m agent_server.multi_agent.main --query "Follow up" --thread-id conv-123
 """
 
 import argparse
 import sys
+import uuid
 from typing import Optional
+
+from langchain_core.messages import HumanMessage
+from langgraph.types import Command
 
 from .core.graph import create_agent_graph
 from .core.config import get_config
@@ -19,56 +23,60 @@ from .core.state import get_initial_state
 def run_query(query: str, thread_id: Optional[str] = None, verbose: bool = False):
     """
     Run a single query through the agent system.
-    
+
     Args:
         query: User query string
         thread_id: Optional thread ID for multi-turn conversation
         verbose: Whether to print verbose output
     """
     try:
-        # Load configuration
         if verbose:
             print("Loading configuration...")
         config = get_config()
-        
-        # Create agent graph
+
         if verbose:
             print("Creating agent graph...")
-        agent = create_agent_graph(config, with_checkpointer=bool(thread_id))
-        
-        # Prepare input
+
+        # Use Lakebase checkpointer when an explicit thread_id is provided,
+        # otherwise fall back to MemorySaver for local dev.
+        checkpointer_mode = True if thread_id else "memory"
+        agent = create_agent_graph(config, with_checkpointer=checkpointer_mode)
+
+        thread_id = thread_id or str(uuid.uuid4())
+        invoke_config = {"configurable": {"thread_id": thread_id}}
+
         initial_state = get_initial_state(thread_id=thread_id)
-        initial_state["messages"] = [{"role": "user", "content": query}]
-        
+        initial_state["messages"] = [HumanMessage(content=query)]
+
         if verbose:
             print(f"\nQuery: {query}")
-            if thread_id:
-                print(f"Thread ID: {thread_id}")
+            print(f"Thread ID: {thread_id}")
             print("\nProcessing...")
-        
-        # Invoke agent
-        response = agent.invoke(initial_state)
-        
-        # Print response
+
+        response = agent.invoke(initial_state, config=invoke_config)
+        while response.get("__interrupt__"):
+            interrupt_val = response["__interrupt__"][0].value
+            print(f"\n{interrupt_val['markdown']}\n")
+            user_input = input("Your response: ").strip()
+            response = agent.invoke(Command(resume=user_input), config=invoke_config)
+
         if verbose:
             print("\n" + "="*80)
             print("RESPONSE")
             print("="*80)
-        
-        final_response = response.get("final_response") or response.get("meta_answer")
+
+        final_response = (
+            response.get("final_response")
+            or response.get("meta_answer")
+            or response.get("final_summary")
+        )
         if final_response:
             print(final_response)
-        elif response.get("pending_clarification"):
-            clarification = response["pending_clarification"]
-            print(f"\n{clarification['reason']}\n")
-            print("Please choose:")
-            for i, option in enumerate(clarification['options'], 1):
-                print(f"  {i}. {option}")
         else:
             print("No response generated")
-        
+
         return response
-        
+
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         if verbose:
@@ -85,71 +93,64 @@ def run_interactive():
     print("Type 'exit' or 'quit' to end the session")
     print("Type 'new' to start a new conversation")
     print("="*80 + "\n")
-    
-    # Load configuration
+
     config = get_config()
-    
-    # Create agent with checkpointer
     agent = create_agent_graph(config, with_checkpointer=True)
-    
+
     thread_id = None
     turn_count = 0
-    
+
     while True:
         try:
-            # Get user input
             if turn_count == 0:
-                query = input("\n🧑 You: ").strip()
+                query = input("\nYou: ").strip()
             else:
-                query = input(f"\n🧑 You (turn {turn_count + 1}): ").strip()
-            
+                query = input(f"\nYou (turn {turn_count + 1}): ").strip()
+
             if not query:
                 continue
-            
-            # Check for exit
+
             if query.lower() in ['exit', 'quit']:
                 print("\nGoodbye!")
                 break
-            
-            # Check for new conversation
+
             if query.lower() == 'new':
                 thread_id = None
                 turn_count = 0
-                print("\n✓ Starting new conversation")
+                print("\nStarting new conversation")
                 continue
-            
-            # First turn - create thread
+
             if thread_id is None:
-                import uuid
                 thread_id = f"interactive-{uuid.uuid4()}"
                 turn_count = 0
-            
-            # Prepare state
+
             state = get_initial_state(thread_id=thread_id)
-            state["messages"] = [{"role": "user", "content": query}]
-            
-            # Invoke agent
-            print("\n🤖 Agent: Processing...")
-            response = agent.invoke(state)
-            
-            # Print response
-            final_response = response.get("final_response") or response.get("meta_answer")
+            state["messages"] = [HumanMessage(content=query)]
+
+            print("\nAgent: Processing...")
+            invoke_config = {"configurable": {"thread_id": thread_id}}
+            response = agent.invoke(state, config=invoke_config)
+            while response.get("__interrupt__"):
+                interrupt_val = response["__interrupt__"][0].value
+                print(f"\nAgent: {interrupt_val['markdown']}\n")
+                user_input = input("Your response: ").strip()
+                response = agent.invoke(Command(resume=user_input), config=invoke_config)
+
+            final_response = (
+                response.get("final_response")
+                or response.get("meta_answer")
+                or response.get("final_summary")
+            )
             if final_response:
-                print(f"\n🤖 Agent: {final_response}")
-            elif response.get("pending_clarification"):
-                clarification = response["pending_clarification"]
-                print(f"\n🤖 Agent: {clarification['reason']}\n")
-                print("Please choose:")
-                for i, option in enumerate(clarification['options'], 1):
-                    print(f"  {i}. {option}")
-            
+                print(f"\nAgent: {final_response}")
+
             turn_count += 1
-            
+
         except KeyboardInterrupt:
             print("\n\nInterrupted. Goodbye!")
             break
         except Exception as e:
-            print(f"\n❌ Error: {e}")
+            print(f"\nError: {e}")
             import traceback
             traceback.print_exc()
 
@@ -162,20 +163,20 @@ def main():
         epilog="""
 Examples:
   # Single query
-  python -m src.multi_agent.main --query "Show me patient demographics"
-  
+  python -m agent_server.multi_agent.main --query "Show me patient demographics"
+
   # Multi-turn conversation
-  python -m src.multi_agent.main --query "Show patients" --thread-id conv-123
-  python -m src.multi_agent.main --query "What about medications?" --thread-id conv-123
-  
+  python -m agent_server.multi_agent.main --query "Show patients" --thread-id conv-123
+  python -m agent_server.multi_agent.main --query "What about medications?" --thread-id conv-123
+
   # Interactive mode
-  python -m src.multi_agent.main --interactive
-  
+  python -m agent_server.multi_agent.main --interactive
+
   # With verbose output
-  python -m src.multi_agent.main --query "test" --verbose
+  python -m agent_server.multi_agent.main --query "test" --verbose
         """
     )
-    
+
     parser.add_argument(
         "--query",
         type=str,
@@ -196,13 +197,12 @@ Examples:
         action="store_true",
         help="Print verbose output"
     )
-    
+
     args = parser.parse_args()
-    
-    # Validate arguments
+
     if not args.interactive and not args.query:
         parser.error("Either --query or --interactive must be specified")
-    
+
     if args.interactive:
         run_interactive()
     else:

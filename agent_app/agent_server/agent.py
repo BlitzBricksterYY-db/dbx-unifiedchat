@@ -349,10 +349,22 @@ Guidelines:
                 )
                 last_state: dict = {}
                 with CheckpointSaver(instance_name=LAKEBASE_INSTANCE_NAME) as checkpointer:
+                    from langgraph.types import Command
+
                     app = _workflow.compile(checkpointer=checkpointer)
                     logger.info(f"Executing workflow with checkpointer (thread: {thread_id})")
+
+                    existing_state = app.get_state(run_config)
+                    if existing_state.tasks and any(
+                        hasattr(t, "interrupts") and t.interrupts for t in existing_state.tasks
+                    ):
+                        logger.info(f"Resuming from interrupt on thread {thread_id}")
+                        input_data = Command(resume=latest_query)
+                    else:
+                        input_data = initial_state
+
                     for event in app.stream(
-                        initial_state,
+                        input_data,
                         run_config,
                         stream_mode=["updates", "messages", "custom", "tasks"],
                     ):

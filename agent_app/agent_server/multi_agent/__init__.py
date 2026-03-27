@@ -5,7 +5,7 @@ This package provides a modular multi-agent system built with LangGraph
 for intelligent cross-domain querying using Databricks Genie.
 """
 
-from .core.state import AgentState, ConversationTurn, ClarificationRequest, IntentMetadata
+from .core.state import AgentState, ConversationTurn, GraphInput, QueryExecutionResult
 from .core.graph import create_super_agent_hybrid, create_agent_graph
 from .core.config import get_config, AgentConfig
 
@@ -15,13 +15,13 @@ __all__ = [
     # State types
     "AgentState",
     "ConversationTurn",
-    "ClarificationRequest",
-    "IntentMetadata",
-    
+    "GraphInput",
+    "QueryExecutionResult",
+
     # Graph functions
     "create_super_agent_hybrid",
     "create_agent_graph",
-    
+
     # Configuration
     "get_config",
     "AgentConfig",
