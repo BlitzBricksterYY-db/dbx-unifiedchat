@@ -54,6 +54,8 @@ function PureMessages({
     () => messages.filter((m) => m.role === 'user'),
     [messages],
   );
+  const userTurnsRef = useRef(userTurns);
+  userTurnsRef.current = userTurns;
   const hasTurns = userTurns.length > 1;
 
   // Stable navigation target — only updated by button clicks or when scroll settles
@@ -155,13 +157,13 @@ function PureMessages({
         behavior,
       });
 
-      const idx = userTurns.findIndex((t) => t.id === turnId);
+      const idx = userTurnsRef.current.findIndex((t) => t.id === turnId);
       if (idx >= 0) {
         navTargetRef.current = idx;
         setActiveTurnIndex(idx);
       }
     },
-    [messagesContainerRef, userTurns],
+    [messagesContainerRef],
   );
 
   const isAtCurrentTurnHead = useCallback(() => {
@@ -204,9 +206,13 @@ function PureMessages({
     [activeTurnIndex, isAtCurrentTurnHead, scrollToTurn, userTurns],
   );
 
+  // Tracks a pending deep-link scroll so competing scroll-to-bottom effects
+  // (auto-scroll-on-submit, multimodal-input SWR scroll) don't override it.
+  const deepLinkPendingRef = useRef(false);
+
   // Auto-scroll on submit
   useEffect(() => {
-    if (status === 'submitted') {
+    if (status === 'submitted' && !deepLinkPendingRef.current) {
       requestAnimationFrame(() => {
         messagesContainerRef.current?.scrollTo({
           top: messagesContainerRef.current.scrollHeight,
@@ -216,12 +222,80 @@ function PureMessages({
     }
   }, [status, messagesContainerRef]);
 
-  // Deep-link: scroll to selected turn from sidebar
+  // Deep-link: scroll to the selected turn from sidebar.
+  //
+  // On cross-chat navigation the entire Chat tree remounts so refs and layout
+  // may not be ready immediately. We:
+  //   1. Poll until the turn ref exists (timeout-based retry).
+  //   2. Use the browser-native scrollIntoView (respects scroll-mt-20 CSS)
+  //      instead of manual bounding-rect math — more reliable when layout is
+  //      still settling from async content (markdown, images, tool results).
+  //   3. Schedule correction passes at increasing delays so that if content
+  //      above the target turn loads/expands after the first scroll, the
+  //      position is re-corrected automatically.
   useEffect(() => {
     if (!selectedTurnId) return;
-    const raf = requestAnimationFrame(() => scrollToTurn(selectedTurnId));
-    return () => cancelAnimationFrame(raf);
-  }, [messages.length, scrollToTurn, selectedTurnId]);
+
+    deepLinkPendingRef.current = true;
+    let cancelled = false;
+    let attempts = 0;
+    const maxAttempts = 30;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+
+    const doScroll = (): boolean => {
+      const turnEl = turnRefs.current[selectedTurnId];
+      if (!turnEl) return false;
+
+      turnEl.scrollIntoView({ behavior: 'instant', block: 'start' });
+
+      const idx = userTurnsRef.current.findIndex(
+        (t) => t.id === selectedTurnId,
+      );
+      if (idx >= 0) {
+        navTargetRef.current = idx;
+        setActiveTurnIndex(idx);
+      }
+      return true;
+    };
+
+    const tryScroll = () => {
+      if (cancelled) return;
+
+      if (doScroll()) {
+        // Schedule correction passes to handle async layout shifts
+        const corrections = [150, 400, 800];
+        for (const delay of corrections) {
+          timers.push(
+            setTimeout(() => {
+              if (!cancelled) doScroll();
+            }, delay),
+          );
+        }
+        timers.push(
+          setTimeout(() => {
+            deepLinkPendingRef.current = false;
+          }, corrections[corrections.length - 1] + 100),
+        );
+        return;
+      }
+
+      attempts++;
+      if (attempts < maxAttempts) {
+        timers.push(setTimeout(tryScroll, 50));
+      } else {
+        deepLinkPendingRef.current = false;
+      }
+    };
+
+    // Double rAF: wait for at least one full paint cycle before first attempt
+    requestAnimationFrame(() => requestAnimationFrame(tryScroll));
+
+    return () => {
+      cancelled = true;
+      timers.forEach(clearTimeout);
+      deepLinkPendingRef.current = false;
+    };
+  }, [selectedTurnId]);
 
   // Controls should be visible when idle AND there's enough content to scroll
   const showTopBottom = canScroll && isScrollIdle;
