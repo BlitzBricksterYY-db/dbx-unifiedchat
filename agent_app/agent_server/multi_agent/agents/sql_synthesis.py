@@ -26,6 +26,7 @@ import json
 import time
 from functools import wraps
 from typing import Dict, List, Optional, Any, Callable
+from uuid import uuid4
 
 from langchain_core.messages import AIMessage
 from langgraph.config import get_stream_writer
@@ -54,6 +55,26 @@ _performance_metrics = {
     "agent_model_usage": {},
     "cache_stats": {}
 }
+
+_DEBUG_LOG_PATH = "/Users/yang.yang/CursorProjects/KUMC_POC_hlsfieldtemp/.cursor/debug-5f14c7.log"
+
+
+def _debug_log(location: str, message: str, data: Optional[dict] = None) -> None:
+    try:
+        payload = {
+            "sessionId": "5f14c7",
+            "id": f"log_{int(time.time() * 1000)}_{uuid4().hex[:8]}",
+            "timestamp": int(time.time() * 1000),
+            "location": location,
+            "message": message,
+            "data": data or {},
+            "runId": "run1",
+            "hypothesisId": "route-debug",
+        }
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
 
 # Agent cache (module-level)
 _agent_cache = {}
@@ -334,6 +355,16 @@ def sql_synthesis_table_node(state: AgentState) -> dict:
     print("\n" + "="*80)
     print("SQL SYNTHESIS AGENT - TABLE ROUTE")
     print("="*80)
+    _debug_log(
+        "sql_synthesis.py:sql_synthesis_table_node:entry",
+        "entered table synthesis node",
+        {
+            "force_synthesis_route": state.get("force_synthesis_route"),
+            "join_strategy": state.get("join_strategy"),
+            "next_agent": state.get("next_agent"),
+            "plan_join_strategy": state.get("plan", {}).get("join_strategy") if isinstance(state.get("plan"), dict) else None,
+        },
+    )
     
     context = extract_synthesis_table_context(state)
     
@@ -469,6 +500,16 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
     Supports retry and sequential modes via loop_reason state field.
     """
     writer = get_stream_writer()
+    _debug_log(
+        "sql_synthesis.py:sql_synthesis_genie_node:entry",
+        "entered genie synthesis node",
+        {
+            "force_synthesis_route": state.get("force_synthesis_route"),
+            "join_strategy": state.get("join_strategy"),
+            "next_agent": state.get("next_agent"),
+            "plan_join_strategy": state.get("plan", {}).get("join_strategy") if isinstance(state.get("plan"), dict) else None,
+        },
+    )
     
     print("\n" + "="*80)
     print("SQL SYNTHESIS AGENT - GENIE ROUTE")

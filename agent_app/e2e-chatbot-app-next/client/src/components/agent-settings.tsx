@@ -98,17 +98,21 @@ const clarificationSensitivityLabels: Record<ClarificationSensitivity, string> =
 
 export function AgentSettingsPanel({
   settings,
-  onUpdate,
+  onLiveUpdate,
+  onConfirm,
 }: {
   settings: AgentSettings;
-  onUpdate: (patch: Partial<AgentSettings>) => void;
+  onLiveUpdate: (next: AgentSettings) => void;
+  onConfirm: (next: AgentSettings) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [draftSettings, setDraftSettings] = useState(() => normalizeSettings(settings));
+  const originalSettingsRef = useRef<AgentSettings>(normalizeSettings(settings));
 
   useEffect(() => {
     if (!open) {
       setDraftSettings(normalizeSettings(settings));
+      originalSettingsRef.current = normalizeSettings(settings);
     }
   }, [open, settings]);
 
@@ -116,21 +120,25 @@ export function AgentSettingsPanel({
     setOpen((prev) => {
       const next = !prev;
       if (next) {
-        setDraftSettings(normalizeSettings(settings));
+        const normalized = normalizeSettings(settings);
+        originalSettingsRef.current = normalized;
+        setDraftSettings(normalized);
       }
       return next;
     });
   }, [settings]);
 
   const handleCancel = useCallback(() => {
-    setDraftSettings(normalizeSettings(settings));
+    const original = normalizeSettings(originalSettingsRef.current);
+    onLiveUpdate(original);
+    setDraftSettings(original);
     setOpen(false);
-  }, [settings]);
+  }, [onLiveUpdate]);
 
   const handleConfirm = useCallback(() => {
-    onUpdate(normalizeSettings(draftSettings));
+    onConfirm(normalizeSettings(draftSettings));
     setOpen(false);
-  }, [draftSettings, onUpdate]);
+  }, [draftSettings, onConfirm]);
 
   const normalizedDraftSettings = normalizeSettings(draftSettings);
   const clarificationSensitivityIndex = Math.max(
@@ -187,13 +195,17 @@ export function AgentSettingsPanel({
               <button
                 type="button"
                 onClick={() =>
-                  setDraftSettings((prev) => ({
-                    ...prev,
-                    executionMode:
-                      prev.executionMode === 'parallel'
-                        ? 'sequential'
-                        : 'parallel',
-                  }))
+                  setDraftSettings((prev) => {
+                    const next = normalizeSettings({
+                      ...prev,
+                      executionMode:
+                        prev.executionMode === 'parallel'
+                          ? 'sequential'
+                          : 'parallel',
+                    });
+                    onLiveUpdate(next);
+                    return next;
+                  })
                 }
                 role="switch"
                 aria-label="Execution mode"
@@ -240,10 +252,14 @@ export function AgentSettingsPanel({
                   key={route}
                   type="button"
                   onClick={() =>
-                    setDraftSettings((prev) => ({
-                      ...prev,
-                      synthesisRoute: route,
-                    }))
+                    setDraftSettings((prev) => {
+                      const next = normalizeSettings({
+                        ...prev,
+                        synthesisRoute: route,
+                      });
+                      onLiveUpdate(next);
+                      return next;
+                    })
                   }
                   data-testid={`synthesis-route-${route}`}
                   aria-pressed={draftSettings.synthesisRoute === route}
@@ -282,11 +298,15 @@ export function AgentSettingsPanel({
                       Math.max(0, nextIndex),
                     );
 
-                setDraftSettings((prev) => ({
-                  ...prev,
-                  clarificationSensitivity:
-                    clarificationSensitivityLevels[boundedIndex] ?? 'medium',
-                }));
+                setDraftSettings((prev) => {
+                  const next = normalizeSettings({
+                    ...prev,
+                    clarificationSensitivity:
+                      clarificationSensitivityLevels[boundedIndex] ?? 'medium',
+                  });
+                  onLiveUpdate(next);
+                  return next;
+                });
               }}
               aria-label="Clarification sensitivity"
               data-testid="clarification-sensitivity-slider"

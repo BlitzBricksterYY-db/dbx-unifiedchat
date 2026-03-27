@@ -331,6 +331,14 @@ export function Chat({
     [messages.length, persistAgentSettings, syncChatSettingsCache, updateAgentSettings],
   );
 
+  const handleLiveUpdateAgentSettings = useCallback(
+    (nextSettings: AgentSettings) => {
+      agentSettingsRef.current = nextSettings;
+      updateAgentSettings(nextSettings);
+    },
+    [updateAgentSettings],
+  );
+
   const [searchParams] = useSearchParams();
   const query = searchParams.get('query');
   const selectedTurnId = searchParams.get('turn');
@@ -375,7 +383,8 @@ export function Chat({
               <div className="flex justify-end">
                 <AgentSettingsPanel
                   settings={agentSettings}
-                  onUpdate={handleUpdateAgentSettings}
+          onLiveUpdate={handleLiveUpdateAgentSettings}
+          onConfirm={handleUpdateAgentSettings}
                 />
               </div>
               <MultimodalInput

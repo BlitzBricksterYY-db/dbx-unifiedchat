@@ -30,15 +30,38 @@ Example usage:
 
 import json
 import threading
+import time
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Callable
 from functools import wraps
+from uuid import uuid4
 
 from langchain_core.messages import SystemMessage
 from langgraph.config import get_stream_writer
 
 from ..core.state import AgentState
+
+
+_DEBUG_LOG_PATH = "/Users/yang.yang/CursorProjects/KUMC_POC_hlsfieldtemp/.cursor/debug-5f14c7.log"
+
+
+def _debug_log(location: str, message: str, data: Optional[dict] = None) -> None:
+    try:
+        payload = {
+            "sessionId": "5f14c7",
+            "id": f"log_{int(time.time() * 1000)}_{uuid4().hex[:8]}",
+            "timestamp": int(time.time() * 1000),
+            "location": location,
+            "message": message,
+            "data": data or {},
+            "runId": "run1",
+            "hypothesisId": "route-debug",
+        }
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
 
 
 # ==============================================================================
@@ -379,6 +402,18 @@ def planning_node(state: AgentState) -> dict:
     else:
         next_agent = "sql_synthesis_table"
         print("✓ Plan complete - using TABLE ROUTE (direct SQL synthesis)")
+
+    _debug_log(
+        "planning.py:planning_node:route_decision",
+        "planning route resolved",
+        {
+            "force_synthesis_route": force_route,
+            "plan_join_strategy": plan.get("join_strategy"),
+            "resolved_join_strategy": join_strategy,
+            "next_agent": next_agent,
+            "relevant_space_count": len(relevant_spaces_full),
+        },
+    )
     
     # Emit plan formulation result
     writer({"type": "plan_formulation", "strategy": join_strategy, "requires_join": plan.get("requires_join", False)})

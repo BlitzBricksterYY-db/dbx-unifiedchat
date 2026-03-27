@@ -191,6 +191,26 @@ class PlanningAgent:
 - UI override: Table Route is selected.
 - You must use Table Route and must keep `genie_route_plan` null.
 """
+
+        spaces_info = [
+            {"space_id": sp["space_id"], "space_title": sp["space_title"]}
+            for sp in relevant_spaces
+        ]
+        expected_json_example = json.dumps(
+            {
+                "original_query": query,
+                "vector_search_relevant_spaces_info": spaces_info,
+                "question_clear": True,
+                "sub_questions": ["sub-question 1", "sub-question 2"],
+                "requires_multiple_spaces": False,
+                "relevant_space_ids": ["space_id_1", "space_id_2"],
+                "requires_join": False,
+                "join_strategy": "table_route",
+                "execution_plan": "Brief description of execution plan",
+                "genie_route_plan": None,
+            },
+            indent=2,
+        )
         
         planning_prompt = f"""
 You are a query planning expert. Analyze the following question and create an execution plan.
@@ -224,18 +244,7 @@ Break down the question and determine:
 {forced_route_instructions}
 
 Return your analysis as JSON:
-{{
-    "original_query": "{query}",
-    "vector_search_relevant_spaces_info":{[{sp['space_id']: sp['space_title']} for sp in relevant_spaces]},
-    "question_clear": true,
-    "sub_questions": ["sub-question 1", "sub-question 2", ...],
-    "requires_multiple_spaces": true/false,
-    "relevant_space_ids": ["space_id_1", "space_id_2", ...],
-    "requires_join": true/false,
-    "join_strategy": "table_route" or "genie_route",
-    "execution_plan": "Brief description of execution plan",
-    "genie_route_plan": {{'space_id_1':'partial_question_1', 'space_id_2':'partial_question_2'}} or null
-}}
+{expected_json_example}
 
 Only return valid JSON, no explanations.
 """
