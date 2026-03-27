@@ -280,6 +280,7 @@ If the query is a normal data or business intelligence question (even a vague on
         writer = get_stream_writer()
         messages = state.get("messages", [])
         current_query = _latest_human_content(messages)
+        space_context = load_space_context(self.table_name)
         clarification_sensitivity = _get_clarification_sensitivity(state)
         writer({"type": "agent_start", "agent": "unified_intent_context_clarification", "query": current_query})
 
@@ -288,12 +289,17 @@ If the query is a normal data or business intelligence question (even a vague on
         prior_summary = prior_turn.get("context_summary", "")
         prompt = f"""You are analyzing a user query for a data analytics assistant.
 
+According to the available data sources:
+{json.dumps(space_context, indent=2)}
+
+
 Most recent user query: {current_query}
 Prior conversation context: {prior_summary or "None — this is the first message"}
 Clarification sensitivity: {clarification_sensitivity}
 
 Clarification policy for this request:
 {_clarification_policy_text(clarification_sensitivity)}
+
 
 Answer the following:
 
