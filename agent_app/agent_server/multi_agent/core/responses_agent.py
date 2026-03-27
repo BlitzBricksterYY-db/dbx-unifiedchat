@@ -641,14 +641,38 @@ Guidelines:
                 elif event_type == "custom":
                     try:
                         custom_data = event_data
-                        formatted_text = self.format_custom_event(custom_data)
-                        yield ResponsesAgentStreamEvent(
-                            type="response.output_item.done",
-                            item=self.create_text_output_item(
-                                text=formatted_text,
-                                id=str(uuid4())
-                            ),
-                        )
+                        et = custom_data.get("type", "") if isinstance(custom_data, dict) else ""
+
+                        if et == "text_delta":
+                            delta_content = custom_data.get("content", "")
+                            if delta_content:
+                                if first_token_time is None:
+                                    first_token_time = time.time()
+                                    ttft = first_token_time - workflow_start_time
+                                    _performance_metrics["workflow_metrics"]["ttft_seconds"].append(ttft)
+                                    logger.info(f"⚡ TTFT (text_delta): {ttft:.3f}s")
+                                yield ResponsesAgentStreamEvent(
+                                    **self.create_text_delta(delta=delta_content, item_id=str(uuid4())),
+                                )
+                        elif et in ("meta_answer_content", "clarification_content", "clarification_requested"):
+                            yield ResponsesAgentStreamEvent(
+                                type="response.output_item.done",
+                                item=self.create_text_output_item(
+                                    text=self.format_custom_event(custom_data),
+                                    id=str(uuid4()),
+                                ),
+                            )
+                        elif et in ("summary_start", "summary_complete"):
+                            pass
+                        else:
+                            formatted_text = self.format_custom_event(custom_data)
+                            yield ResponsesAgentStreamEvent(
+                                type="response.output_item.done",
+                                item=self.create_text_output_item(
+                                    text=formatted_text,
+                                    id=str(uuid4())
+                                ),
+                            )
                     except Exception as e:
                         logger.warning(f"Error processing custom event: {e}")
                 
@@ -664,13 +688,13 @@ Guidelines:
                             # Task started
                             logger.debug(f"⏳ Task started: {node_name}")
                             # Optionally emit to UI:
-                            # yield ResponsesAgentStreamEvent(
-                            #     type="response.output_item.done",
-                            #     item=self.create_text_output_item(
-                            #         text=f"⏳ Starting: {node_name}",
-                            #         id=str(uuid4())
-                            #     ),
-                            # )
+                            yield ResponsesAgentStreamEvent(
+                                type="response.output_item.done",
+                                item=self.create_text_output_item(
+                                    text=f"⏳ Starting: {node_name}",
+                                    id=str(uuid4())
+                                ),
+                            )
                         
                         elif event_name == "end":
                             # Task completed successfully

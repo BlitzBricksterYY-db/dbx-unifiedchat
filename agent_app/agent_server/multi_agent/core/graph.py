@@ -121,11 +121,7 @@ def create_super_agent_hybrid(config=None) -> StateGraph:
 
     workflow.add_node(
         "unified_intent_context_clarification",
-        _with_node_trace(
-            "unified_intent_context_clarification",
-            clarification_agent.subgraph,
-            SpanType.AGENT,
-        ),
+        clarification_agent.subgraph,
     )
     workflow.add_node("planning", _with_node_trace("planning", planning_node, SpanType.AGENT))
     workflow.add_node(

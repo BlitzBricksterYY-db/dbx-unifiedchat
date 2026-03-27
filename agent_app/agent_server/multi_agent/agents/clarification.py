@@ -243,10 +243,10 @@ If the query is a normal data or business intelligence question (even a vague on
         the graph for user input and resumes with the user's response.
         """
         writer = get_stream_writer()
-        writer({"type": "agent_start", "agent": "unified_intent_context_clarification"})
-
         messages = state.get("messages", [])
         current_query = _latest_human_content(messages)
+        writer({"type": "agent_start", "agent": "unified_intent_context_clarification", "query": current_query})
+
         print(f"[check_clarity] query={current_query!r} (messages count={len(messages)}, types={[type(m).__name__ for m in messages]})")
         prior_turn = state.get("current_turn") or {}
         prior_summary = prior_turn.get("context_summary", "")
@@ -303,7 +303,7 @@ Answer the following:
         return {}
 
     def _handle_irrelevant(self, state: AgentState) -> dict:
-        """Pure Python. Return a polite refusal."""
+        """Return a polite refusal, streamed via ``text_delta`` for consistency."""
         print("[handle_irrelevant] returning refusal")
         turn = dict(state.get("current_turn") or {})
         turn.setdefault("metadata", {})["is_irrelevant"] = True
@@ -317,6 +317,10 @@ Answer the following:
             '- "Show me example questions I can ask"\n\n'
             "Could you rephrase your question to focus on analyzing the available data?"
         )
+
+        writer = get_stream_writer()
+        writer({"type": "text_delta", "content": refusal})
+
         return {
             "current_turn": turn,
             "turn_history": [turn] if turn else [],
@@ -327,7 +331,13 @@ Answer the following:
         }
 
     def _generate_meta_answer(self, state: AgentState) -> dict:
-        """Streaming LLM call: markdown answer about available data."""
+        """Streaming LLM call: markdown answer about available data.
+
+        Uses ``text_delta`` custom events (same as summarize_agent) so both
+        serving layers (agent.py and responses_agent.py) handle token
+        streaming correctly.  Emits ``meta_answer_content`` at the end for
+        the complete-response path.
+        """
         messages = state.get("messages", [])
         current_query = _latest_human_content(messages)
         space_context = load_space_context(self.table_name)
@@ -343,17 +353,21 @@ Provide a clear, informative markdown answer about what's available.
 Use ## headings, **bold** keywords, and bullet lists. Be professional and helpful.
 """
         writer = get_stream_writer()
+        writer({"type": "summary_start", "content": "Generating meta-answer..."})
         print("[generate_meta_answer] generating")
         try:
             content = ""
             for chunk in self.base_llm.stream(prompt):
                 if chunk.content:
                     content += chunk.content
-                    writer({"type": "clarification_chunk", "content": chunk.content})
+                    writer({"type": "text_delta", "content": chunk.content})
             answer = content.strip()
         except Exception as e:
             print(f"[generate_meta_answer] error: {e}")
             answer = "## Available Data Sources\n\nSorry, I encountered an error retrieving the data source information."
+
+        writer({"type": "meta_answer_content", "content": answer})
+        writer({"type": "summary_complete", "content": "Meta-answer complete"})
 
         turn = dict(state.get("current_turn") or {})
         turn.setdefault("metadata", {})["is_meta_question"] = True
