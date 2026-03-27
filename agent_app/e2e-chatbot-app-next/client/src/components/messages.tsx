@@ -11,6 +11,7 @@ import { ArrowDownIcon, ArrowUpIcon, ChevronsUpIcon, ChevronsDownIcon } from 'lu
 import { cn } from '@/lib/utils';
 
 interface MessagesProps {
+  chatId: string;
   status: UseChatHelpers<ChatMessage>['status'];
   messages: ChatMessage[];
   selectedTurnId?: string | null;
@@ -24,6 +25,7 @@ interface MessagesProps {
 }
 
 function PureMessages({
+  chatId,
   status,
   messages,
   selectedTurnId,
@@ -42,6 +44,7 @@ function PureMessages({
     scrollToBottom,
     hasSentMessage,
   } = useMessages({
+    chatId,
     status,
   });
 
@@ -209,6 +212,20 @@ function PureMessages({
   // Tracks a pending deep-link scroll so competing scroll-to-bottom effects
   // (auto-scroll-on-submit, multimodal-input SWR scroll) don't override it.
   const deepLinkPendingRef = useRef(false);
+  const scrollToConversationHead = useCallback(
+    (behavior: ScrollBehavior = 'auto') => {
+      const container = messagesContainerRef.current;
+      if (!container) return;
+
+      container.scrollTo({ top: 0, behavior });
+      deepLinkPendingRef.current = false;
+
+      const nextIndex = userTurnsRef.current.length > 0 ? 0 : -1;
+      navTargetRef.current = nextIndex;
+      setActiveTurnIndex(nextIndex);
+    },
+    [messagesContainerRef],
+  );
 
   // Auto-scroll on submit
   useEffect(() => {
@@ -222,19 +239,16 @@ function PureMessages({
     }
   }, [status, messagesContainerRef]);
 
-  // Deep-link: scroll to the selected turn from sidebar.
-  //
-  // On cross-chat navigation the entire Chat tree remounts so refs and layout
-  // may not be ready immediately. We:
-  //   1. Poll until the turn ref exists (timeout-based retry).
-  //   2. Use the browser-native scrollIntoView (respects scroll-mt-20 CSS)
-  //      instead of manual bounding-rect math — more reliable when layout is
-  //      still settling from async content (markdown, images, tool results).
-  //   3. Schedule correction passes at increasing delays so that if content
-  //      above the target turn loads/expands after the first scroll, the
-  //      position is re-corrected automatically.
+  // Route-driven positioning:
+  // - `/chat/:id` lands at the conversation head.
+  // - `/chat/:id?turn=...` deep-links to a specific user turn.
   useEffect(() => {
-    if (!selectedTurnId) return;
+    if (!selectedTurnId) {
+      requestAnimationFrame(() => {
+        scrollToConversationHead('auto');
+      });
+      return;
+    }
 
     deepLinkPendingRef.current = true;
     let cancelled = false;
@@ -295,7 +309,18 @@ function PureMessages({
       timers.forEach(clearTimeout);
       deepLinkPendingRef.current = false;
     };
-  }, [selectedTurnId]);
+  }, [scrollToConversationHead, selectedTurnId]);
+
+  useEffect(() => {
+    const handleScrollToHead = () => {
+      scrollToConversationHead('smooth');
+    };
+
+    window.addEventListener('chat-scroll-to-head', handleScrollToHead);
+    return () => {
+      window.removeEventListener('chat-scroll-to-head', handleScrollToHead);
+    };
+  }, [scrollToConversationHead]);
 
   // Controls should be visible when idle AND there's enough content to scroll
   const showTopBottom = canScroll && isScrollIdle;
@@ -448,6 +473,7 @@ export const Messages = memo(PureMessages, (prevProps, nextProps) => {
     return false;
   }
 
+  if (prevProps.chatId !== nextProps.chatId) return false;
   if (prevProps.selectedModelId !== nextProps.selectedModelId) return false;
   if (prevProps.selectedTurnId !== nextProps.selectedTurnId) return false;
   if (prevProps.messages.length !== nextProps.messages.length) return false;

@@ -355,6 +355,7 @@ export function Chat({
         <ChatHeader />
 
         <Messages
+          chatId={id}
           status={status}
           messages={messages}
           selectedTurnId={selectedTurnId}

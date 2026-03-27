@@ -4,8 +4,10 @@ import type { UseChatHelpers } from '@ai-sdk/react';
 import type { ChatMessage } from '@chat-template/core';
 
 export function useMessages({
+  chatId,
   status,
 }: {
+  chatId: string;
   status: UseChatHelpers<ChatMessage>['status'];
 }) {
   const {
@@ -15,7 +17,7 @@ export function useMessages({
     scrollToBottom,
     onViewportEnter,
     onViewportLeave,
-  } = useScrollToBottom();
+  } = useScrollToBottom(chatId);
 
   const [hasSentMessage, setHasSentMessage] = useState(false);
 
