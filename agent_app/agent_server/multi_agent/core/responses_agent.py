@@ -456,6 +456,8 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
         # PHASE 3 OPTIMIZATION: Track workflow timing (TTFT and TTCL)
         workflow_start_time = time.time()
         first_token_time = None
+        clarification_content_emitted = False
+        meta_answer_content_emitted = False
         _performance_metrics["workflow_metrics"]["total_requests"] += 1
         
         # Ensure MLflow tracing doesn't cause issues in streaming context
@@ -526,11 +528,13 @@ Guidelines:
             # If the clarification subgraph paused via interrupt(), the user's
             # new message is the answer — resume instead of starting fresh.
             existing_state = app.get_state(run_config)
+            is_resuming = False
             if existing_state.tasks and any(
                 hasattr(t, "interrupts") and t.interrupts for t in existing_state.tasks
             ):
                 logger.info(f"Resuming from interrupt on thread {thread_id}")
                 input_data = Command(resume=latest_query)
+                is_resuming = True
             else:
                 input_data = initial_state
 
@@ -667,7 +671,10 @@ Guidelines:
                                 yield ResponsesAgentStreamEvent(
                                     **self.create_text_delta(delta=delta_content, item_id=str(uuid4())),
                                 )
-                        elif et in ("meta_answer_content", "clarification_content", "clarification_requested"):
+                        elif et == "meta_answer_content":
+                            if meta_answer_content_emitted:
+                                continue
+                            meta_answer_content_emitted = True
                             yield ResponsesAgentStreamEvent(
                                 type="response.output_item.done",
                                 item=self.create_text_output_item(
@@ -675,6 +682,22 @@ Guidelines:
                                     id=str(uuid4()),
                                 ),
                             )
+                        elif et == "clarification_content":
+                            if clarification_content_emitted:
+                                continue
+                            clarification_content_emitted = True
+                            yield ResponsesAgentStreamEvent(
+                                type="response.output_item.done",
+                                item=self.create_text_output_item(
+                                    text=self.format_custom_event(custom_data),
+                                    id=str(uuid4()),
+                                ),
+                            )
+                        elif et == "clarification_requested":
+                            # Clarification markdown is already emitted via
+                            # `clarification_content`; rendering this event too
+                            # duplicates the clarification block in the UI.
+                            continue
                         elif et in ("summary_start", "summary_complete"):
                             pass
                         else:
@@ -737,6 +760,27 @@ Guidelines:
                     except Exception as e:
                         logger.warning(f"Error processing task event: {e}")
         
+            # After the stream ends, check for pending interrupts
+            # and emit clarification exactly once from the interrupt value.
+            if not is_resuming and not clarification_content_emitted:
+                post_state = app.get_state(run_config)
+                if post_state.tasks:
+                    for task in post_state.tasks:
+                        if hasattr(task, "interrupts") and task.interrupts:
+                            for intr in task.interrupts:
+                                val = getattr(intr, "value", None)
+                                if isinstance(val, dict) and val.get("type") == "clarification_request":
+                                    md = val.get("markdown", "")
+                                    if md:
+                                        clarification_content_emitted = True
+                                        yield ResponsesAgentStreamEvent(
+                                            type="response.output_item.done",
+                                            item=self.create_text_output_item(
+                                                text=f"\n\n{md}",
+                                                id=str(uuid4()),
+                                            ),
+                                        )
+
         # PHASE 3: Track TTCL (Time To Completion)
         workflow_end_time = time.time()
         ttcl = workflow_end_time - workflow_start_time

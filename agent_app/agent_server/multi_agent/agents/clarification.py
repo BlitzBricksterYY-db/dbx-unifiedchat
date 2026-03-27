@@ -438,8 +438,8 @@ Use ## headings, **bold** keywords, and bullet lists. Be professional and helpfu
     def _clarify(self, state: AgentState) -> dict:
         """Always interrupts for user input -- only reached when question_clear=False.
 
-        Emits the clarification question as a streamable event before pausing so
-        the serving layer can relay the question to the user in the HTTP response.
+        The interrupt value carries the clarification markdown so the serving
+        layer can extract and display it after the stream ends (exactly once).
         """
         turn = state.get("current_turn") or {}
         metadata = turn.get("metadata") or {}
@@ -447,14 +447,11 @@ Use ## headings, **bold** keywords, and bullet lists. Be professional and helpfu
         clarification_options = metadata.get("clarification_options") or []
         context_summary = turn.get("context_summary", "")
 
-        writer = get_stream_writer()
         markdown = f"### Clarification Needed\n\n{clarification_reason}\n\n"
         if clarification_options:
             markdown += "**Please choose from the following options:**\n\n"
             for i, opt in enumerate(clarification_options, 1):
                 markdown += f"{i}. {opt}\n\n"
-
-        writer({"type": "clarification_content", "content": markdown.strip()})
 
         print("[clarify] pausing via interrupt()")
         user_response = interrupt({

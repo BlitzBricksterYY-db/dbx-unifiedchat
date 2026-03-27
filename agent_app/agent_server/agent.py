@@ -359,11 +359,13 @@ Guidelines:
                     logger.info(f"Executing workflow with checkpointer (thread: {thread_id})")
 
                     existing_state = app.get_state(run_config)
+                    is_resuming = False
                     if existing_state.tasks and any(
                         hasattr(t, "interrupts") and t.interrupts for t in existing_state.tasks
                     ):
                         logger.info(f"Resuming from interrupt on thread {thread_id}")
                         input_data = Command(resume=latest_query)
+                        is_resuming = True
                     else:
                         input_data = initial_state
 
@@ -390,6 +392,23 @@ Guidelines:
                             queue.put_nowait, (ns, mode, data)
                         )
 
+                    # After the stream ends, check for pending interrupts
+                    # and emit clarification exactly once from the interrupt value.
+                    if not is_resuming:
+                        post_state = app.get_state(run_config)
+                        if post_state.tasks:
+                            for task in post_state.tasks:
+                                if hasattr(task, "interrupts") and task.interrupts:
+                                    for intr in task.interrupts:
+                                        val = getattr(intr, "value", None)
+                                        if isinstance(val, dict) and val.get("type") == "clarification_request":
+                                            md = val.get("markdown", "")
+                                            if md:
+                                                loop.call_soon_threadsafe(
+                                                    queue.put_nowait,
+                                                    ((), "custom", {"type": "clarification_content", "content": md}),
+                                                )
+
                 workflow_output: dict = {"status": "completed"}
                 if summary := last_state.get("final_summary"):
                     workflow_output["final_summary"] = summary[:4000] if len(summary) > 4000 else summary
@@ -414,6 +433,8 @@ Guidelines:
     in_summarize = False
     streaming_item_id = str(uuid4())
     text_deltas_emitted = False
+    clarification_content_emitted = False
+    meta_answer_content_emitted = False
 
     def _emit_progress_step(step_text: str):
         """Append a step to the live progress block (returns events to yield)."""
@@ -493,11 +514,31 @@ Guidelines:
                         yield ResponsesAgentStreamEvent(
                             **_create_text_delta(delta=delta_content, id=streaming_item_id),
                         )
-                elif et in ("meta_answer_content", "clarification_content", "clarification_requested"):
+                elif et == "meta_answer_content":
+                    if meta_answer_content_emitted:
+                        continue
+                    meta_answer_content_emitted = True
+                    for ev in _finalize_progress():
+                        yield ev
                     yield ResponsesAgentStreamEvent(
                         type="response.output_item.done",
                         item=_create_text_output_item(text=_format_custom_event(event_data), id=str(uuid4())),
                     )
+                elif et == "clarification_content":
+                    if clarification_content_emitted:
+                        continue
+                    clarification_content_emitted = True
+                    for ev in _finalize_progress():
+                        yield ev
+                    yield ResponsesAgentStreamEvent(
+                        type="response.output_item.done",
+                        item=_create_text_output_item(text=_format_custom_event(event_data), id=str(uuid4())),
+                    )
+                elif et == "clarification_requested":
+                    # The markdown clarification payload is emitted via
+                    # `clarification_content`; rendering this event as well causes
+                    # duplicate clarification output in the UI.
+                    continue
                 elif et.endswith("_error") or et == "error":
                     yield ResponsesAgentStreamEvent(
                         type="response.output_item.done",
