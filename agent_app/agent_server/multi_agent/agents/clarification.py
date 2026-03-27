@@ -79,7 +79,7 @@ def _latest_human_content(messages: list) -> str:
 
 _space_context_cache: dict = {"data": None, "timestamp": None, "table_name": None}
 _SPACE_CONTEXT_CACHE_TTL = timedelta(minutes=30)
-_VALID_CLARIFICATION_SENSITIVITIES = {"off", "low", "medium", "high", "on"}
+_VALID_CLARIFICATION_SENSITIVITIES = ["off", "low", "medium", "high", "on"]
 
 
 def _get_clarification_sensitivity(state: AgentState) -> str:
@@ -293,11 +293,14 @@ According to the available data sources:
 {json.dumps(space_context, indent=2)}
 
 
-Most recent user query: {current_query}
-Prior conversation context: {prior_summary or "None — this is the first message"}
-Clarification sensitivity: {clarification_sensitivity}
+- Most recent user query: {current_query}
 
-Clarification policy for this request:
+- Prior conversation context: {prior_summary or "None — this is the first message"}
+
+
+- Clarification sensitivity: {clarification_sensitivity}
+
+- Clarification policy for this request:
 {_clarification_policy_text(clarification_sensitivity)}
 
 
@@ -491,7 +494,12 @@ Use ## headings, **bold** keywords, and bullet lists. Be professional and helpfu
         return {
             "current_turn": turn,
             "question_clear": True,
-            "messages": [HumanMessage(content=user_response)],
+            # Preserve the clarification prompt in message history so traces show
+            # the assistant turn that led to the user's follow-up response.
+            "messages": [
+                AIMessage(content=markdown.strip()),
+                HumanMessage(content=user_response),
+            ],
         }
 
     def _confirm_continuation(self, state: AgentState) -> dict:

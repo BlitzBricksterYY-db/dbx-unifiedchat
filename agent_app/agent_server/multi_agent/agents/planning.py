@@ -416,7 +416,7 @@ def planning_node(state: AgentState) -> dict:
     )
     
     # Emit plan formulation result
-    writer({"type": "plan_formulation", "strategy": join_strategy, "requires_join": plan.get("requires_join", False)})
+    writer({"type": "plan_formulation", "force_route": force_route, "strategy": join_strategy, "requires_join": plan.get("requires_join", False)})
     
     sub_questions = plan.get("sub_questions", [])
     
