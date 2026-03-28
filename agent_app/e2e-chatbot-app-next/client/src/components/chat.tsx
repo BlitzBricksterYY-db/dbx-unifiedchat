@@ -281,6 +281,24 @@ export function Chat({
     },
   });
 
+  // Sync messages to SWR cache so the sidebar history can reflect the latest turns
+  // We only sync when not streaming to avoid excessive re-renders of the sidebar
+  useEffect(() => {
+    if (id && status !== 'streaming') {
+      mutate(
+        `/chat/${id}`,
+        (currentData?: ChatDataCache | null) => {
+          if (!currentData) return currentData;
+          return {
+            ...currentData,
+            messages,
+          };
+        },
+        false,
+      );
+    }
+  }, [id, messages, status, mutate]);
+
   const persistAgentSettings = useCallback(
     async (settings: AgentSettings) => {
       try {
