@@ -12,11 +12,18 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import { ResourcePanelToggle } from './resource-panel';
 
 const DOCS_URL =
   'https://docs.databricks.com/aws/en/generative-ai/agent-framework/chat-app';
 
-export function ChatHeader() {
+export function ChatHeader({
+  resourcePanelOpen,
+  onToggleResourcePanel,
+}: {
+  resourcePanelOpen?: boolean;
+  onToggleResourcePanel?: () => void;
+}) {
   const navigate = useNavigate();
   const { open } = useSidebar();
   const { chatHistoryEnabled, feedbackEnabled } = useConfig();
@@ -26,19 +33,6 @@ export function ChatHeader() {
   return (
     <header className="sticky top-0 flex items-center gap-2 bg-background px-2 py-1.5 md:px-2">
       <SidebarToggle />
-
-      {(!open || windowWidth < 768) && (
-        <Button
-          variant="outline"
-          className="order-2 ml-auto h-8 px-2 md:order-1 md:ml-0 md:h-fit md:px-2"
-          onClick={() => {
-            navigate('/');
-          }}
-        >
-          <PlusIcon />
-          <span className="md:sr-only">New Chat</span>
-        </Button>
-      )}
 
       <div className="ml-auto flex items-center gap-2">
         {!chatHistoryEnabled && (
@@ -82,6 +76,26 @@ export function ChatHeader() {
           </TooltipProvider>
         )}
       </div>
+
+      {(!open || windowWidth < 768) && (
+        <Button
+          variant="outline"
+          className="h-8 px-2 md:h-fit md:px-2"
+          onClick={() => {
+            navigate('/');
+          }}
+        >
+          <PlusIcon />
+          <span className="md:sr-only">New Chat</span>
+        </Button>
+      )}
+
+      {onToggleResourcePanel && (
+        <ResourcePanelToggle
+          open={resourcePanelOpen ?? false}
+          onToggle={onToggleResourcePanel}
+        />
+      )}
     </header>
   );
 }

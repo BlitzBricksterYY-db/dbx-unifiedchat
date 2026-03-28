@@ -2,10 +2,25 @@ import { createContext, useContext, type ReactNode } from 'react';
 import useSWR from 'swr';
 import { fetcher } from '@/lib/utils';
 
+export interface GenieSpaceResource {
+  id: string;
+  name: string;
+  url: string;
+}
+
+export interface MlflowExperimentResource {
+  id: string;
+  url: string;
+}
+
 interface ConfigResponse {
   features: {
     chatHistory: boolean;
     feedback: boolean;
+  };
+  resources?: {
+    genieSpaces: GenieSpaceResource[];
+    mlflowExperiment: MlflowExperimentResource | null;
   };
 }
 
@@ -15,6 +30,8 @@ interface AppConfigContextType {
   error: Error | undefined;
   chatHistoryEnabled: boolean;
   feedbackEnabled: boolean;
+  genieSpaces: GenieSpaceResource[];
+  mlflowExperiment: MlflowExperimentResource | null;
 }
 
 const AppConfigContext = createContext<AppConfigContextType | undefined>(
@@ -28,8 +45,7 @@ export function AppConfigProvider({ children }: { children: ReactNode }) {
     {
       revalidateOnFocus: false,
       revalidateOnReconnect: false,
-      // Config should be loaded once and cached
-      dedupingInterval: 60000, // 1 minute
+      dedupingInterval: 60000,
     },
   );
 
@@ -37,9 +53,10 @@ export function AppConfigProvider({ children }: { children: ReactNode }) {
     config: data,
     isLoading,
     error,
-    // Default to true until loaded to avoid breaking existing behavior
     chatHistoryEnabled: data?.features.chatHistory ?? true,
     feedbackEnabled: data?.features.feedback ?? false,
+    genieSpaces: data?.resources?.genieSpaces ?? [],
+    mlflowExperiment: data?.resources?.mlflowExperiment ?? null,
   };
 
   return (

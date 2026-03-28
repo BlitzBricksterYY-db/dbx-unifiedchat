@@ -34,6 +34,7 @@ import {
   ClarificationModal,
   type ClarificationData,
 } from './clarification-modal';
+import { ResourcePanel } from './resource-panel';
 
 type ChatDataCache = {
   chat: {
@@ -387,52 +388,60 @@ export function Chat({
   const [clarification, setClarification] = useState<ClarificationData | null>(
     null,
   );
+  const [resourcePanelOpen, setResourcePanelOpen] = useState(false);
 
   return (
     <>
-      <div className="overscroll-behavior-contain flex h-dvh min-w-0 touch-pan-y flex-col bg-background">
-        <ChatHeader />
+      <div className="flex h-dvh min-w-0 flex-1">
+        <div className="overscroll-behavior-contain flex min-w-0 flex-1 touch-pan-y flex-col bg-background">
+          <ChatHeader
+            resourcePanelOpen={resourcePanelOpen}
+            onToggleResourcePanel={() => setResourcePanelOpen((prev) => !prev)}
+          />
 
-        <Messages
-          chatId={id}
-          status={status}
-          messages={messages}
-          selectedTurnId={selectedTurnId}
-          setMessages={setMessages}
-          addToolApprovalResponse={addToolApprovalResponse}
-          regenerate={regenerate}
-          sendMessage={sendMessage}
-          isReadonly={isReadonly}
-          selectedModelId={initialChatModel}
-          feedback={feedback}
-        />
+          <Messages
+            chatId={id}
+            status={status}
+            messages={messages}
+            selectedTurnId={selectedTurnId}
+            setMessages={setMessages}
+            addToolApprovalResponse={addToolApprovalResponse}
+            regenerate={regenerate}
+            sendMessage={sendMessage}
+            isReadonly={isReadonly}
+            selectedModelId={initialChatModel}
+            feedback={feedback}
+          />
 
-        <div className="sticky bottom-0 z-1 mx-auto flex w-full max-w-7xl flex-col gap-1 border-t-0 bg-background px-2 pb-3 md:px-4 md:pb-4">
-          {!isReadonly && (
-            <>
-              <div className="flex justify-end">
-                <AgentSettingsPanel
-                  settings={agentSettings}
-          onLiveUpdate={handleLiveUpdateAgentSettings}
-          onConfirm={handleUpdateAgentSettings}
+          <div className="sticky bottom-0 z-1 mx-auto flex w-full max-w-7xl flex-col gap-1 border-t-0 bg-background px-2 pb-3 md:px-4 md:pb-4">
+            {!isReadonly && (
+              <>
+                <div className="flex justify-end">
+                  <AgentSettingsPanel
+                    settings={agentSettings}
+                    onLiveUpdate={handleLiveUpdateAgentSettings}
+                    onConfirm={handleUpdateAgentSettings}
+                  />
+                </div>
+                <MultimodalInput
+                  chatId={id}
+                  input={input}
+                  setInput={setInput}
+                  status={status}
+                  stop={stop}
+                  attachments={attachments}
+                  setAttachments={setAttachments}
+                  messages={messages}
+                  setMessages={setMessages}
+                  sendMessage={sendMessage}
+                  selectedVisibilityType={visibilityType}
                 />
-              </div>
-              <MultimodalInput
-                chatId={id}
-                input={input}
-                setInput={setInput}
-                status={status}
-                stop={stop}
-                attachments={attachments}
-                setAttachments={setAttachments}
-                messages={messages}
-                setMessages={setMessages}
-                sendMessage={sendMessage}
-                selectedVisibilityType={visibilityType}
-              />
-            </>
-          )}
+              </>
+            )}
+          </div>
         </div>
+
+        <ResourcePanel open={resourcePanelOpen} />
       </div>
 
       {clarification && (
