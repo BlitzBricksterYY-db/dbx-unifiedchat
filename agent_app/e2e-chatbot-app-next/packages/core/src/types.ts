@@ -11,6 +11,7 @@ export type CustomUIDataTypes = {
   error: string;
   usage: LanguageModelUsage;
   traceId: string | null;
+  clarification: { reason: string; options: string[] } | null;
 };
 
 export type ChatMessage = UIMessage<MessageMetadata, CustomUIDataTypes>;

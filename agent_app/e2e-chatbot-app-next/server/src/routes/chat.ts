@@ -269,6 +269,7 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
 
     let finalUsage: LanguageModelUsage | undefined;
     let traceId: string | null = null;
+    let clarificationData: { reason: string; options: string[] } | null = null;
     const streamId = generateUUID();
 
     const model = await myProvider.languageModel(selectedChatModel);
@@ -304,6 +305,10 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
             if (typeof traceIdFromChunk === 'string') {
               traceId = traceIdFromChunk;
             }
+          }
+          // Extract clarification interrupt data, if present
+          if (raw?.databricks_output?.clarification) {
+            clarificationData = raw.databricks_output.clarification;
           }
           // Extract trace from MLflow AgentServer output format, if present
           if (!traceId && typeof raw?.trace_id === 'string') {
@@ -363,6 +368,10 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
           traceId = fallbackResult?.traceId ?? null;
         }
 
+        // Write clarification data so the client can show a structured modal.
+        if (clarificationData) {
+          writer.write({ type: 'data-clarification', data: clarificationData });
+        }
         // Write traceId so the client knows whether feedback is supported.
         writer.write({ type: 'data-traceId', data: traceId });
       },

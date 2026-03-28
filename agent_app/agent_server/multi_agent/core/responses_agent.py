@@ -706,6 +706,17 @@ Guidelines:
                                     id=str(uuid4()),
                                 ),
                             )
+                            if et == "clarification_content" and isinstance(custom_data, dict):
+                                yield ResponsesAgentStreamEvent(
+                                    type="response.output_item.done",
+                                    item=self.create_text_output_item(text="", id=str(uuid4())),
+                                    databricks_output={
+                                        "clarification": {
+                                            "reason": custom_data.get("reason", ""),
+                                            "options": custom_data.get("options", []),
+                                        }
+                                    },
+                                )
                         elif et in ("summary_start", "summary_complete"):
                             pass
                         else:

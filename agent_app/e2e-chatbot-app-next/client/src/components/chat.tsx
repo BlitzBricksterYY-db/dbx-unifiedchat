@@ -30,6 +30,10 @@ import {
   type AgentSettings,
   useAgentSettings,
 } from './agent-settings';
+import {
+  ClarificationModal,
+  type ClarificationData,
+} from './clarification-modal';
 
 type ChatDataCache = {
   chat: {
@@ -186,6 +190,11 @@ export function Chat({
       );
       if (dataPart.type === 'data-usage') {
         setUsage(dataPart.data as LanguageModelUsage);
+      }
+      if (dataPart.type === 'data-clarification' && dataPart.data) {
+        setClarification(
+          dataPart.data as ClarificationData,
+        );
       }
     },
     onFinish: ({
@@ -357,6 +366,9 @@ export function Chat({
   }, [query, sendMessage, hasAppendedQuery]);
 
   const [attachments, setAttachments] = useState<Array<Attachment>>([]);
+  const [clarification, setClarification] = useState<ClarificationData | null>(
+    null,
+  );
 
   return (
     <>
@@ -404,6 +416,14 @@ export function Chat({
           )}
         </div>
       </div>
+
+      {clarification && (
+        <ClarificationModal
+          data={clarification}
+          onClose={() => setClarification(null)}
+          sendMessage={sendMessage}
+        />
+      )}
     </>
   );
 }

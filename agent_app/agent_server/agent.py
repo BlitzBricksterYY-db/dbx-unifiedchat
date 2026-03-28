@@ -512,6 +512,17 @@ Guidelines:
                         type="response.output_item.done",
                         item=_create_text_output_item(text=_format_custom_event(event_data), id=str(uuid4())),
                     )
+                    if et == "clarification_content" and isinstance(event_data, dict):
+                        yield ResponsesAgentStreamEvent(
+                            type="response.output_item.done",
+                            item=_create_text_output_item(text="", id=str(uuid4())),
+                            databricks_output={
+                                "clarification": {
+                                    "reason": event_data.get("reason", ""),
+                                    "options": event_data.get("options", []),
+                                }
+                            },
+                        )
                 elif et.endswith("_error") or et == "error":
                     yield ResponsesAgentStreamEvent(
                         type="response.output_item.done",

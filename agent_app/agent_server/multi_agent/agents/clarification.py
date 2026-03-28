@@ -473,7 +473,12 @@ Use ## headings, **bold** keywords, and bullet lists. Be professional and helpfu
                     "content": "Clarification required before planning can continue.",
                 }
             )
-            writer({"type": "clarification_content", "content": markdown.strip()})
+            writer({
+                "type": "clarification_content",
+                "content": markdown.strip(),
+                "reason": clarification_reason,
+                "options": clarification_options,
+            })
 
         print("[clarify] pausing via interrupt()")
         user_response = interrupt({

@@ -4,25 +4,25 @@ overview: Add a popup modal to the chat UI that triggers when the agent's clarif
 todos:
   - id: backend-clarification-writer
     content: Enhance `_clarify` in `clarification.py` to include `reason` and `options` fields in the `writer()` custom event payload
-    status: pending
+    status: completed
   - id: backend-agent-py
     content: In `agent.py` clarification_content handler, emit an additional `ResponsesAgentStreamEvent` with `databricks_output.clarification` carrying structured reason/options
-    status: pending
+    status: completed
   - id: backend-responses-agent
     content: Apply the same structured clarification event emission in `responses_agent.py`
-    status: pending
+    status: completed
   - id: express-capture-clarification
     content: In `chat.ts`, capture clarification data from raw chunks in `onChunk` and write `data-clarification` part via the writer
-    status: pending
+    status: completed
   - id: types-custom-ui-data
     content: Add `clarification` type to `CustomUIDataTypes` in `packages/core/src/types.ts`
-    status: pending
+    status: completed
   - id: frontend-modal-component
     content: Create `ClarificationModal` component with reason display, radio options, custom text input, Cancel and Confirm buttons
-    status: pending
+    status: completed
   - id: frontend-chat-wiring
     content: "Wire `ClarificationModal` into `chat.tsx`: handle `data-clarification` in `onData`, manage modal state, connect Confirm to `sendMessage`"
-    status: pending
+    status: completed
 isProject: false
 ---
 
