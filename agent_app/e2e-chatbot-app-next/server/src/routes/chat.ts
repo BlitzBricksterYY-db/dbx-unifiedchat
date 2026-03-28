@@ -70,6 +70,7 @@ export const chatRouter: RouterType = Router();
 const chatAgentSettingsSchema = z.object({
   executionMode: z.enum(['parallel', 'sequential']),
   synthesisRoute: z.enum(['auto', 'table_route', 'genie_route']),
+  clarificationSensitivity: z.enum(['off', 'low', 'medium', 'high', 'on']),
 });
 
 const streamCache = new StreamCache();
@@ -114,6 +115,7 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
       agentSettings?: {
         executionMode: 'parallel' | 'sequential';
         synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+        clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
       };
     } = requestBody;
 
@@ -145,6 +147,8 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
           visibility: selectedVisibilityType,
           executionMode: agentSettings?.executionMode ?? 'parallel',
           synthesisRoute: agentSettings?.synthesisRoute ?? 'auto',
+          clarificationSensitivity:
+            agentSettings?.clarificationSensitivity ?? 'medium',
         });
 
         generateTitleFromUserMessage({ message })
@@ -179,6 +183,7 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
           chatId: id,
           executionMode: agentSettings.executionMode,
           synthesisRoute: agentSettings.synthesisRoute,
+          clarificationSensitivity: agentSettings.clarificationSensitivity,
         });
       }
     }
@@ -264,6 +269,7 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
 
     let finalUsage: LanguageModelUsage | undefined;
     let traceId: string | null = null;
+    let clarificationData: { reason: string; options: string[] } | null = null;
     const streamId = generateUUID();
 
     const model = await myProvider.languageModel(selectedChatModel);
@@ -274,6 +280,8 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
       [CONTEXT_HEADER_USER_ID]: session.user.email ?? session.user.id,
       'x-agent-execution-mode': chatAgentSettings?.executionMode ?? 'parallel',
       'x-agent-synthesis-route': chatAgentSettings?.synthesisRoute ?? 'auto',
+      'x-agent-clarification-sensitivity':
+        chatAgentSettings?.clarificationSensitivity ?? 'medium',
       ...(req.headers['x-forwarded-access-token']
         ? { 'x-forwarded-access-token': req.headers['x-forwarded-access-token'] as string }
         : {}),
@@ -297,6 +305,10 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
             if (typeof traceIdFromChunk === 'string') {
               traceId = traceIdFromChunk;
             }
+          }
+          // Extract clarification interrupt data, if present
+          if (raw?.databricks_output?.clarification) {
+            clarificationData = raw.databricks_output.clarification;
           }
           // Extract trace from MLflow AgentServer output format, if present
           if (!traceId && typeof raw?.trace_id === 'string') {
@@ -356,6 +368,10 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
           traceId = fallbackResult?.traceId ?? null;
         }
 
+        // Write clarification data so the client can show a structured modal.
+        if (clarificationData) {
+          writer.write({ type: 'data-clarification', data: clarificationData });
+        }
         // Write traceId so the client knows whether feedback is supported.
         writer.write({ type: 'data-traceId', data: traceId });
       },
@@ -564,11 +580,13 @@ chatRouter.patch(
         return res.status(400).json({ error: 'Invalid agent settings' });
       }
 
-      const { executionMode, synthesisRoute } = parsed.data;
+      const { executionMode, synthesisRoute, clarificationSensitivity } =
+        parsed.data;
       await updateChatAgentSettingsById({
         chatId: id,
         executionMode,
         synthesisRoute,
+        clarificationSensitivity,
       });
 
       res.json({ success: true });

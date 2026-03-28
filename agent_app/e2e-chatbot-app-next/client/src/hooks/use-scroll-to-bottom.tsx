@@ -3,13 +3,14 @@ import { useRef, useEffect, useCallback, useState } from 'react';
 
 type ScrollFlag = ScrollBehavior | false;
 
-export function useScrollToBottom() {
+export function useScrollToBottom(scope = 'default') {
   const containerRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
+  const scrollStateKey = `messages:should-scroll:${scope}`;
 
   const { data: scrollBehavior = false, mutate: setScrollBehavior } =
-    useSWR<ScrollFlag>('messages:should-scroll', null, { fallbackData: false });
+    useSWR<ScrollFlag>(scrollStateKey, null, { fallbackData: false });
 
   const handleScroll = useCallback(() => {
     if (!containerRef.current) return;

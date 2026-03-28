@@ -208,6 +208,7 @@ test.describe('Agent Settings', () => {
     const requests: Array<{
       executionMode: 'parallel' | 'sequential';
       synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+      clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
     }> = [];
 
     await page.route('**/api/chat', async (route) => {
@@ -215,6 +216,7 @@ test.describe('Agent Settings', () => {
         agentSettings?: {
           executionMode: 'parallel' | 'sequential';
           synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+          clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
         };
       };
 
@@ -229,12 +231,36 @@ test.describe('Agent Settings', () => {
     });
 
     const combinations = [
-      { executionMode: 'parallel', synthesisRoute: 'auto' },
-      { executionMode: 'parallel', synthesisRoute: 'table_route' },
-      { executionMode: 'parallel', synthesisRoute: 'genie_route' },
-      { executionMode: 'sequential', synthesisRoute: 'auto' },
-      { executionMode: 'sequential', synthesisRoute: 'table_route' },
-      { executionMode: 'sequential', synthesisRoute: 'genie_route' },
+      {
+        executionMode: 'parallel',
+        synthesisRoute: 'auto',
+        clarificationSensitivity: 'medium',
+      },
+      {
+        executionMode: 'parallel',
+        synthesisRoute: 'table_route',
+        clarificationSensitivity: 'medium',
+      },
+      {
+        executionMode: 'parallel',
+        synthesisRoute: 'genie_route',
+        clarificationSensitivity: 'medium',
+      },
+      {
+        executionMode: 'sequential',
+        synthesisRoute: 'auto',
+        clarificationSensitivity: 'medium',
+      },
+      {
+        executionMode: 'sequential',
+        synthesisRoute: 'table_route',
+        clarificationSensitivity: 'medium',
+      },
+      {
+        executionMode: 'sequential',
+        synthesisRoute: 'genie_route',
+        clarificationSensitivity: 'medium',
+      },
     ] as const;
 
     for (const [index, combination] of combinations.entries()) {
@@ -249,6 +275,7 @@ test.describe('Agent Settings', () => {
           await chatPage.configureAgentSettings(
             combination.executionMode,
             combination.synthesisRoute,
+            combination.clarificationSensitivity,
           );
           await chatPage.sendUserMessage(`settings verification ${index + 1}`);
           await chatPage.isGenerationComplete();
@@ -268,6 +295,7 @@ test.describe('Agent Settings', () => {
     const requests: Array<{
       executionMode: 'parallel' | 'sequential';
       synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+      clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
     }> = [];
 
     await page.route('**/api/chat', async (route) => {
@@ -275,6 +303,7 @@ test.describe('Agent Settings', () => {
         agentSettings?: {
           executionMode: 'parallel' | 'sequential';
           synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+          clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
         };
       };
 
@@ -294,23 +323,25 @@ test.describe('Agent Settings', () => {
     await chatPage.createNewChat();
 
     let requestCountBefore = requests.length;
-    await chatPage.configureAgentSettings('parallel', 'table_route');
+    await chatPage.configureAgentSettings('parallel', 'table_route', 'medium');
     await chatPage.sendUserMessage('first turn with table');
     await chatPage.isGenerationComplete();
     expect(requests).toHaveLength(requestCountBefore + 1);
     expect(requests.at(-1)).toEqual({
       executionMode: 'parallel',
       synthesisRoute: 'table_route',
+      clarificationSensitivity: 'medium',
     });
 
     requestCountBefore = requests.length;
-    await chatPage.configureAgentSettings('parallel', 'genie_route');
+    await chatPage.configureAgentSettings('parallel', 'genie_route', 'high');
     await chatPage.sendUserMessage('second turn with genie');
     await chatPage.isGenerationComplete();
     expect(requests).toHaveLength(requestCountBefore + 1);
     expect(requests.at(-1)).toEqual({
       executionMode: 'parallel',
       synthesisRoute: 'genie_route',
+      clarificationSensitivity: 'high',
     });
 
     await page.evaluate(() => {
@@ -319,23 +350,116 @@ test.describe('Agent Settings', () => {
     await chatPage.createNewChat();
 
     requestCountBefore = requests.length;
-    await chatPage.configureAgentSettings('parallel', 'genie_route');
+    await chatPage.configureAgentSettings('parallel', 'genie_route', 'off');
     await chatPage.sendUserMessage('first turn with genie');
     await chatPage.isGenerationComplete();
     expect(requests).toHaveLength(requestCountBefore + 1);
     expect(requests.at(-1)).toEqual({
       executionMode: 'parallel',
       synthesisRoute: 'genie_route',
+      clarificationSensitivity: 'off',
     });
 
     requestCountBefore = requests.length;
-    await chatPage.configureAgentSettings('parallel', 'table_route');
+    await chatPage.configureAgentSettings('parallel', 'table_route', 'on');
     await chatPage.sendUserMessage('second turn with table');
     await chatPage.isGenerationComplete();
     expect(requests).toHaveLength(requestCountBefore + 1);
     expect(requests.at(-1)).toEqual({
       executionMode: 'parallel',
       synthesisRoute: 'table_route',
+      clarificationSensitivity: 'on',
+    });
+  });
+
+  test('should preserve welcome-screen settings across a clarification follow-up', async ({
+    adaContext,
+  }) => {
+    test.setTimeout(60_000);
+
+    const { page } = adaContext;
+    const chatPage = new ChatPage(page);
+    const requests: Array<{
+      id: string;
+      messageText?: string;
+      agentSettings: {
+        executionMode: 'parallel' | 'sequential';
+        synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+        clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
+      };
+    }> = [];
+
+    await page.route('**/api/chat', async (route) => {
+      const body = route.request().postDataJSON() as {
+        id: string;
+        message?: {
+          parts?: Array<{ type?: string; text?: string }>;
+        };
+        agentSettings?: {
+          executionMode: 'parallel' | 'sequential';
+          synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+          clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
+        };
+      };
+
+      expect(body.agentSettings).toBeDefined();
+
+      const messageText = body.message?.parts?.find(
+        (part) => part.type === 'text',
+      )?.text;
+
+      requests.push({
+        id: body.id,
+        messageText,
+        agentSettings: body.agentSettings!,
+      });
+
+      const responseText =
+        requests.length === 1
+          ? '### Clarification Needed\n\nWhich member trend do you want by month?'
+          : 'Settings preserved after clarification.';
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: buildUiMessageStream([responseText]),
+      });
+    });
+
+    await chatPage.createNewChat();
+    await page.getByTestId('agent-settings-trigger').click();
+    await page.getByTestId('synthesis-route-table_route').click();
+    await page.getByTestId('clarification-sensitivity-slider').fill('4');
+    await page.getByTestId('agent-settings-confirm').click();
+
+    await chatPage.sendUserMessage('show member trend');
+    await expect.poll(() => requests.length).toBe(1);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toEqual({
+      id: requests[0]!.id,
+      messageText: 'show member trend',
+      agentSettings: {
+        executionMode: 'parallel',
+        synthesisRoute: 'table_route',
+        clarificationSensitivity: 'on',
+      },
+    });
+
+    const firstRequestId = requests[0]!.id;
+
+    await chatPage.sendUserMessage('monthly for 2024');
+    await expect.poll(() => requests.length).toBe(2);
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toEqual({
+      id: firstRequestId,
+      messageText: 'monthly for 2024',
+      agentSettings: {
+        executionMode: 'parallel',
+        synthesisRoute: 'table_route',
+        clarificationSensitivity: 'on',
+      },
     });
   });
 
@@ -351,6 +475,7 @@ test.describe('Agent Settings', () => {
       {
         executionMode: 'parallel' | 'sequential';
         synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+        clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
       }
     >();
 
@@ -362,6 +487,7 @@ test.describe('Agent Settings', () => {
         agentSettings?: {
           executionMode: 'parallel' | 'sequential';
           synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+          clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
         };
       };
 
@@ -384,8 +510,8 @@ test.describe('Agent Settings', () => {
     await firstChatPage.createNewChat();
     await secondChatPage.createNewChat();
 
-    await firstChatPage.configureAgentSettings('sequential', 'genie_route');
-    await secondChatPage.configureAgentSettings('parallel', 'table_route');
+    await firstChatPage.configureAgentSettings('sequential', 'genie_route', 'high');
+    await secondChatPage.configureAgentSettings('parallel', 'table_route', 'low');
 
     await firstChatPage.sendUserMessage('tab one request');
     await firstChatPage.isGenerationComplete();
@@ -396,10 +522,12 @@ test.describe('Agent Settings', () => {
     expect(requestsByText.get('tab one request')).toEqual({
       executionMode: 'sequential',
       synthesisRoute: 'genie_route',
+      clarificationSensitivity: 'high',
     });
     expect(requestsByText.get('tab two request')).toEqual({
       executionMode: 'parallel',
       synthesisRoute: 'table_route',
+      clarificationSensitivity: 'low',
     });
 
     await secondPage.close();
@@ -412,6 +540,7 @@ test.describe('Agent Settings', () => {
     await chatPage.openAgentSettings();
     await chatPage.setExecutionMode('sequential');
     await chatPage.setSynthesisRoute('genie_route');
+    await chatPage.setClarificationSensitivity('on');
     await chatPage.cancelAgentSettings();
 
     await chatPage.openAgentSettings();
@@ -421,6 +550,9 @@ test.describe('Agent Settings', () => {
     await expect(
       adaContext.page.getByTestId('synthesis-route-auto'),
     ).toHaveAttribute('aria-pressed', 'true');
+    await expect(
+      adaContext.page.getByTestId('clarification-sensitivity-value'),
+    ).toHaveText('Medium');
   });
 
   test('should show updated settings after leaving and reopening a thread once', async ({
@@ -433,6 +565,7 @@ test.describe('Agent Settings', () => {
     let chatSettings = {
       executionMode: 'parallel' as const,
       synthesisRoute: 'auto' as const,
+      clarificationSensitivity: 'medium' as const,
     };
 
     await page.route(`**/api/chat/${chatId}`, async (route) => {
@@ -447,6 +580,7 @@ test.describe('Agent Settings', () => {
           visibility: 'private',
           executionMode: chatSettings.executionMode,
           synthesisRoute: chatSettings.synthesisRoute,
+          clarificationSensitivity: chatSettings.clarificationSensitivity,
           lastContext: null,
         }),
       });
@@ -491,7 +625,7 @@ test.describe('Agent Settings', () => {
     await page.goto(`/chat/${chatId}`);
     await page.waitForLoadState('networkidle');
 
-    await chatPage.configureAgentSettings('sequential', 'genie_route');
+    await chatPage.configureAgentSettings('sequential', 'genie_route', 'high');
 
     await page.goto('/');
     await page.waitForLoadState('networkidle');
@@ -505,5 +639,8 @@ test.describe('Agent Settings', () => {
     await expect(
       page.getByTestId('synthesis-route-genie_route'),
     ).toHaveAttribute('aria-pressed', 'true');
+    await expect(
+      page.getByTestId('clarification-sensitivity-value'),
+    ).toHaveText('High');
   });
 });

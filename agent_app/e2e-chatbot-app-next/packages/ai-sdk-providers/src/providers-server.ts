@@ -169,12 +169,16 @@ export const databricksFetch: typeof fetch = async (input, init) => {
   const userId = headers.get(CONTEXT_HEADER_USER_ID);
   const executionMode = headers.get('x-agent-execution-mode');
   const synthesisRoute = headers.get('x-agent-synthesis-route');
+  const clarificationSensitivity = headers.get(
+    'x-agent-clarification-sensitivity',
+  );
   const useApiProxy = headers.get('x-use-api-proxy') === 'true';
   // Remove custom headers so they don't get sent to the API
   headers.delete(CONTEXT_HEADER_CONVERSATION_ID);
   headers.delete(CONTEXT_HEADER_USER_ID);
   headers.delete('x-agent-execution-mode');
   headers.delete('x-agent-synthesis-route');
+  headers.delete('x-agent-clarification-sensitivity');
   headers.delete('x-use-api-proxy');
   requestInit = { ...requestInit, headers };
 
@@ -207,6 +211,9 @@ export const databricksFetch: typeof fetch = async (input, init) => {
             ...(executionMode ? { execution_mode: executionMode } : {}),
             ...(synthesisRoute && synthesisRoute !== 'auto'
               ? { force_synthesis_route: synthesisRoute }
+              : {}),
+            ...(clarificationSensitivity
+              ? { clarification_sensitivity: clarificationSensitivity }
               : {}),
           },
         };

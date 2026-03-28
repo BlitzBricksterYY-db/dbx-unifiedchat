@@ -80,10 +80,39 @@ async function main() {
     console.log('📂 Migrations folder:', migrationsFolder);
     console.log('🔄 Applying pending migrations...');
 
+    const migrationsTableName = '__drizzle_migrations';
+    const [sequenceRow] = await migrationConnection<
+      { sequence_name: string | null }[]
+    >`
+      SELECT pg_get_serial_sequence(
+        ${`${schemaName}.${migrationsTableName}`},
+        'id'
+      ) AS sequence_name
+    `;
+
+    if (sequenceRow?.sequence_name) {
+      const [maxIdRow] = await migrationConnection<{ max_id: number }[]>`
+        SELECT COALESCE(MAX(id), 0)::int AS max_id
+        FROM ${migrationConnection(schemaName)}.${migrationConnection(migrationsTableName)}
+      `;
+
+      const maxId = maxIdRow?.max_id ?? 0;
+      await migrationConnection`
+        SELECT setval(
+          ${sequenceRow.sequence_name},
+          GREATEST(${maxId}, 1),
+          ${maxId > 0}
+        )
+      `;
+      console.log(
+        `🔧 Synced ${schemaName}.${migrationsTableName} sequence to max id ${maxId}`,
+      );
+    }
+
     await migrate(db, {
       migrationsFolder,
       migrationsSchema: schemaName,
-      migrationsTable: '__drizzle_migrations',
+      migrationsTable: migrationsTableName,
     });
 
     console.log('✅ All migrations applied successfully');

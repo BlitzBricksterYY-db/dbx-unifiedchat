@@ -65,6 +65,11 @@ const PurePreviewMessage = ({
 }) => {
   const [mode, setMode] = useState<'view' | 'edit'>('view');
   const [showErrors, setShowErrors] = useState(false);
+  const messageIndex = allMessages.findIndex(({ id }) => id === message.id);
+  const trailingMessageCount =
+    messageIndex === -1 ? 0 : Math.max(allMessages.length - messageIndex - 1, 0);
+  const editTooltip =
+    trailingMessageCount > 0 ? 'Edit and rerun from here' : 'Edit message';
 
   // Hook for handling MCP approval requests
   const { submitApproval, isSubmitting, pendingApprovalId } = useApproval({
@@ -222,6 +227,7 @@ const PurePreviewMessage = ({
                         key={message.id}
                         message={message}
                         setMode={setMode}
+                        trailingMessageCount={trailingMessageCount}
                         setMessages={setMessages}
                         regenerate={regenerate}
                       />
@@ -380,6 +386,7 @@ const PurePreviewMessage = ({
               message={message}
               isLoading={isLoading}
               setMode={setMode}
+              editTooltip={editTooltip}
               errorCount={errorParts.length}
               showErrors={showErrors}
               onToggleErrors={() => setShowErrors(!showErrors)}
@@ -407,6 +414,7 @@ export const PreviewMessage = memo(
   PurePreviewMessage,
   (prevProps, nextProps) => {
     if (prevProps.isLoading !== nextProps.isLoading) return false;
+    if (prevProps.allMessages.length !== nextProps.allMessages.length) return false;
     // While streaming, re-render whenever the AI SDK produces a new message
     // object (each throttled update). We use reference equality rather than
     // deep-equal on parts because fast-deep-equal short-circuits on identical

@@ -18,6 +18,7 @@ function PureMessageActions({
   message,
   isLoading,
   setMode,
+  editTooltip,
   errorCount = 0,
   showErrors = false,
   onToggleErrors,
@@ -26,6 +27,7 @@ function PureMessageActions({
   message: ChatMessage;
   isLoading: boolean;
   setMode?: (mode: 'view' | 'edit') => void;
+  editTooltip?: string;
   errorCount?: number;
   showErrors?: boolean;
   onToggleErrors?: () => void;
@@ -114,7 +116,7 @@ function PureMessageActions({
         <div className="relative">
           {setMode && (
             <Action
-              tooltip="Edit"
+              tooltip={editTooltip ?? 'Edit'}
               onClick={() => setMode('edit')}
               className="-left-10 absolute top-0 opacity-0 transition-opacity group-hover/message:opacity-100"
               data-testid="message-edit-button"
@@ -189,6 +191,7 @@ export const MessageActions = memo(
   PureMessageActions,
   (prevProps, nextProps) => {
     if (prevProps.isLoading !== nextProps.isLoading) return false;
+    if (prevProps.editTooltip !== nextProps.editTooltip) return false;
     if (prevProps.errorCount !== nextProps.errorCount) return false;
     if (prevProps.showErrors !== nextProps.showErrors) return false;
     if (prevProps.initialFeedback?.feedbackType !== nextProps.initialFeedback?.feedbackType) return false;

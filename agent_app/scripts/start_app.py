@@ -32,6 +32,7 @@ from dotenv import load_dotenv
 BACKEND_READY = [r"Uvicorn running on", r"Application startup complete", r"Started server process"]
 FRONTEND_READY = [r"Server is running on http://localhost"]
 CHATBOT_DIR = Path("e2e-chatbot-app-next")
+GRANT_SCRIPT = Path("scripts/grant_lakebase_permissions.py")
 
 
 def check_port_available(port: int) -> bool:
@@ -212,6 +213,51 @@ class ProcessManager:
 
         print("✓ Chatbot database migrations complete")
 
+    def grant_lakebase_permissions_if_needed(self):
+        app_name = os.environ.get("DATABRICKS_APP_NAME")
+        instance_name = os.environ.get("LAKEBASE_INSTANCE_NAME")
+
+        if not app_name:
+            print("Skipping Lakebase grants (not running inside Databricks Apps).")
+            return
+
+        if not instance_name:
+            print("Skipping Lakebase grants (LAKEBASE_INSTANCE_NAME not set).")
+            return
+
+        if not GRANT_SCRIPT.exists():
+            print(f"WARNING: Grant script not found at {GRANT_SCRIPT}. Skipping Lakebase grants.")
+            return
+
+        for memory_type in ("langgraph-short-term", "langgraph-long-term"):
+            print(f"Granting Lakebase permissions for {memory_type}...")
+            result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "python",
+                    str(GRANT_SCRIPT),
+                    "--app-name",
+                    app_name,
+                    "--memory-type",
+                    memory_type,
+                    "--instance-name",
+                    instance_name,
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.stdout:
+                print(result.stdout.rstrip())
+            if result.returncode != 0:
+                if result.stderr:
+                    print(result.stderr.rstrip())
+                print(f"ERROR: Failed to grant Lakebase permissions for {memory_type}.")
+                sys.exit(result.returncode)
+
+        print("✓ Lakebase permissions ensured")
+
     def ensure_chatbot_dependencies(self):
         if self.chatbot_dependencies_ready:
             return
@@ -294,6 +340,7 @@ class ProcessManager:
             self.frontend_log = open("frontend.log", "w", buffering=1)
 
         try:
+            self.grant_lakebase_permissions_if_needed()
             self.run_database_migrations()
 
             # Build backend command, passing through all arguments

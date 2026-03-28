@@ -192,7 +192,7 @@ function PureMultimodalInput({
     [setAttachments, uploadFile],
   );
 
-  const { isAtBottom, scrollToBottom } = useScrollToBottom();
+  const { isAtBottom, scrollToBottom } = useScrollToBottom(chatId);
 
   useEffect(() => {
     if (status === 'submitted') {

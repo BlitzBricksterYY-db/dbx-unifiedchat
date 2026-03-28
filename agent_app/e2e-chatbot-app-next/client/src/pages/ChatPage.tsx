@@ -85,6 +85,7 @@ export default function ChatPage() {
       initialAgentSettings={{
         executionMode: chat.executionMode,
         synthesisRoute: chat.synthesisRoute,
+        clarificationSensitivity: chat.clarificationSensitivity,
       }}
       isReadonly={isReadonly}
       session={session}

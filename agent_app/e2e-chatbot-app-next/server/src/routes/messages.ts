@@ -4,6 +4,7 @@ import {
   type Response,
   type Router as RouterType,
 } from 'express';
+import { z } from 'zod';
 import {
   authMiddleware,
   requireAuth,
@@ -12,13 +13,16 @@ import {
 } from '../middleware/auth';
 import {
   getMessageById,
-  deleteMessagesByChatIdAfterTimestamp,
   getMessagesByChatId,
   isDatabaseAvailable,
+  updateMessageAndDeleteTrailingMessages,
 } from '@chat-template/db';
 import { ChatSDKError, checkChatAccess } from '@chat-template/core';
 
 export const messagesRouter: RouterType = Router();
+const updateMessageSchema = z.object({
+  text: z.string(),
+});
 
 // Apply auth middleware
 messagesRouter.use(authMiddleware);
@@ -44,32 +48,43 @@ messagesRouter.get(
 );
 
 /**
- * DELETE /api/messages/:id/trailing - Delete trailing messages after a specific message
+ * PATCH /api/messages/:id - Replace a message and delete trailing messages
  */
-messagesRouter.delete(
-  '/:id/trailing',
+messagesRouter.patch(
+  '/:id',
   [requireAuth],
   async (req: Request, res: Response) => {
     try {
-      // Return 204 No Content if database is not available
       const dbAvailable = isDatabaseAvailable();
-      console.log(
-        '[/api/messages/:id/trailing] Database available:',
-        dbAvailable,
-      );
 
       if (!dbAvailable) {
-        console.log('[/api/messages/:id/trailing] Returning 204 No Content');
         return res.status(204).end();
       }
 
       const id = getIdFromRequest(req);
       if (!id) return;
+      const parsed = updateMessageSchema.safeParse(req.body);
+
+      if (!parsed.success || parsed.data.text.trim().length === 0) {
+        const error = new ChatSDKError('bad_request:api');
+        const response = error.toResponse();
+        return res.status(response.status).json(response.json);
+      }
+
       const [message] = await getMessageById({ id });
 
       if (!message) {
         const messageError = new ChatSDKError('not_found:message');
         const response = messageError.toResponse();
+        return res.status(response.status).json(response.json);
+      }
+
+      if (message.role !== 'user') {
+        const error = new ChatSDKError(
+          'bad_request:api',
+          'Only user messages can be edited',
+        );
+        const response = error.toResponse();
         return res.status(response.status).json(response.json);
       }
 
@@ -84,15 +99,20 @@ messagesRouter.delete(
         return res.status(response.status).json(response.json);
       }
 
-      await deleteMessagesByChatIdAfterTimestamp({
-        chatId: message.chatId,
-        timestamp: message.createdAt,
+      const result = await updateMessageAndDeleteTrailingMessages({
+        messageId: message.id,
+        text: parsed.data.text,
       });
 
-      res.json({ success: true });
+      res.json({ success: true, ...result });
     } catch (error) {
-      console.error('Error deleting trailing messages:', error);
-      res.status(500).json({ error: 'Failed to delete messages' });
+      console.error('Error updating message:', error);
+      if (error instanceof ChatSDKError) {
+        const response = error.toResponse();
+        return res.status(response.status).json(response.json);
+      }
+
+      res.status(500).json({ error: 'Failed to update message' });
     }
   },
 );

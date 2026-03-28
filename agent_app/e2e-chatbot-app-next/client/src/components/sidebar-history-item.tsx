@@ -76,11 +76,18 @@ const PureChatItem = ({
   }, [isActive]);
 
   const hasTurnData = isLoading || turnMessages.length > 0;
+  const handleChatClick = () => {
+    setOpenMobile(false);
+
+    if (isActive) {
+      window.dispatchEvent(new CustomEvent('chat-scroll-to-head'));
+    }
+  };
 
   const chatRow = (
     <SidebarMenuItem data-testid="chat-history-item">
       <SidebarMenuButton asChild isActive={isActive}>
-        <Link to={`/chat/${chat.id}`} onClick={() => setOpenMobile(false)}>
+        <Link to={`/chat/${chat.id}`} onClick={handleChatClick}>
           <ChevronDownIcon
             className={`size-3 shrink-0 text-sidebar-foreground/50 transition-transform ${isExpanded ? '' : '-rotate-90'}`}
             onClick={(e) => {

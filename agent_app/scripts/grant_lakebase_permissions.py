@@ -46,8 +46,14 @@ MEMORY_TYPE_TABLES: dict[str, list[str]] = {
     ],
 }
 
-# Memory types that need sequence privileges on public schema
-NEEDS_SEQUENCES = {"openai-short-term"}
+# Schemas that need sequence privileges for all app variants.
+# ai_chatbot.__drizzle_migrations uses a sequence-backed id column.
+SHARED_SEQUENCE_SCHEMAS = {"ai_chatbot"}
+
+# Memory types that need sequence privileges on memory tables.
+MEMORY_TYPE_SEQUENCE_SCHEMAS = {
+    "openai-short-term": {"public"},
+}
 
 # Shared schemas granted for all memory types (chat UI persistence)
 SHARED_SCHEMAS: dict[str, list[str]] = {
@@ -230,6 +236,15 @@ def main():
         error_text = str(e).lower()
         if "already exists" in error_text:
             print("  Role already exists, skipping.")
+        elif (
+            "insufficient privilege" in error_text
+            or "permission denied to create role" in error_text
+            or "can manage" in error_text
+        ):
+            print(
+                "  Warning: unable to create role with the current identity. "
+                "Continuing and assuming the service principal role already exists."
+            )
         elif "identity" in error_text and "not found" in error_text:
             print(
                 "  Warning: service principal could not be resolved via workspace "
@@ -290,34 +305,37 @@ def main():
                 sys.exit(1)
             print(f"  Warning: table grant failed (may not exist yet): {e}")
 
-    # 3. Grant sequence privileges if needed (e.g. OpenAI SDK session tables)
-    if memory_type in NEEDS_SEQUENCES:
-        print("Granting sequence privileges on 'public' schema...")
-        try:
-            sequence_privileges = [
-                SequencePrivilege.USAGE,
-                SequencePrivilege.SELECT,
-                SequencePrivilege.UPDATE,
-            ]
-            if use_direct_grants:
-                grant_sequences_direct(client, sp_id, "public", sequence_privileges)
-            else:
-                client.grant_all_sequences_in_schema(
-                    grantee=sp_id,
-                    schemas=["public"],
-                    privileges=sequence_privileges,
-                )
-        except Exception as e:
-            error_text = str(e).lower()
-            if use_direct_grants and ("role" in error_text and "does not exist" in error_text):
-                print(
-                    "  Error: the app service principal role is not ready in Postgres yet.\n"
-                    "  Start the Databricks App once so it connects to Lakebase, then "
-                    "re-run this script.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            print(f"  Warning: sequence grant failed (may not exist yet): {e}")
+    # 3. Grant sequence privileges where needed.
+    sequence_schemas = set(SHARED_SEQUENCE_SCHEMAS)
+    sequence_schemas.update(MEMORY_TYPE_SEQUENCE_SCHEMAS.get(memory_type, set()))
+    if sequence_schemas:
+        sequence_privileges = [
+            SequencePrivilege.USAGE,
+            SequencePrivilege.SELECT,
+            SequencePrivilege.UPDATE,
+        ]
+        for schema in sorted(sequence_schemas):
+            print(f"Granting sequence privileges on '{schema}' schema...")
+            try:
+                if use_direct_grants:
+                    grant_sequences_direct(client, sp_id, schema, sequence_privileges)
+                else:
+                    client.grant_all_sequences_in_schema(
+                        grantee=sp_id,
+                        schemas=[schema],
+                        privileges=sequence_privileges,
+                    )
+            except Exception as e:
+                error_text = str(e).lower()
+                if use_direct_grants and ("role" in error_text and "does not exist" in error_text):
+                    print(
+                        "  Error: the app service principal role is not ready in Postgres yet.\n"
+                        "  Start the Databricks App once so it connects to Lakebase, then "
+                        "re-run this script.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                print(f"  Warning: sequence grant failed (may not exist yet): {e}")
 
     print(
         "\nPermission grants complete. If some grants failed because tables don't "

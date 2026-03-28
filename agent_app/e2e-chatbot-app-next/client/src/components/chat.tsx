@@ -30,11 +30,16 @@ import {
   type AgentSettings,
   useAgentSettings,
 } from './agent-settings';
+import {
+  ClarificationModal,
+  type ClarificationData,
+} from './clarification-modal';
 
 type ChatDataCache = {
   chat: {
     executionMode: AgentSettings['executionMode'];
     synthesisRoute: AgentSettings['synthesisRoute'];
+    clarificationSensitivity: AgentSettings['clarificationSensitivity'];
   };
   messages: ChatMessage[];
   feedback: FeedbackMap;
@@ -186,6 +191,11 @@ export function Chat({
       if (dataPart.type === 'data-usage') {
         setUsage(dataPart.data as LanguageModelUsage);
       }
+      if (dataPart.type === 'data-clarification' && dataPart.data) {
+        setClarification(
+          dataPart.data as ClarificationData,
+        );
+      }
     },
     onFinish: ({
       isAbort,
@@ -193,6 +203,8 @@ export function Chat({
       isError,
       messages: finishedMessages,
     }) => {
+      const lastMessage = finishedMessages?.at(-1);
+
       // Reset state for next message
       didFetchHistoryOnNewChat.current = false;
 
@@ -205,7 +217,6 @@ export function Chat({
 
       // Check if the last message contains an OAuth credential error
       // If so, don't try to resume - the user needs to authenticate first
-      const lastMessage = finishedMessages?.at(-1);
       const hasOAuthError = lastMessage?.parts?.some(
         (part) =>
           part.type === 'data-error' &&
@@ -227,9 +238,9 @@ export function Chat({
       // 2. It was a disconnect/error that terminated the stream
       // 3. We haven't exceeded max resume attempts
       const streamIncomplete = lastPartRef.current?.type !== 'finish';
-      const shouldResume =
-        streamIncomplete &&
-        (isDisconnect || isError || lastPartRef.current === undefined);
+      // Clarification turns intentionally end without a finish part, so only
+      // retry on actual disconnects or stream errors.
+      const shouldResume = streamIncomplete && (isDisconnect || isError);
 
       if (shouldResume && resumeAttemptCountRef.current < maxResumeAttempts) {
         console.log(
@@ -270,6 +281,24 @@ export function Chat({
     },
   });
 
+  // Sync messages to SWR cache so the sidebar history can reflect the latest turns
+  // We only sync when not streaming to avoid excessive re-renders of the sidebar
+  useEffect(() => {
+    if (id && status !== 'streaming') {
+      mutate(
+        `/chat/${id}`,
+        (currentData?: ChatDataCache | null) => {
+          if (!currentData) return currentData;
+          return {
+            ...currentData,
+            messages,
+          };
+        },
+        false,
+      );
+    }
+  }, [id, messages, status, mutate]);
+
   const persistAgentSettings = useCallback(
     async (settings: AgentSettings) => {
       try {
@@ -303,6 +332,7 @@ export function Chat({
                   ...currentData.chat,
                   executionMode: settings.executionMode,
                   synthesisRoute: settings.synthesisRoute,
+                  clarificationSensitivity: settings.clarificationSensitivity,
                 },
               }
             : currentData,
@@ -328,6 +358,14 @@ export function Chat({
     [messages.length, persistAgentSettings, syncChatSettingsCache, updateAgentSettings],
   );
 
+  const handleLiveUpdateAgentSettings = useCallback(
+    (nextSettings: AgentSettings) => {
+      agentSettingsRef.current = nextSettings;
+      updateAgentSettings(nextSettings);
+    },
+    [updateAgentSettings],
+  );
+
   const [searchParams] = useSearchParams();
   const query = searchParams.get('query');
   const selectedTurnId = searchParams.get('turn');
@@ -346,6 +384,9 @@ export function Chat({
   }, [query, sendMessage, hasAppendedQuery]);
 
   const [attachments, setAttachments] = useState<Array<Attachment>>([]);
+  const [clarification, setClarification] = useState<ClarificationData | null>(
+    null,
+  );
 
   return (
     <>
@@ -353,6 +394,7 @@ export function Chat({
         <ChatHeader />
 
         <Messages
+          chatId={id}
           status={status}
           messages={messages}
           selectedTurnId={selectedTurnId}
@@ -371,7 +413,8 @@ export function Chat({
               <div className="flex justify-end">
                 <AgentSettingsPanel
                   settings={agentSettings}
-                  onUpdate={handleUpdateAgentSettings}
+          onLiveUpdate={handleLiveUpdateAgentSettings}
+          onConfirm={handleUpdateAgentSettings}
                 />
               </div>
               <MultimodalInput
@@ -391,6 +434,14 @@ export function Chat({
           )}
         </div>
       </div>
+
+      {clarification && (
+        <ClarificationModal
+          data={clarification}
+          onClose={() => setClarification(null)}
+          sendMessage={sendMessage}
+        />
+      )}
     </>
   );
 }

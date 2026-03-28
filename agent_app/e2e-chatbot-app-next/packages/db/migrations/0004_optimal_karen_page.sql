@@ -1,0 +1,1 @@
+ALTER TABLE "ai_chatbot"."Chat" ADD COLUMN "clarificationSensitivity" varchar DEFAULT 'medium' NOT NULL;

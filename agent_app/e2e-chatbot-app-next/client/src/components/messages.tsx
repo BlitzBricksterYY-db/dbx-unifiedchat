@@ -11,6 +11,7 @@ import { ArrowDownIcon, ArrowUpIcon, ChevronsUpIcon, ChevronsDownIcon } from 'lu
 import { cn } from '@/lib/utils';
 
 interface MessagesProps {
+  chatId: string;
   status: UseChatHelpers<ChatMessage>['status'];
   messages: ChatMessage[];
   selectedTurnId?: string | null;
@@ -24,6 +25,7 @@ interface MessagesProps {
 }
 
 function PureMessages({
+  chatId,
   status,
   messages,
   selectedTurnId,
@@ -42,6 +44,7 @@ function PureMessages({
     scrollToBottom,
     hasSentMessage,
   } = useMessages({
+    chatId,
     status,
   });
 
@@ -54,6 +57,8 @@ function PureMessages({
     () => messages.filter((m) => m.role === 'user'),
     [messages],
   );
+  const userTurnsRef = useRef(userTurns);
+  userTurnsRef.current = userTurns;
   const hasTurns = userTurns.length > 1;
 
   // Stable navigation target — only updated by button clicks or when scroll settles
@@ -155,13 +160,13 @@ function PureMessages({
         behavior,
       });
 
-      const idx = userTurns.findIndex((t) => t.id === turnId);
+      const idx = userTurnsRef.current.findIndex((t) => t.id === turnId);
       if (idx >= 0) {
         navTargetRef.current = idx;
         setActiveTurnIndex(idx);
       }
     },
-    [messagesContainerRef, userTurns],
+    [messagesContainerRef],
   );
 
   const isAtCurrentTurnHead = useCallback(() => {
@@ -204,9 +209,27 @@ function PureMessages({
     [activeTurnIndex, isAtCurrentTurnHead, scrollToTurn, userTurns],
   );
 
+  // Tracks a pending deep-link scroll so competing scroll-to-bottom effects
+  // (auto-scroll-on-submit, multimodal-input SWR scroll) don't override it.
+  const deepLinkPendingRef = useRef(false);
+  const scrollToConversationHead = useCallback(
+    (behavior: ScrollBehavior = 'auto') => {
+      const container = messagesContainerRef.current;
+      if (!container) return;
+
+      container.scrollTo({ top: 0, behavior });
+      deepLinkPendingRef.current = false;
+
+      const nextIndex = userTurnsRef.current.length > 0 ? 0 : -1;
+      navTargetRef.current = nextIndex;
+      setActiveTurnIndex(nextIndex);
+    },
+    [messagesContainerRef],
+  );
+
   // Auto-scroll on submit
   useEffect(() => {
-    if (status === 'submitted') {
+    if (status === 'submitted' && !deepLinkPendingRef.current) {
       requestAnimationFrame(() => {
         messagesContainerRef.current?.scrollTo({
           top: messagesContainerRef.current.scrollHeight,
@@ -216,12 +239,88 @@ function PureMessages({
     }
   }, [status, messagesContainerRef]);
 
-  // Deep-link: scroll to selected turn from sidebar
+  // Route-driven positioning:
+  // - `/chat/:id` lands at the conversation head.
+  // - `/chat/:id?turn=...` deep-links to a specific user turn.
   useEffect(() => {
-    if (!selectedTurnId) return;
-    const raf = requestAnimationFrame(() => scrollToTurn(selectedTurnId));
-    return () => cancelAnimationFrame(raf);
-  }, [messages.length, scrollToTurn, selectedTurnId]);
+    if (!selectedTurnId) {
+      requestAnimationFrame(() => {
+        scrollToConversationHead('auto');
+      });
+      return;
+    }
+
+    deepLinkPendingRef.current = true;
+    let cancelled = false;
+    let attempts = 0;
+    const maxAttempts = 30;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+
+    const doScroll = (): boolean => {
+      const turnEl = turnRefs.current[selectedTurnId];
+      if (!turnEl) return false;
+
+      turnEl.scrollIntoView({ behavior: 'instant', block: 'start' });
+
+      const idx = userTurnsRef.current.findIndex(
+        (t) => t.id === selectedTurnId,
+      );
+      if (idx >= 0) {
+        navTargetRef.current = idx;
+        setActiveTurnIndex(idx);
+      }
+      return true;
+    };
+
+    const tryScroll = () => {
+      if (cancelled) return;
+
+      if (doScroll()) {
+        // Schedule correction passes to handle async layout shifts
+        const corrections = [150, 400, 800];
+        for (const delay of corrections) {
+          timers.push(
+            setTimeout(() => {
+              if (!cancelled) doScroll();
+            }, delay),
+          );
+        }
+        timers.push(
+          setTimeout(() => {
+            deepLinkPendingRef.current = false;
+          }, corrections[corrections.length - 1] + 100),
+        );
+        return;
+      }
+
+      attempts++;
+      if (attempts < maxAttempts) {
+        timers.push(setTimeout(tryScroll, 50));
+      } else {
+        deepLinkPendingRef.current = false;
+      }
+    };
+
+    // Double rAF: wait for at least one full paint cycle before first attempt
+    requestAnimationFrame(() => requestAnimationFrame(tryScroll));
+
+    return () => {
+      cancelled = true;
+      timers.forEach(clearTimeout);
+      deepLinkPendingRef.current = false;
+    };
+  }, [scrollToConversationHead, selectedTurnId]);
+
+  useEffect(() => {
+    const handleScrollToHead = () => {
+      scrollToConversationHead('smooth');
+    };
+
+    window.addEventListener('chat-scroll-to-head', handleScrollToHead);
+    return () => {
+      window.removeEventListener('chat-scroll-to-head', handleScrollToHead);
+    };
+  }, [scrollToConversationHead]);
 
   // Controls should be visible when idle AND there's enough content to scroll
   const showTopBottom = canScroll && isScrollIdle;
@@ -374,6 +473,7 @@ export const Messages = memo(PureMessages, (prevProps, nextProps) => {
     return false;
   }
 
+  if (prevProps.chatId !== nextProps.chatId) return false;
   if (prevProps.selectedModelId !== nextProps.selectedModelId) return false;
   if (prevProps.selectedTurnId !== nextProps.selectedTurnId) return false;
   if (prevProps.messages.length !== nextProps.messages.length) return false;

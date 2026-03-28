@@ -67,6 +67,7 @@ _performance_metrics = {
         "total_requests": 0
     }
 }
+
 class SuperAgentHybridResponsesAgent(ResponsesAgent):
     """
     Enhanced ResponsesAgent with both short-term and long-term memory for distributed Model Serving.
@@ -269,10 +270,9 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
             if hasattr(obj, 'name') and obj.name:
                 msg_dict["name"] = obj.name
             if hasattr(obj, 'tool_calls') and obj.tool_calls:
-                # Recursively serialize tool calls
                 msg_dict["tool_calls"] = [
-                    self.make_json_serializable(tc) for tc in obj.tool_calls[:2]
-                ]  # Limit to 2 for brevity
+                    self.make_json_serializable(tc) for tc in obj.tool_calls
+                ]
             return msg_dict
         
         # Handle dictionaries recursively
@@ -308,14 +308,14 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
         formatters = {
             # Existing formatters
             "agent_thinking": lambda d: f"💭 {d['agent'].upper()}: {d['content']}",
-            "agent_start": lambda d: f"🚀 Starting {d['agent']} agent for: {d.get('query', '')[:50]}...",
+            "agent_start": lambda d: f"🚀 Starting {d['agent']} agent for: {d.get('query', '')}",
             "intent_detection": lambda d: f"🎯 Intent: {d['result']} - {d.get('reasoning', '')}",
             "clarity_analysis": lambda d: f"✓ Query {'clear' if d['clear'] else 'unclear'}: {d.get('reasoning', '')}",
             "vector_search_start": lambda d: f"🔍 Searching vector index: {d['index']}",
             "vector_search_results": lambda d: f"📊 Found {d['count']} relevant spaces: {[s.get('space_id', 'unknown') for s in d.get('spaces', [])]}",
             "plan_formulation": lambda d: f"📋 Execution plan: {d.get('strategy', 'unknown')} strategy",
             "uc_function_call": lambda d: f"🔧 Calling UC function: {d['function']}",
-            "sql_generated": lambda d: f"📝 SQL generated: {d.get('query_preview', '')}...",
+            "sql_generated": lambda d: f"📝 SQL generated: {d.get('query', d.get('query_preview', ''))}",
             "sql_validation_start": lambda d: f"✅ Validating SQL query...",
             "sql_execution_start": lambda d: f"⚡ Executing SQL query...",
             "sql_execution_complete": lambda d: f"✓ Query complete: {d.get('rows', 0)} rows, {len(d.get('columns', []))} columns",
@@ -329,6 +329,7 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
             "meta_question_detected": lambda d: f"\n💡 Meta-question detected",
             "clarification_requested": lambda d: f"\n❓ Clarification needed: {d.get('reason', 'unknown')}",
             "clarification_skipped": lambda d: f"\n⏭️ Clarification skipped: {d.get('reason', 'unknown')}",
+            "clarification_result": lambda d: f"\n🧭 {d.get('content', f\"Clarification result: {d.get('result', 'unknown')}\")}",
             "agent_step": lambda d: f"\n📍 {d.get('agent', 'agent').upper()}: {d.get('content', d.get('step', 'processing'))}",
             "agent_result": lambda d: f"\n✅ {d.get('agent', 'agent').upper()}: {d.get('result', 'completed')} - {d.get('content', '')}",
             "sql_synthesis_start": lambda d: f"\n🔧 Starting SQL synthesis via {d.get('route', 'unknown')} route for {len(d.get('spaces', []))} space(s)",
@@ -478,6 +479,10 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
         run_config = {"configurable": {"thread_id": thread_id}}
         if user_id:
             run_config["configurable"]["user_id"] = user_id
+
+        execution_mode = ci.get("execution_mode", "parallel")
+        force_synthesis_route = ci.get("force_synthesis_route", "auto")
+        clarification_sensitivity = ci.get("clarification_sensitivity", "medium")
         
         # SIMPLIFIED: Unified state initialization for all scenarios
         # CheckpointSaver will restore previous conversation context automatically
@@ -485,6 +490,9 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
         initial_state = {
             **RESET_STATE_TEMPLATE,  # Reset all per-query execution fields
             "original_query": latest_query,
+            "execution_mode": execution_mode,
+            "force_synthesis_route": force_synthesis_route,
+            "clarification_sensitivity": clarification_sensitivity,
             "messages": [
                 SystemMessage(content="""You are a multi-agent Q&A analysis system.
 Your role is to help users query and analyze cross-domain data.
@@ -498,8 +506,8 @@ Guidelines:
 - Return results with proper context and explanations"""),
                 HumanMessage(content=latest_query)
             ]
-            # NOTE: current_turn, intent_metadata, turn_history are NOT in RESET_STATE_TEMPLATE
-            # They are managed by unified_intent_context_clarification_node and persist via CheckpointSaver
+            # NOTE: current_turn, turn_history are NOT in RESET_STATE_TEMPLATE
+            # They are managed by the clarification subgraph and persist via CheckpointSaver
         }
         
         # Add user_id to state for long-term memory access
@@ -509,29 +517,49 @@ Guidelines:
         
         first_message = True
         seen_ids = set()
+        seen_content_events: set[tuple[str, str]] = set()
         
         # Execute workflow with CheckpointSaver for distributed serving
         # CRITICAL: CheckpointSaver as context manager ensures all instances share state
         with CheckpointSaver(instance_name=self.lakebase_instance_name) as checkpointer:
-            # Compile graph with checkpointer at runtime
-            # This allows distributed Model Serving to access shared state
+            from langgraph.types import Command
+
             app = self.workflow.compile(checkpointer=checkpointer)
             
             logger.info(f"Executing workflow with checkpointer (thread: {thread_id})")
-            
-            # Stream the workflow execution with enhanced visibility modes
-            # CheckpointSaver will:
-            # 1. Restore previous state from thread_id (if exists) from Lakebase
-            # 2. Merge with initial_state (initial_state takes precedence)
-            # 3. Preserve conversation history across distributed instances
-            # Stream modes:
-            # - updates: State changes after each node
-            # - messages: LLM token-by-token streaming
-            # - custom: Agent-specific events (thinking, decisions, progress)
-            # - tasks: Task lifecycle events (start, finish, errors) for node execution tracking
-            for event in app.stream(initial_state, run_config, stream_mode=["updates", "messages", "custom", "tasks"]):
-                event_type = event[0]
-                event_data = event[1]
+
+            # Detect pending interrupt from a prior turn on this thread.
+            # If the clarification subgraph paused via interrupt(), the user's
+            # new message is the answer — resume instead of starting fresh.
+            existing_state = app.get_state(run_config)
+            if existing_state.tasks and any(
+                hasattr(t, "interrupts") and t.interrupts for t in existing_state.tasks
+            ):
+                logger.info(f"Resuming from interrupt on thread {thread_id}")
+                input_data = Command(
+                    resume=latest_query,
+                    update={
+                        "execution_mode": execution_mode,
+                        "force_synthesis_route": force_synthesis_route,
+                        "clarification_sensitivity": clarification_sensitivity,
+                    },
+                )
+            else:
+                input_data = initial_state
+
+            for raw_event in app.stream(input_data, run_config, stream_mode=["updates", "messages", "custom", "tasks"], subgraphs=True):
+                # subgraphs=True: 3-tuple (ns, mode, data) or 2-tuple (ns, (mode, data))
+                if len(raw_event) == 3:
+                    ns, event_type, event_data = raw_event
+                elif isinstance(raw_event[0], tuple):
+                    ns = raw_event[0]
+                    event_type, event_data = raw_event[1]
+                else:
+                    ns, event_type, event_data = (), raw_event[0], raw_event[1]
+
+                # Skip subgraph-internal updates
+                if event_type == "updates" and ns:
+                    continue
                 
                 # Handle streaming text deltas (messages mode)
                 if event_type == "messages":
@@ -557,9 +585,19 @@ Guidelines:
                 # Handle node updates (updates mode)
                 elif event_type == "updates":
                     events = event_data
+                    if isinstance(events, tuple):
+                        flattened = {}
+                        for item in events:
+                            if isinstance(item, dict):
+                                flattened.update(item)
+                        events = flattened
+                    if not isinstance(events, dict):
+                        logger.warning(f"Skipping malformed updates event: {type(event_data).__name__}")
+                        continue
                     new_msgs = [
                         msg
                         for v in events.values()
+                        if isinstance(v, dict)
                         for msg in v.get("messages", [])
                         if hasattr(msg, 'id') and msg.id not in seen_ids
                     ]
@@ -574,6 +612,8 @@ Guidelines:
                         if events:
                             node_name = tuple(events.keys())[0]
                             node_update = events[node_name]
+                            if not isinstance(node_update, dict):
+                                continue
                             updated_keys = [k for k in node_update.keys() if k != "messages"]
                             
                             # Enhanced step indicator with state keys
@@ -621,11 +661,11 @@ Guidelines:
                         elif hasattr(msg, '__class__') and msg.__class__.__name__ == 'ToolMessage':
                             try:
                                 tool_name = getattr(msg, 'name', 'unknown')
-                                tool_content = str(msg.content)[:200] if msg.content else "No content"
+                                tool_content = str(msg.content) if msg.content else "No content"
                                 yield ResponsesAgentStreamEvent(
                                     type="response.output_item.done",
                                     item=self.create_text_output_item(
-                                        text=f"🔨 Tool result ({tool_name}): {tool_content}...",
+                                        text=f"🔨 Tool result ({tool_name}): {tool_content}",
                                         id=str(uuid4())
                                     ),
                                 )
@@ -639,14 +679,56 @@ Guidelines:
                 elif event_type == "custom":
                     try:
                         custom_data = event_data
-                        formatted_text = self.format_custom_event(custom_data)
-                        yield ResponsesAgentStreamEvent(
-                            type="response.output_item.done",
-                            item=self.create_text_output_item(
-                                text=formatted_text,
-                                id=str(uuid4())
-                            ),
-                        )
+                        et = custom_data.get("type", "") if isinstance(custom_data, dict) else ""
+
+                        if et == "text_delta":
+                            delta_content = custom_data.get("content", "")
+                            if delta_content:
+                                if first_token_time is None:
+                                    first_token_time = time.time()
+                                    ttft = first_token_time - workflow_start_time
+                                    _performance_metrics["workflow_metrics"]["ttft_seconds"].append(ttft)
+                                    logger.info(f"⚡ TTFT (text_delta): {ttft:.3f}s")
+                                yield ResponsesAgentStreamEvent(
+                                    **self.create_text_delta(delta=delta_content, item_id=str(uuid4())),
+                                )
+                        elif et in ("meta_answer_content", "clarification_content", "clarification_requested"):
+                            content_key = (et, str(custom_data.get("content", "")))
+                            if content_key in seen_content_events:
+                                continue
+                            seen_content_events.add(content_key)
+                            if not details_finalized:
+                                for ev in _finalize_progress():
+                                    yield ev
+                            yield ResponsesAgentStreamEvent(
+                                type="response.output_item.done",
+                                item=self.create_text_output_item(
+                                    text=self.format_custom_event(custom_data),
+                                    id=str(uuid4()),
+                                ),
+                            )
+                            if et == "clarification_content" and isinstance(custom_data, dict):
+                                yield ResponsesAgentStreamEvent(
+                                    type="response.output_item.done",
+                                    item=self.create_text_output_item(text="", id=str(uuid4())),
+                                    databricks_output={
+                                        "clarification": {
+                                            "reason": custom_data.get("reason", ""),
+                                            "options": custom_data.get("options", []),
+                                        }
+                                    },
+                                )
+                        elif et in ("summary_start", "summary_complete"):
+                            pass
+                        else:
+                            formatted_text = self.format_custom_event(custom_data)
+                            yield ResponsesAgentStreamEvent(
+                                type="response.output_item.done",
+                                item=self.create_text_output_item(
+                                    text=formatted_text,
+                                    id=str(uuid4())
+                                ),
+                            )
                     except Exception as e:
                         logger.warning(f"Error processing custom event: {e}")
                 
@@ -662,13 +744,13 @@ Guidelines:
                             # Task started
                             logger.debug(f"⏳ Task started: {node_name}")
                             # Optionally emit to UI:
-                            # yield ResponsesAgentStreamEvent(
-                            #     type="response.output_item.done",
-                            #     item=self.create_text_output_item(
-                            #         text=f"⏳ Starting: {node_name}",
-                            #         id=str(uuid4())
-                            #     ),
-                            # )
+                            yield ResponsesAgentStreamEvent(
+                                type="response.output_item.done",
+                                item=self.create_text_output_item(
+                                    text=f"⏳ Starting: {node_name}",
+                                    id=str(uuid4())
+                                ),
+                            )
                         
                         elif event_name == "end":
                             # Task completed successfully

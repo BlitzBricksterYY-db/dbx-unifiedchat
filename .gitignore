@@ -33,6 +33,9 @@ MANIFEST
 htmlcov/
 .tox/
 .hypothesis/
+**/test-results/**
+**/tests/**
+**/playwright-report/**
 
 # IDEs
 .vscode/
@@ -81,3 +84,8 @@ logs/
 
 # assets for icons
 assets/
+
+#
+mlflow.db
+src/mlflow.db
+.langgraph_api/

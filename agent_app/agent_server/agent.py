@@ -10,7 +10,7 @@ import json
 import logging
 import threading
 import time
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 from uuid import uuid4
 
 import litellm
@@ -43,7 +43,6 @@ logger = logging.getLogger(__name__)
 # the SDK auth chain (e.g. databricks-vectorsearch).
 # ---------------------------------------------------------------------------
 import os
-
 _is_databricks_apps = bool(os.environ.get("DATABRICKS_CLIENT_ID"))
 if not _is_databricks_apps and not os.environ.get("DATABRICKS_TOKEN"):
     try:
@@ -155,7 +154,7 @@ def _make_json_serializable(obj):
         if hasattr(obj, "id") and obj.id:
             msg_dict["id"] = str(obj.id)
         if hasattr(obj, "tool_calls") and obj.tool_calls:
-            msg_dict["tool_calls"] = [_make_json_serializable(tc) for tc in obj.tool_calls[:2]]
+            msg_dict["tool_calls"] = [_make_json_serializable(tc) for tc in obj.tool_calls]
         return msg_dict
     if isinstance(obj, dict):
         return {str(k): _make_json_serializable(v) for k, v in obj.items()}
@@ -171,13 +170,13 @@ def _make_json_serializable(obj):
 
 _CUSTOM_FORMATTERS = {
     "agent_thinking": lambda d: f"{d['agent'].upper()}: {d['content']}",
-    "agent_start": lambda d: f"Starting {d['agent']} agent for: {d.get('query', '')[:50]}...",
+    "agent_start": lambda d: f"Starting {d['agent']} agent for: {d.get('query', '')}",
     "intent_detection": lambda d: f"Intent: {d['result']} - {d.get('reasoning', '')}",
     "clarity_analysis": lambda d: f"Query {'clear' if d['clear'] else 'unclear'}: {d.get('reasoning', '')}",
     "vector_search_start": lambda d: f"Searching vector index: {d['index']}",
     "vector_search_results": lambda d: f"Found {d['count']} relevant spaces",
     "plan_formulation": lambda d: f"Execution plan: {d.get('strategy', 'unknown')} strategy",
-    "sql_generated": lambda d: f"SQL generated: {d.get('query_preview', '')}...",
+    "sql_generated": lambda d: f"SQL generated: {d.get('query', d.get('query_preview', ''))}",
     "sql_validation_start": lambda d: "Validating SQL query...",
     "sql_execution_start": lambda d: "Executing SQL query...",
     "sql_execution_complete": lambda d: f"Query complete: {d.get('rows', 0)} rows",
@@ -185,6 +184,7 @@ _CUSTOM_FORMATTERS = {
     "genie_agent_call": lambda d: f"Calling Genie agent for space: {d.get('space_id', 'unknown')}",
     "meta_answer_content": lambda d: f"\n\n{d.get('content', '')}",
     "clarification_content": lambda d: f"\n\n{d.get('content', '')}",
+    "clarification_result": lambda d: d.get("content", f"Clarification result: {d.get('result', 'unknown')}"),
     "tool_call_start": lambda d: d.get("content", "Calling " + d.get("tool", "tool") + "..."),
     "tool_call_end": lambda d: d.get("content", "Tool returned result"),
     "agent_step": lambda d: d.get("content", f"Step: {d.get('step', '')}"),
@@ -291,12 +291,14 @@ async def stream_handler(
     # Agent settings from UI (via custom_inputs)
     execution_mode = ci.get("execution_mode", "parallel")
     force_synthesis_route = ci.get("force_synthesis_route", "auto")
+    clarification_sensitivity = ci.get("clarification_sensitivity", "medium")
 
     initial_state = {
         **RESET_STATE_TEMPLATE,
         "original_query": latest_query,
         "execution_mode": execution_mode,
         "force_synthesis_route": force_synthesis_route,
+        "clarification_sensitivity": clarification_sensitivity,
         "messages": [
             SystemMessage(content="""You are a multi-agent Q&A analysis system.
 Your role is to help users query and analyze cross-domain data.
@@ -336,6 +338,7 @@ Guidelines:
                     "thread_id": thread_id,
                     "execution_mode": execution_mode,
                     "force_synthesis_route": force_synthesis_route,
+                    "clarification_sensitivity": clarification_sensitivity,
                 },
             ) as span:
                 span.set_inputs(
@@ -345,26 +348,60 @@ Guidelines:
                         "user_id": user_id,
                         "execution_mode": execution_mode,
                         "force_synthesis_route": force_synthesis_route,
+                        "clarification_sensitivity": clarification_sensitivity,
                     }
                 )
                 last_state: dict = {}
                 with CheckpointSaver(instance_name=LAKEBASE_INSTANCE_NAME) as checkpointer:
+                    from langgraph.types import Command
+
                     app = _workflow.compile(checkpointer=checkpointer)
                     logger.info(f"Executing workflow with checkpointer (thread: {thread_id})")
-                    for event in app.stream(
-                        initial_state,
+
+                    existing_state = app.get_state(run_config)
+                    if existing_state.tasks and any(
+                        hasattr(t, "interrupts") and t.interrupts for t in existing_state.tasks
+                    ):
+                        logger.info(f"Resuming from interrupt on thread {thread_id}")
+                        input_data = Command(
+                            resume=latest_query,
+                            update={
+                                "execution_mode": execution_mode,
+                                "force_synthesis_route": force_synthesis_route,
+                                "clarification_sensitivity": clarification_sensitivity,
+                            },
+                        )
+                    else:
+                        input_data = initial_state
+
+                    for raw_event in app.stream(
+                        input_data,
                         run_config,
                         stream_mode=["updates", "messages", "custom", "tasks"],
+                        subgraphs=True,
                     ):
-                        if event[0] == "updates" and isinstance(event[1], dict):
-                            last_state.update(event[1])
-                        loop.call_soon_threadsafe(queue.put_nowait, event)
+                        # subgraphs=True: 3-tuple (ns, mode, data)
+                        # or 2-tuple (ns, (mode, data)) depending on LangGraph version
+                        if len(raw_event) == 3:
+                            ns, mode, data = raw_event
+                        elif isinstance(raw_event[0], tuple):
+                            ns = raw_event[0]
+                            mode, data = raw_event[1]
+                        else:
+                            ns, mode, data = (), raw_event[0], raw_event[1]
+
+                        if mode == "updates" and not ns and isinstance(data, dict):
+                            last_state.update(data)
+                        # Normalise to 3-tuple for downstream consumer
+                        loop.call_soon_threadsafe(
+                            queue.put_nowait, (ns, mode, data)
+                        )
 
                 workflow_output: dict = {"status": "completed"}
                 if summary := last_state.get("final_summary"):
-                    workflow_output["final_summary"] = summary[:4000] if len(summary) > 4000 else summary
+                    workflow_output["final_summary"] = summary
                 if sql := last_state.get("sql_query"):
-                    workflow_output["sql_query"] = sql[:2000] if len(sql) > 2000 else sql
+                    workflow_output["sql_query"] = sql
                 if er := last_state.get("execution_result"):
                     workflow_output["execution_result_status"] = er.get("status")
                     workflow_output["row_count"] = er.get("row_count")
@@ -384,6 +421,7 @@ Guidelines:
     in_summarize = False
     streaming_item_id = str(uuid4())
     text_deltas_emitted = False
+    seen_content_events: set[tuple[str, str]] = set()
 
     def _emit_progress_step(step_text: str):
         """Append a step to the live progress block (returns events to yield)."""
@@ -422,8 +460,13 @@ Guidelines:
             break
         if isinstance(event, Exception):
             raise event
-        event_type = event[0]
-        event_data = event[1]
+
+        # Normalised 3-tuple from _run_workflow: (namespace, mode, data)
+        ns, event_type, event_data = event
+
+        # Skip subgraph-internal updates (avoid noise and premature final-node detection)
+        if event_type == "updates" and ns:
+            continue
 
         # ── tasks: detect errors ──
         if event_type == "tasks":
@@ -459,10 +502,28 @@ Guidelines:
                             **_create_text_delta(delta=delta_content, id=streaming_item_id),
                         )
                 elif et in ("meta_answer_content", "clarification_content", "clarification_requested"):
+                    content_key = (et, str(event_data.get("content", "")) if isinstance(event_data, dict) else str(event_data))
+                    if content_key in seen_content_events:
+                        continue
+                    seen_content_events.add(content_key)
+                    if not details_finalized:
+                        for ev in _finalize_progress():
+                            yield ev
                     yield ResponsesAgentStreamEvent(
                         type="response.output_item.done",
                         item=_create_text_output_item(text=_format_custom_event(event_data), id=str(uuid4())),
                     )
+                    if et == "clarification_content" and isinstance(event_data, dict):
+                        yield ResponsesAgentStreamEvent(
+                            type="response.output_item.done",
+                            item=_create_text_output_item(text="", id=str(uuid4())),
+                            databricks_output={
+                                "clarification": {
+                                    "reason": event_data.get("reason", ""),
+                                    "options": event_data.get("options", []),
+                                }
+                            },
+                        )
                 elif et.endswith("_error") or et == "error":
                     yield ResponsesAgentStreamEvent(
                         type="response.output_item.done",
@@ -496,16 +557,35 @@ Guidelines:
         # ── updates: stream node progress, only emit AIMessages from final nodes ──
         if event_type == "updates":
             events_dict = event_data
+            if isinstance(events_dict, tuple):
+                flattened = {}
+                for item in events_dict:
+                    if isinstance(item, dict):
+                        flattened.update(item)
+                events_dict = flattened
+            if not isinstance(events_dict, dict):
+                logger.warning(f"Skipping malformed updates event: {type(event_data).__name__}")
+                continue
             node_names = list(events_dict.keys())
             new_msgs = [
-                msg for v in events_dict.values()
+                msg
+                for v in events_dict.values()
+                if isinstance(v, dict)
                 for msg in v.get("messages", [])
                 if hasattr(msg, "id") and msg.id not in seen_ids
             ]
 
             seen_ids.update(msg.id for msg in new_msgs)
 
+            routing_nodes = {
+                "planning",
+                "sql_synthesis_table",
+                "sql_synthesis_genie",
+                "sql_execution",
+            }
             for node_name, update in events_dict.items():
+                if not isinstance(update, dict):
+                    continue
                 if node_name != "summarize":
                     step = f"Step: {node_name}"
                     extra = [k for k in update if k != "messages"]
@@ -514,7 +594,7 @@ Guidelines:
                     progress_steps.append(step)
                     for ev in _emit_progress_step(step):
                         yield ev
-                    if "next_agent" in update:
+                    if node_name in routing_nodes and "next_agent" in update:
                         routing = f"Routing → {update['next_agent']}"
                         progress_steps.append(routing)
                         for ev in _emit_progress_step(routing):
@@ -523,6 +603,8 @@ Guidelines:
             is_final_node = "summarize" in node_names
             if not is_final_node:
                 for update in events_dict.values():
+                    if not isinstance(update, dict):
+                        continue
                     if update.get("is_meta_question") or update.get("is_irrelevant"):
                         is_final_node = True
                         break

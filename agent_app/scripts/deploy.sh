@@ -60,6 +60,34 @@ echo "  Target  : $TARGET"
 echo "  Profile : ${PROFILE:-<default>}"
 echo
 
+APP_NAME="multi-agent-genie-app-dev"
+LAKEBASE_INSTANCE_NAME=$(awk '
+  /^  database_instances:$/ {in_db=1; next}
+  in_db && /^  [a-z]/ {in_db=0}
+  in_db && /^[[:space:]]+name:[[:space:]]/ {print $2; exit}
+' databricks.yml)
+
+bootstrap_lakebase_role() {
+  if [[ -z "${LAKEBASE_INSTANCE_NAME:-}" ]]; then
+    return
+  fi
+
+  if ! databricks apps get "$APP_NAME" "${PROFILE_ARGS[@]}" >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "Bootstrapping Lakebase role for existing app in $LAKEBASE_INSTANCE_NAME..."
+  for memory_type in langgraph-short-term langgraph-long-term; do
+    uv run python scripts/grant_lakebase_permissions.py \
+      --app-name "$APP_NAME" \
+      --profile "${PROFILE:-}" \
+      --memory-type "$memory_type" \
+      --instance-name "$LAKEBASE_INSTANCE_NAME"
+  done
+  echo "✅ Lakebase role bootstrap complete"
+  echo
+}
+
 # Optional: sync files to workspace first
 if [[ "$SYNC_FIRST" == true ]]; then
   echo "Syncing files to workspace..."
@@ -67,6 +95,12 @@ if [[ "$SYNC_FIRST" == true ]]; then
   echo "✅ Sync complete"
   echo
 fi
+
+# Ensure the existing app service principal role exists in the target Lakebase
+# instance before moving the app's database resource. Databricks updates
+# database privileges across instances, but does not recreate the Postgres role
+# during the same app update.
+bootstrap_lakebase_role
 
 # Deploy
 echo "Deploying bundle (target: $TARGET)..."

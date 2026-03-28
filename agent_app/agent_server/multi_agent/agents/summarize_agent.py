@@ -261,8 +261,6 @@ class ResultSummarizeAgent:
         appended by summarize_node() as collapsible sections / chart blocks.
         """
         original_query = state.get('original_query', 'N/A')
-        question_clear = state.get('question_clear', False)
-        pending_clarification = state.get('pending_clarification')
         synthesis_error = state.get('synthesis_error')
         execution_error = state.get('execution_error')
 
@@ -271,12 +269,6 @@ class ResultSummarizeAgent:
 **User Question:** {original_query}
 
 """
-        if not question_clear and pending_clarification:
-            reason = pending_clarification.get('reason', 'Query needs clarification')
-            prompt += f"**Status:** Needs clarification — {reason}\n"
-            prompt += "\nGenerate a short message explaining what additional information is needed.\n"
-            return prompt
-
         if synthesis_error:
             prompt += f"**SQL Generation Failed:** {synthesis_error}\n"
         if execution_error:

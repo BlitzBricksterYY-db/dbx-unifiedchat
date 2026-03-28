@@ -28,6 +28,9 @@ const agentSettingsSchema = z
   .object({
     executionMode: z.enum(['parallel', 'sequential']).default('parallel'),
     synthesisRoute: z.enum(['auto', 'table_route', 'genie_route']).default('auto'),
+    clarificationSensitivity: z
+      .enum(['off', 'low', 'medium', 'high', 'on'])
+      .default('medium'),
   })
   .optional();
 

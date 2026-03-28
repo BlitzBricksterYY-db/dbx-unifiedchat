@@ -44,6 +44,11 @@ export const chat = createTable('Chat', {
   })
     .notNull()
     .default('auto'),
+  clarificationSensitivity: varchar('clarificationSensitivity', {
+    enum: ['off', 'low', 'medium', 'high', 'on'],
+  })
+    .notNull()
+    .default('medium'),
   lastContext: jsonb('lastContext').$type<LanguageModelV3Usage | null>(),
 });
 

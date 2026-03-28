@@ -5,7 +5,7 @@ This module defines the graph structure, routing logic, and workflow compilation
 """
 
 from functools import wraps
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import mlflow
 from langgraph.graph import StateGraph, END
@@ -13,7 +13,7 @@ from langgraph.graph.state import CompiledStateGraph
 from mlflow.entities import SpanType
 
 from ..core.state import AgentState
-from ..agents.clarification import unified_intent_context_clarification_node
+from ..agents.clarification import ClarificationAgent
 from ..agents.planning import planning_node
 from ..agents.sql_synthesis import sql_synthesis_table_node, sql_synthesis_genie_node
 from ..agents.sql_execution import sql_execution_node
@@ -23,17 +23,37 @@ from ..agents.summarize import summarize_node
 def _trace_state_snapshot(payload: Any) -> dict[str, Any]:
     """Capture the full agent state for trace inputs/outputs.
 
-    Messages are excluded (already captured by LangChain autologging)
-    and replaced with a count to avoid duplication.
+    Messages are included so the full conversation is visible in MLflow traces.
     """
     if not isinstance(payload, dict):
         return {"payload_type": type(payload).__name__}
+
+    from langchain_core.messages import BaseMessage
+
+    def _serialize_message(message: Any) -> Any:
+        if isinstance(message, BaseMessage):
+            message_dict: dict[str, Any] = {
+                "type": message.__class__.__name__,
+                "content": message.content,
+            }
+            if getattr(message, "id", None):
+                message_dict["id"] = str(message.id)
+            if getattr(message, "name", None):
+                message_dict["name"] = message.name
+            if getattr(message, "tool_calls", None):
+                message_dict["tool_calls"] = message.tool_calls
+            if getattr(message, "additional_kwargs", None):
+                message_dict["additional_kwargs"] = message.additional_kwargs
+            return message_dict
+        return message
 
     snapshot: dict[str, Any] = {}
     for key, value in payload.items():
         if key == "messages":
             if isinstance(value, list):
-                snapshot["message_count"] = len(value)
+                snapshot["messages"] = [_serialize_message(message) for message in value]
+            else:
+                snapshot["messages"] = value
         else:
             snapshot[key] = value
     return snapshot
@@ -54,8 +74,6 @@ def _sync_turn_metadata(state: Any, result: Any) -> None:
         trace_metadata["chat.turn_id"] = turn_id
     if parent_turn_id := current_turn.get("parent_turn_id"):
         trace_metadata["chat.parent_turn_id"] = parent_turn_id
-    if intent_type := current_turn.get("intent_type"):
-        trace_metadata["chat.intent_type"] = intent_type
 
     if trace_metadata:
         mlflow.update_current_trace(metadata=trace_metadata)
@@ -91,33 +109,39 @@ def _with_node_trace(
     return traced_node
 
 
-def create_super_agent_hybrid() -> StateGraph:
+def create_super_agent_hybrid(config=None) -> StateGraph:
     """
     Create the Hybrid Super Agent LangGraph workflow.
-    
-    Combines:
-    - Function-based agent nodes for flexibility
-    - Explicit state management for observability
-    - Conditional routing for dynamic workflows
-    
+
+    Args:
+        config: Optional configuration object (uses default if None)
+
     Returns:
         StateGraph: Uncompiled LangGraph workflow
     """
+    if config is None:
+        from .config import get_config
+        config = get_config()
+
+    table_name = (
+        f"{config.unity_catalog.catalog_name}"
+        f".{config.unity_catalog.schema_name}"
+        f".enriched_genie_docs_chunks"
+    )
+    clarification_agent = ClarificationAgent(
+        llm_endpoint=config.llm.clarification_endpoint,
+        table_name=table_name,
+    )
+
     print("\n" + "="*80)
-    print("🏗️ BUILDING HYBRID SUPER AGENT WORKFLOW")
+    print("BUILDING HYBRID SUPER AGENT WORKFLOW")
     print("="*80)
-    
-    # Create the graph with explicit state
+
     workflow = StateGraph(AgentState)
-    
-    # Add nodes - SIMPLIFIED with unified node
+
     workflow.add_node(
         "unified_intent_context_clarification",
-        _with_node_trace(
-            "unified_intent_context_clarification",
-            unified_intent_context_clarification_node,
-            SpanType.AGENT,
-        ),
+        clarification_agent.subgraph,
     )
     workflow.add_node("planning", _with_node_trace("planning", planning_node, SpanType.AGENT))
     workflow.add_node(
@@ -133,25 +157,19 @@ def create_super_agent_hybrid() -> StateGraph:
         _with_node_trace("sql_execution", sql_execution_node, SpanType.TOOL),
     )
     workflow.add_node("summarize", _with_node_trace("summarize", summarize_node, SpanType.AGENT))
-    
-    # Define routing logic based on explicit state
+
     def route_after_unified(state: AgentState) -> str:
-        """Route after unified node: planning or END (clarification/meta-question/irrelevant)"""
-        # Check if irrelevant question - go directly to END with refusal
+        """Route after unified node: planning or END (meta-question/irrelevant).
+
+        Clarification no longer routes to END here -- unclear queries pause inside
+        the subgraph via interrupt() and resume directly into planning.
+        """
         if state.get("is_irrelevant", False):
             return END
-        
-        # Check if meta-question - go directly to END with answer
         if state.get("is_meta_question", False):
             return END
-        
-        # Check if question is clear - proceed to planning
-        if state.get("question_clear", False):
-            return "planning"
-        
-        # Otherwise, end for clarification
-        return END
-    
+        return "planning"
+
     def route_after_planning(state: AgentState) -> str:
         """Route after planning: determine SQL synthesis route or direct summarize"""
         next_agent = state.get("next_agent", "summarize")
@@ -160,19 +178,16 @@ def create_super_agent_hybrid() -> StateGraph:
         elif next_agent == "sql_synthesis_genie":
             return "sql_synthesis_genie"
         return "summarize"
-    
+
     def route_after_synthesis(state: AgentState) -> str:
         """Route after SQL synthesis: execution or summarize (if error)"""
         next_agent = state.get("next_agent", "summarize")
         if next_agent == "sql_execution":
             return "sql_execution"
-        return "summarize"  # Summarize if synthesis error
-    
-    # Add edges with conditional routing
-    # Entry point is unified node
+        return "summarize"
+
     workflow.set_entry_point("unified_intent_context_clarification")
-    
-    # Route from unified node to planning or END (clarification)
+
     workflow.add_conditional_edges(
         "unified_intent_context_clarification",
         route_after_unified,
@@ -181,7 +196,7 @@ def create_super_agent_hybrid() -> StateGraph:
             END: END
         }
     )
-    
+
     workflow.add_conditional_edges(
         "planning",
         route_after_planning,
@@ -191,7 +206,7 @@ def create_super_agent_hybrid() -> StateGraph:
             "summarize": "summarize"
         }
     )
-    
+
     workflow.add_conditional_edges(
         "sql_synthesis_table",
         route_after_synthesis,
@@ -200,7 +215,7 @@ def create_super_agent_hybrid() -> StateGraph:
             "summarize": "summarize"
         }
     )
-    
+
     workflow.add_conditional_edges(
         "sql_synthesis_genie",
         route_after_synthesis,
@@ -209,14 +224,13 @@ def create_super_agent_hybrid() -> StateGraph:
             "summarize": "summarize"
         }
     )
-    
-    # SQL execution routes conditionally: summarize, or back to synthesis on retry/sequential
+
     def route_after_execution(state: AgentState) -> str:
         next_agent = state.get("next_agent", "summarize")
         if next_agent in ("sql_synthesis_table", "sql_synthesis_genie"):
             return next_agent
         return "summarize"
-    
+
     workflow.add_conditional_edges(
         "sql_execution",
         route_after_execution,
@@ -226,64 +240,59 @@ def create_super_agent_hybrid() -> StateGraph:
             "summarize": "summarize",
         },
     )
-    
-    # Summarize is the final node before END
+
     workflow.add_edge("summarize", END)
-    
-    print("✓ Workflow nodes added:")
-    print("  1. Unified Intent+Context+Clarification Node")
+
+    print("Workflow nodes added:")
+    print("  1. Unified Intent+Context+Clarification (subgraph)")
     print("  2. Planning Agent")
     print("  3. SQL Synthesis Agent - Table Route")
     print("  4. SQL Synthesis Agent - Genie Route")
     print("  5. SQL Execution Agent")
     print("  6. Result Summarize Agent - FINAL NODE")
-    print("\n✓ Conditional routing configured")
-    print("✓ All paths route to summarize node before END")
-    print("\n✅ Hybrid Super Agent workflow created successfully!")
+    print("\nConditional routing configured")
+    print("All paths route to summarize node before END")
+    print("\nHybrid Super Agent workflow created successfully!")
     print("="*80)
-    
+
     return workflow
 
 
-def create_agent_graph(config=None, with_checkpointer: bool = False):
+def create_agent_graph(
+    config=None,
+    with_checkpointer: Union[bool, str] = False,
+):
     """
     Create and optionally compile the agent graph.
-    
+
     Args:
         config: Optional configuration object (uses default if None)
-        with_checkpointer: Whether to compile with checkpointer
-        
+        with_checkpointer:
+            False  -- return uncompiled StateGraph (serving path compiles at runtime)
+            True   -- compile with DatabricksCheckpointSaver (CLI on Databricks)
+            "memory" -- compile with MemorySaver (local dev without Lakebase)
+
     Returns:
         StateGraph or CompiledStateGraph depending on with_checkpointer
     """
-    workflow = create_super_agent_hybrid()
-    
-    if with_checkpointer:
-        # Import checkpointer only if needed
-        from databricks_langchain.checkpoint import DatabricksCheckpointSaver
-        from databricks_langchain.store import DatabricksStore
-        from databricks.sdk import WorkspaceClient
-        
-        # Get Lakebase instance name from config
-        if config:
-            lakebase_instance = config.lakebase.instance_name
-            embedding_endpoint = config.lakebase.embedding_endpoint
-            embedding_dims = config.lakebase.embedding_dims
-        else:
-            # Use defaults
-            from .config import get_config
-            cfg = get_config()
-            lakebase_instance = cfg.lakebase.instance_name
-            embedding_endpoint = cfg.lakebase.embedding_endpoint
-            embedding_dims = cfg.lakebase.embedding_dims
-        
-        # Create checkpointer
-        w = WorkspaceClient()
-        checkpointer = DatabricksCheckpointSaver(w.lakebase, database_instance_name=lakebase_instance)
-        
-        # Compile with checkpointer
-        return workflow.compile(checkpointer=checkpointer)
-    else:
-        # Return uncompiled workflow
-        return workflow
+    workflow = create_super_agent_hybrid(config)
 
+    if with_checkpointer is True:
+        from databricks_langchain.checkpoint import DatabricksCheckpointSaver
+        from databricks.sdk import WorkspaceClient
+
+        if config is None:
+            from .config import get_config
+            config = get_config()
+
+        w = WorkspaceClient()
+        checkpointer = DatabricksCheckpointSaver(
+            w.lakebase, database_instance_name=config.lakebase.instance_name
+        )
+        return workflow.compile(checkpointer=checkpointer)
+
+    if with_checkpointer == "memory":
+        from langgraph.checkpoint.memory import MemorySaver
+        return workflow.compile(checkpointer=MemorySaver())
+
+    return workflow

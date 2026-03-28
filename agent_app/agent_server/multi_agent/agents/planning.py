@@ -30,15 +30,38 @@ Example usage:
 
 import json
 import threading
+import time
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Callable
 from functools import wraps
+from uuid import uuid4
 
 from langchain_core.messages import SystemMessage
 from langgraph.config import get_stream_writer
 
 from ..core.state import AgentState
+
+
+_DEBUG_LOG_PATH = "/Users/yang.yang/CursorProjects/KUMC_POC_hlsfieldtemp/.cursor/debug-5f14c7.log"
+
+
+def _debug_log(location: str, message: str, data: Optional[dict] = None) -> None:
+    try:
+        payload = {
+            "sessionId": "5f14c7",
+            "id": f"log_{int(time.time() * 1000)}_{uuid4().hex[:8]}",
+            "timestamp": int(time.time() * 1000),
+            "location": location,
+            "message": message,
+            "data": data or {},
+            "runId": "run1",
+            "hypothesisId": "route-debug",
+        }
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
 
 
 # ==============================================================================
@@ -166,7 +189,6 @@ def extract_planning_context(state: AgentState) -> dict:
     """Extract minimal context for planning."""
     return {
         "current_turn": state.get("current_turn"),
-        "intent_metadata": state.get("intent_metadata"),
         "original_query": state.get("original_query")  # Backward compat
     }
 
@@ -270,17 +292,16 @@ def planning_node(state: AgentState) -> dict:
     context = extract_planning_context(state)
     print(f"📊 State optimization: Using {len(context)} fields (vs {len([k for k in state.keys() if state.get(k) is not None])} in full state)")
     
-    # Get current turn and intent from state
+    # Get current turn from state
     current_turn = context.get("current_turn")
     if not current_turn:
-        # Fallback for backward compatibility
-        print("⚠ No current_turn found, falling back to legacy behavior")
+        print("No current_turn found, falling back to legacy behavior")
         query = context.get("original_query", "")
-        intent_type = "new_question"
+        is_followup = False
         context_summary = None
     else:
         query = current_turn["query"]
-        intent_type = current_turn.get("intent_type", "new_question")
+        is_followup = bool(current_turn.get("parent_turn_id"))
         context_summary = current_turn.get("context_summary")
     
     # Use context_summary if available (LLM-generated from intent detection)
@@ -288,10 +309,10 @@ def planning_node(state: AgentState) -> dict:
     planning_query = context_summary or query
     
     # Emit agent start event
-    writer({"type": "agent_start", "agent": "planning", "query": planning_query[:100]})
+    writer({"type": "agent_start", "agent": "planning", "query": planning_query})
     
     print(f"Query: {query}")
-    print(f"Intent: {intent_type}")
+    print(f"Is follow-up: {is_followup}")
     if context_summary:
         print(f"✓ Using context summary from intent detection")
         print(f"  Summary: {context_summary[:200]}...")
@@ -311,10 +332,9 @@ def planning_node(state: AgentState) -> dict:
         )
     track_agent_model_usage("planning", LLM_ENDPOINT_PLANNING)
     
-    # PHASE 2 OPTIMIZATION: Vector search result caching for refinements
+    # PHASE 2 OPTIMIZATION: Vector search result caching for follow-ups
     thread_id = state.get("thread_id", "default")
-    intent_metadata = state.get("intent_metadata", {})
-    can_reuse_cache = intent_type in ["refinement", "clarification_response", "continuation"]
+    can_reuse_cache = is_followup
     
     relevant_spaces_full = None
     cache_hit = False
@@ -326,14 +346,14 @@ def planning_node(state: AgentState) -> dict:
             relevant_spaces_full = cache_entry["results"]
             cache_hit = True
             cache_age = datetime.now() - cache_entry["timestamp"]
-            print(f"🚀 VECTOR SEARCH CACHE HIT (thread: {thread_id}, age: {cache_age.seconds}s)")
-            print(f"   Reusing {len(relevant_spaces_full)} spaces for {intent_type} query")
+            print(f"VECTOR SEARCH CACHE HIT (thread: {thread_id}, age: {cache_age.seconds}s)")
+            print(f"   Reusing {len(relevant_spaces_full)} spaces for follow-up query")
             print(f"   Expected gain: -300 to -800ms")
 
             writer({
                 "type": "vector_search_cache_hit",
                 "thread_id": thread_id,
-                "intent_type": intent_type,
+                "is_followup": is_followup,
                 "space_count": len(relevant_spaces_full)
             })
 
@@ -382,9 +402,21 @@ def planning_node(state: AgentState) -> dict:
     else:
         next_agent = "sql_synthesis_table"
         print("✓ Plan complete - using TABLE ROUTE (direct SQL synthesis)")
+
+    _debug_log(
+        "planning.py:planning_node:route_decision",
+        "planning route resolved",
+        {
+            "force_synthesis_route": force_route,
+            "plan_join_strategy": plan.get("join_strategy"),
+            "resolved_join_strategy": join_strategy,
+            "next_agent": next_agent,
+            "relevant_space_count": len(relevant_spaces_full),
+        },
+    )
     
     # Emit plan formulation result
-    writer({"type": "plan_formulation", "strategy": join_strategy, "requires_join": plan.get("requires_join", False)})
+    writer({"type": "plan_formulation", "force_route": force_route, "strategy": join_strategy, "requires_join": plan.get("requires_join", False)})
     
     sub_questions = plan.get("sub_questions", [])
     

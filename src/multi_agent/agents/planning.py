@@ -33,7 +33,6 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Callable
 from functools import wraps
 
-from langchain_core.messages import SystemMessage
 from langgraph.config import get_stream_writer
 
 from ..core.state import AgentState
@@ -122,8 +121,7 @@ def extract_planning_context(state: AgentState) -> dict:
     """Extract minimal context for planning."""
     return {
         "current_turn": state.get("current_turn"),
-        "intent_metadata": state.get("intent_metadata"),
-        "original_query": state.get("original_query")  # Backward compat
+        "original_query": state.get("original_query"),  # Backward compat
     }
 
 
@@ -232,24 +230,23 @@ def planning_node(state: AgentState) -> dict:
         # Fallback for backward compatibility
         print("⚠ No current_turn found, falling back to legacy behavior")
         query = context.get("original_query", "")
-        intent_type = "new_question"
+        is_followup = False
         context_summary = None
     else:
         query = current_turn["query"]
-        intent_type = current_turn.get("intent_type", "new_question")
+        is_followup = len(state.get("turn_history", [])) > 0
         context_summary = current_turn.get("context_summary")
-    
-    # Use context_summary if available (LLM-generated from intent detection)
-    # This replaces the manual combined_query_context template
+
+    # Use context_summary if available (LLM-generated from check_clarity)
     planning_query = context_summary or query
-    
+
     # Emit agent start event
     writer({"type": "agent_start", "agent": "planning", "query": planning_query[:100]})
-    
+
     print(f"Query: {query}")
-    print(f"Intent: {intent_type}")
+    print(f"Is followup: {is_followup}")
     if context_summary:
-        print(f"✓ Using context summary from intent detection")
+        print(f"✓ Using context summary from clarification")
         print(f"  Summary: {context_summary[:200]}...")
     else:
         print(f"✓ Using query directly (no context needed)")
@@ -269,8 +266,7 @@ def planning_node(state: AgentState) -> dict:
     
     # PHASE 2 OPTIMIZATION: Vector search result caching for refinements
     thread_id = state.get("thread_id", "default")
-    intent_metadata = state.get("intent_metadata", {})
-    can_reuse_cache = intent_type in ["refinement", "clarification_response", "continuation"]
+    can_reuse_cache = is_followup
     
     relevant_spaces_full = None
     cache_hit = False
@@ -284,13 +280,13 @@ def planning_node(state: AgentState) -> dict:
             relevant_spaces_full = cache_entry["results"]
             cache_hit = True
             print(f"🚀 VECTOR SEARCH CACHE HIT (thread: {thread_id}, age: {cache_age.seconds}s)")
-            print(f"   Reusing {len(relevant_spaces_full)} spaces for {intent_type} query")
+            print(f"   Reusing {len(relevant_spaces_full)} spaces for follow-up query")
             print(f"   Expected gain: -300 to -800ms")
             
             writer({
                 "type": "vector_search_cache_hit",
                 "thread_id": thread_id,
-                "intent_type": intent_type,
+                "is_followup": is_followup,
                 "space_count": len(relevant_spaces_full)
             })
         else:
@@ -353,9 +349,6 @@ def planning_node(state: AgentState) -> dict:
         "vector_search_relevant_spaces_info": plan.get("vector_search_relevant_spaces_info", []),
         "relevant_spaces": relevant_spaces_full,
         "next_agent": next_agent,
-        "messages": [
-            SystemMessage(content=f"Execution plan: {json.dumps(plan, indent=2)}")
-        ]
     }
 
 

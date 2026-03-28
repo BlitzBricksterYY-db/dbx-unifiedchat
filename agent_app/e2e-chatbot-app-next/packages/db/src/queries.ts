@@ -4,7 +4,6 @@ import {
   desc,
   eq,
   gt,
-  gte,
   inArray,
   lt,
   sql,
@@ -99,6 +98,7 @@ export async function saveChat({
   visibility,
   executionMode = 'parallel',
   synthesisRoute = 'auto',
+  clarificationSensitivity = 'medium',
 }: {
   id: string;
   userId: string;
@@ -106,6 +106,7 @@ export async function saveChat({
   visibility: VisibilityType;
   executionMode?: 'parallel' | 'sequential';
   synthesisRoute?: 'auto' | 'table_route' | 'genie_route';
+  clarificationSensitivity?: 'off' | 'low' | 'medium' | 'high' | 'on';
 }) {
   if (!isDatabaseAvailable()) {
     console.log('[saveChat] Database not available, skipping persistence');
@@ -121,6 +122,7 @@ export async function saveChat({
       visibility,
       executionMode,
       synthesisRoute,
+      clarificationSensitivity,
     });
   } catch (error) {
     console.error('[saveChat] Error saving chat:', error);
@@ -349,44 +351,117 @@ export async function getMessageById({ id }: { id: string }) {
   }
 }
 
-export async function deleteMessagesByChatIdAfterTimestamp({
-  chatId,
-  timestamp,
+function replaceTextParts(parts: unknown, text: string) {
+  if (!Array.isArray(parts)) {
+    return [{ type: 'text', text }];
+  }
+
+  let insertedText = false;
+  const updatedParts = parts.flatMap((part) => {
+    if (
+      typeof part !== 'object' ||
+      part === null ||
+      !('type' in part) ||
+      part.type !== 'text'
+    ) {
+      return [part];
+    }
+
+    if (insertedText) {
+      return [];
+    }
+
+    insertedText = true;
+    return [{ type: 'text', text }];
+  });
+
+  if (!insertedText) {
+    updatedParts.unshift({ type: 'text', text });
+  }
+
+  return updatedParts;
+}
+
+export async function updateMessageAndDeleteTrailingMessages({
+  messageId,
+  text,
 }: {
-  chatId: string;
-  timestamp: Date;
+  messageId: string;
+  text: string;
 }) {
   if (!isDatabaseAvailable()) {
     console.log(
-      '[deleteMessagesByChatIdAfterTimestamp] Database not available, skipping deletion',
+      '[updateMessageAndDeleteTrailingMessages] Database not available, skipping persistence',
     );
     return;
   }
 
   try {
-    const messagesToDelete = await (await ensureDb())
-      .select({ id: message.id })
-      .from(message)
-      .where(
-        and(eq(message.chatId, chatId), gte(message.createdAt, timestamp)),
+    const db = await ensureDb();
+
+    return await db.transaction(async (tx) => {
+      const [targetMessage] = await tx
+        .select()
+        .from(message)
+        .where(eq(message.id, messageId))
+        .limit(1);
+
+      if (!targetMessage) {
+        throw new ChatSDKError('not_found:message');
+      }
+
+      const orderedMessages = await tx
+        .select({ id: message.id, createdAt: message.createdAt })
+        .from(message)
+        .where(eq(message.chatId, targetMessage.chatId))
+        .orderBy(asc(message.createdAt), asc(message.id));
+
+      const targetIndex = orderedMessages.findIndex(
+        (candidate) => candidate.id === messageId,
       );
 
-    const messageIds = messagesToDelete.map((message) => message.id);
+      if (targetIndex === -1) {
+        throw new ChatSDKError('not_found:message');
+      }
 
-    if (messageIds.length > 0) {
-      const db = await ensureDb();
-      // Delete votes first to satisfy the Vote.messageId → Message.id FK constraint
-      await db.delete(vote).where(inArray(vote.messageId, messageIds));
-      return await db
-        .delete(message)
-        .where(
-          and(eq(message.chatId, chatId), inArray(message.id, messageIds)),
-        );
-    }
+      const trailingMessageIds = orderedMessages
+        .slice(targetIndex + 1)
+        .map((candidate) => candidate.id);
+
+      const updatedParts = replaceTextParts(targetMessage.parts, text);
+
+      await tx
+        .update(message)
+        .set({
+          parts: updatedParts,
+          traceId: null,
+        })
+        .where(eq(message.id, messageId));
+
+      if (trailingMessageIds.length > 0) {
+        await tx.delete(vote).where(inArray(vote.messageId, trailingMessageIds));
+        await tx
+          .delete(message)
+          .where(
+            and(
+              eq(message.chatId, targetMessage.chatId),
+              inArray(message.id, trailingMessageIds),
+            ),
+          );
+      }
+
+      return {
+        trailingMessageCount: trailingMessageIds.length,
+      };
+    });
   } catch (_error) {
+    if (_error instanceof ChatSDKError) {
+      throw _error;
+    }
+
     throw new ChatSDKError(
       'bad_request:database',
-      'Failed to delete messages by chat id after timestamp',
+      'Failed to update message and delete trailing messages',
     );
   }
 }
@@ -423,10 +498,12 @@ export async function updateChatAgentSettingsById({
   chatId,
   executionMode,
   synthesisRoute,
+  clarificationSensitivity,
 }: {
   chatId: string;
   executionMode: 'parallel' | 'sequential';
   synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+  clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
 }) {
   if (!isDatabaseAvailable()) {
     console.log(
@@ -438,7 +515,7 @@ export async function updateChatAgentSettingsById({
   try {
     return await (await ensureDb())
       .update(chat)
-      .set({ executionMode, synthesisRoute })
+      .set({ executionMode, synthesisRoute, clarificationSensitivity })
       .where(eq(chat.id, chatId));
   } catch (_error) {
     throw new ChatSDKError(

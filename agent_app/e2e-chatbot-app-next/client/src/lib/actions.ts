@@ -23,16 +23,22 @@ export async function updateChatVisibility({
   return response.json();
 }
 
-export async function deleteTrailingMessages({
+export async function updateMessage({
   messageId,
+  text,
 }: {
   messageId: string;
+  text: string;
 }) {
   const response = await fetchWithErrorHandlers(
-    `/api/messages/${messageId}/trailing`,
+    `/api/messages/${messageId}`,
     {
-      method: 'DELETE',
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+      },
       credentials: 'include',
+      body: JSON.stringify({ text }),
     },
   );
 

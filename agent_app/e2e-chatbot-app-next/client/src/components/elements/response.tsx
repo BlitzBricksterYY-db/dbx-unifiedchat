@@ -356,6 +356,27 @@ type BufferedResponseProps = ResponseProps & {
 };
 
 const STREAMDOWN_BUFFER_MS = 180;
+const PROCESSING_STEPS_SUMMARY_MARKER = '<summary>Processing Steps</summary>';
+const PROCESSING_STEPS_CLOSE_TAG = '</details>';
+
+function transformResponseMarkdown(text: string) {
+  let nextText = text;
+
+  // Transform accordion-group into a tab widget code fence.
+  // Falls through gracefully during streaming (returns null if incomplete).
+  const accordionResult = parseAccordionGroup(nextText);
+  if (accordionResult) {
+    const encoded = encodeTabsToBase64(accordionResult.tabs);
+    nextText =
+      accordionResult.before +
+      '\n\n```accordion-tabs:' +
+      encoded +
+      '\ntabs\n```\n\n' +
+      accordionResult.after;
+  }
+
+  return nextText;
+}
 
 export const Response = memo(
   ({ isStreaming = false, ...props }: BufferedResponseProps) => {
@@ -396,56 +417,109 @@ export const Response = memo(
       typeof bufferedChildren === 'string' ? bufferedChildren : '';
 
     const processed = useMemo(() => {
-      if (typeof bufferedChildren !== 'string') return bufferedChildren;
+      if (typeof bufferedChildren !== 'string') {
+        return {
+          kind: 'node' as const,
+          content: bufferedChildren,
+        };
+      }
+
       try {
-        let text = bufferedChildren;
+        const processingStepsStart = bufferedChildren.indexOf(
+          PROCESSING_STEPS_SUMMARY_MARKER,
+        );
 
-        // Auto-collapse the Processing Steps <details open> when summary content follows.
-        const processingStepsStart = text.indexOf('<summary>Processing Steps</summary>');
-        if (processingStepsStart !== -1) {
-          const closeTag = '</details>';
-          const firstClose = text.indexOf(closeTag, processingStepsStart);
-          if (firstClose !== -1) {
-            const afterProcessingSteps = text
-              .substring(firstClose + closeTag.length)
-              .trim();
-            if (afterProcessingSteps.length > 0) {
-              text = text.replace(/<details open>/g, '<details>');
-              const before = text.substring(0, firstClose + closeTag.length);
-              const after = text.substring(firstClose + closeTag.length);
-              text = before + '\n\n---\n\n' + after.trimStart();
-            }
-          }
+        if (processingStepsStart === -1) {
+          return {
+            kind: 'single' as const,
+            content: transformResponseMarkdown(bufferedChildren),
+          };
         }
 
-        // Transform accordion-group into a tab widget code fence.
-        // Falls through gracefully during streaming (returns null if incomplete).
-        const accordionResult = parseAccordionGroup(text);
-        if (accordionResult) {
-          const encoded = encodeTabsToBase64(accordionResult.tabs);
-          text =
-            accordionResult.before +
-            '\n\n```accordion-tabs:' +
-            encoded +
-            '\ntabs\n```\n\n' +
-            accordionResult.after;
+        const processingStepsClose = bufferedChildren.indexOf(
+          PROCESSING_STEPS_CLOSE_TAG,
+          processingStepsStart,
+        );
+
+        // Hard buffer: once Processing Steps starts, do not render any trailing
+        // answer text until the closing </details> arrives.
+        if (processingStepsClose === -1) {
+          return {
+            kind: 'single' as const,
+            content: transformResponseMarkdown(bufferedChildren),
+          };
         }
 
-        return text;
+        const before = transformResponseMarkdown(
+          bufferedChildren
+            .slice(0, processingStepsClose + PROCESSING_STEPS_CLOSE_TAG.length)
+            .replace(/<details open>/g, '<details>'),
+        );
+        const after = transformResponseMarkdown(
+          bufferedChildren
+            .slice(processingStepsClose + PROCESSING_STEPS_CLOSE_TAG.length)
+            .trimStart(),
+        );
+
+        if (!after) {
+          return {
+            kind: 'single' as const,
+            content: before,
+          };
+        }
+
+        return {
+          kind: 'split' as const,
+          before,
+          after,
+        };
       } catch (e) {
         console.error('Response processing error:', e);
-        return bufferedChildren;
+        return {
+          kind: 'single' as const,
+          content: raw,
+        };
       }
-    }, [bufferedChildren]);
+    }, [bufferedChildren, raw]);
+
+    const renderStreamdown = (content: string, key?: string) => (
+      <Streamdown
+        key={key}
+        components={streamdownComponents}
+        className="markdown-content flex flex-col gap-4"
+        {...props}
+        children={content}
+      />
+    );
+
+    if (processed.kind === 'node') {
+      return (
+        <StreamdownErrorBoundary fallbackText={raw}>
+          <Streamdown
+            components={streamdownComponents}
+            className="markdown-content flex flex-col gap-4"
+            {...props}
+            children={processed.content}
+          />
+        </StreamdownErrorBoundary>
+      );
+    }
+
+    if (processed.kind === 'split') {
+      return (
+        <StreamdownErrorBoundary fallbackText={raw}>
+          <div className="flex flex-col gap-4">
+            {renderStreamdown(processed.before, 'processing-steps')}
+            <hr className="border-border" />
+            {renderStreamdown(processed.after, 'final-answer')}
+          </div>
+        </StreamdownErrorBoundary>
+      );
+    }
 
     return (
       <StreamdownErrorBoundary fallbackText={raw}>
-        <Streamdown
-          components={streamdownComponents}
-          className="markdown-content flex flex-col gap-4"
-          {...props}
-          children={processed}
-        />
+        {renderStreamdown(processed.content)}
       </StreamdownErrorBoundary>
     );
   },

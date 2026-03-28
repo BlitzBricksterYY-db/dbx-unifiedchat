@@ -64,7 +64,6 @@ def extract_summarize_context(state: AgentState) -> dict:
         "messages": truncate_message_history(messages, max_turns=5),
         "original_query": state.get("original_query"),
         "question_clear": state.get("question_clear", False),
-        "pending_clarification": state.get("pending_clarification"),
         "sql_query": state.get("sql_query"),
         "sql_queries": state.get("sql_queries") or [],
         "sql_query_labels": state.get("sql_query_labels") or [],

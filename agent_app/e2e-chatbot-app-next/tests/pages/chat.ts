@@ -3,6 +3,7 @@ import { expect } from '@playwright/test';
 
 type ExecutionMode = 'parallel' | 'sequential';
 type SynthesisRoute = 'auto' | 'table_route' | 'genie_route';
+type ClarificationSensitivity = 'off' | 'low' | 'medium' | 'high' | 'on';
 
 /**
  * Page object for the chat interface.
@@ -49,6 +50,14 @@ export class ChatPage {
     return this.page
       .getByTestId(`synthesis-route-${route}`)
       .or(this.page.getByRole('button', { name: routeLabel }));
+  }
+
+  private clarificationSensitivitySlider(): Locator {
+    return this.page.getByTestId('clarification-sensitivity-slider');
+  }
+
+  private clarificationSensitivityValue(): Locator {
+    return this.page.getByTestId('clarification-sensitivity-value');
   }
 
   private settingsCancelButton(): Locator {
@@ -108,12 +117,41 @@ export class ChatPage {
     await expect(routeButton).toHaveClass(/bg-blue-600/);
   }
 
+  async setClarificationSensitivity(
+    sensitivity: ClarificationSensitivity,
+  ) {
+    await this.openAgentSettings();
+
+    const indexBySensitivity: Record<ClarificationSensitivity, string> = {
+      off: '0',
+      low: '1',
+      medium: '2',
+      high: '3',
+      on: '4',
+    };
+    const labelBySensitivity: Record<ClarificationSensitivity, string> = {
+      off: 'Off',
+      low: 'Low',
+      medium: 'Medium',
+      high: 'High',
+      on: 'On',
+    };
+
+    const slider = this.clarificationSensitivitySlider();
+    await slider.fill(indexBySensitivity[sensitivity]);
+    await expect(this.clarificationSensitivityValue()).toHaveText(
+      labelBySensitivity[sensitivity],
+    );
+  }
+
   async configureAgentSettings(
     executionMode: ExecutionMode,
     synthesisRoute: SynthesisRoute,
+    clarificationSensitivity: ClarificationSensitivity = 'medium',
   ) {
     await this.setExecutionMode(executionMode);
     await this.setSynthesisRoute(synthesisRoute);
+    await this.setClarificationSensitivity(clarificationSensitivity);
     await this.settingsConfirmButton().click();
     await expect(this.agentSettingsPanel()).toBeHidden();
   }
