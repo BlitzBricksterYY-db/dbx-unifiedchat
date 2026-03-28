@@ -22,6 +22,7 @@ import {
   VisualMapComponent,
 } from 'echarts/components';
 import { SVGRenderer } from 'echarts/renderers';
+import { LegacyGridContainLabel } from 'echarts/features';
 
 import { buildOption, getSelectableChartTypes, type ChartSpec } from './chart-spec';
 
@@ -41,6 +42,7 @@ echarts.use([
   VisualMapComponent,
   MarkLineComponent,
   SVGRenderer,
+  LegacyGridContainLabel,
 ]);
 
 function toCsv(data: Record<string, unknown>[]): string {
@@ -60,7 +62,7 @@ function toCsv(data: Record<string, unknown>[]): string {
 export function InteractiveChart({ spec }: { spec: ChartSpec }) {
   const availableChartTypes = useMemo(() => getSelectableChartTypes(spec), [spec]);
   const [chartType, setChartType] = useState<string>(spec.config.chartType ?? 'bar');
-  const chartRef = useRef<ReactEChartsCore>(null);
+  const chartRef = useRef<any>(null);
 
   const option = useMemo(() => buildOption(spec, chartType), [spec, chartType]);
 

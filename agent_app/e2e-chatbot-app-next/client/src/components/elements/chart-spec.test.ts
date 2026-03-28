@@ -100,9 +100,9 @@ test('buildOption creates a heatmap config', () => {
 
   assert.ok(spec);
   const option = buildOption(spec);
-  assert.equal(option.series?.[0]?.type, 'heatmap');
-  assert.equal(option.xAxis?.type, 'category');
-  assert.equal(option.yAxis?.type, 'category');
+  assert.equal((option.series as any)?.[0]?.type, 'heatmap');
+  assert.equal((option.xAxis as any)?.type, 'category');
+  assert.equal((option.yAxis as any)?.type, 'category');
 });
 
 test('buildOption creates a dual-axis config', () => {
@@ -125,7 +125,7 @@ test('buildOption creates a dual-axis config', () => {
   assert.ok(spec);
   const option = buildOption(spec);
   assert.equal(Array.isArray(option.yAxis), true);
-  assert.equal(option.series?.[0]?.type, 'bar');
-  assert.equal(option.series?.[1]?.type, 'line');
-  assert.equal(option.series?.[1]?.yAxisIndex, 1);
+  assert.equal((option.series as any)?.[0]?.type, 'bar');
+  assert.equal((option.series as any)?.[1]?.type, 'line');
+  assert.equal((option.series as any)?.[1]?.yAxisIndex, 1);
 });

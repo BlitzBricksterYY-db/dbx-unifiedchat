@@ -1,6 +1,6 @@
 import type { UIMessagePart } from 'ai';
 import type { DBMessage } from '@chat-template/db';
-import type { ChatMessage, ChatTools, CustomUIDataTypes } from './types';
+import type { ChatMessage, CustomUIDataTypes } from './types';
 import { formatISO } from 'date-fns';
 
 export function generateUUID(): string {
@@ -15,7 +15,7 @@ export function convertToUIMessages(messages: DBMessage[]): ChatMessage[] {
   return messages.map((message) => ({
     id: message.id,
     role: message.role as 'user' | 'assistant' | 'system',
-    parts: message.parts as UIMessagePart<CustomUIDataTypes, ChatTools>[],
+    parts: message.parts as UIMessagePart<CustomUIDataTypes, any>[],
     metadata: {
       createdAt: formatISO(message.createdAt),
     },

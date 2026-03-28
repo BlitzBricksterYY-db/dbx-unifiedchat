@@ -163,11 +163,11 @@ function buildHeatmapOption(spec: ChartSpec): EChartsOption {
   return {
     title: { text: spec.config.title, left: 'center', textStyle: { fontSize: 14 } },
     tooltip: {
-      formatter: (params) => {
-        const value = Array.isArray((params as { value?: unknown }).value)
-          ? (params as { value: [number, number, number] }).value[2]
+      formatter: (params: any) => {
+        const value = Array.isArray(params.value)
+          ? params.value[2]
           : 0;
-        return `${xValues[(params as { value: [number, number, number] }).value[0]]} / ${yValues[(params as { value: [number, number, number] }).value[1]]}: ${formatValue(value, spec.config.series[0]?.format)}`;
+        return `${xValues[params.value[0]]} / ${yValues[params.value[1]]}: ${formatValue(value, spec.config.series[0]?.format)}`;
       },
     },
     grid: { left: '8%', right: '8%', top: '12%', bottom: '18%', containLabel: true },
@@ -312,7 +312,7 @@ function buildCartesianOption(spec: ChartSpec, chartType: string): EChartsOption
     yAxis: buildYAxes(primaryFormat, secondaryFormat, isPercentScale, hasSecondaryAxis),
     dataZoom: spec.chartData.length > 15 ? [{ type: 'slider', bottom: 28 }] : undefined,
     toolbox: spec.config.toolbox ? { feature: { saveAsImage: {}, restore: {}, dataView: { readOnly: true } } } : undefined,
-    series: groupedSeries,
+    series: groupedSeries as any,
   };
 }
 

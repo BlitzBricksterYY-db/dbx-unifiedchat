@@ -359,7 +359,7 @@ export function PaginatedTable(
               ) : null}
               <tbody>
                 {parsed.mode === 'nodes'
-                  ? pagedRows
+                  ? (pagedRows as React.ReactNode)
                   : pagedRows.map((row, rowIndex) => (
                       <tr
                         key={rowIndex}
@@ -370,7 +370,7 @@ export function PaginatedTable(
                             key={column}
                             className="max-w-[220px] px-3 py-2.5 align-top text-zinc-700 dark:text-zinc-200"
                           >
-                            <div className="truncate">{String(row[column] ?? '')}</div>
+                            <div className="truncate">{String((row as any)[column] ?? '')}</div>
                           </td>
                         ))}
                       </tr>

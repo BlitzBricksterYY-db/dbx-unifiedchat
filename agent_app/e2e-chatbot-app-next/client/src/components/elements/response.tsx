@@ -207,8 +207,18 @@ function JsonCodeBlock({ json, filename, b64 }: { json: string; filename: string
 }
 
 function EChartsCodeBlock(props: Record<string, unknown>) {
-  const { className } = props as { className?: string };
+  const { className, inline, node } = props as { className?: string; inline?: boolean; node?: any };
   const children = typeof props.children === 'string' ? props.children : undefined;
+
+  const isInline = inline || (node?.position?.start?.line === node?.position?.end?.line);
+
+  if (isInline) {
+    return (
+      <code className={`rounded bg-muted px-1.5 py-0.5 font-mono text-sm ${className || ''}`} data-streamdown="inline-code">
+        {props.children as ReactNode}
+      </code>
+    );
+  }
 
   if (className === 'language-echarts-chart' && children) {
     const spec = parseChartSpec(children);
