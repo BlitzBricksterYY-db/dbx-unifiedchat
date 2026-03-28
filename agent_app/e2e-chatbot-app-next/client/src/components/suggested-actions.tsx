@@ -14,7 +14,9 @@ interface SuggestedActionsProps {
 function PureSuggestedActions({ chatId, sendMessage }: SuggestedActionsProps) {
   const suggestedActions = [
     'How can you help me?',
-    'Tell me something I might not know',
+    'What data sources are available?',
+    'What cross-domain analyses can you do?',
+    'Give me 10 example questions, 5 simple and 5 complex.'
   ];
 
   return (

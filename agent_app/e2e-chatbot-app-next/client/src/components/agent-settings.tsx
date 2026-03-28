@@ -235,14 +235,14 @@ export function AgentSettingsPanel({
               </span>
             </div>
             <p className="mt-0.5 text-[10px] text-zinc-400">
-              Sequential feeds each result into the next query
+              Sequential feeds last query result into the next query generation
             </p>
           </div>
 
           {/* Synthesis route selector */}
           <div>
             <label className="mb-1 block text-xs text-zinc-500 dark:text-zinc-400">
-              Synthesis Route
+              SQL Synthesis Agent Route
             </label>
             <div className="flex rounded-md border border-zinc-200 dark:border-zinc-700">
               {(
