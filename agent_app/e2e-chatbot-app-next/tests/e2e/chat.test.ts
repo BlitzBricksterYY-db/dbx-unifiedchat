@@ -372,6 +372,97 @@ test.describe('Agent Settings', () => {
     });
   });
 
+  test('should preserve welcome-screen settings across a clarification follow-up', async ({
+    adaContext,
+  }) => {
+    test.setTimeout(60_000);
+
+    const { page } = adaContext;
+    const chatPage = new ChatPage(page);
+    const requests: Array<{
+      id: string;
+      messageText?: string;
+      agentSettings: {
+        executionMode: 'parallel' | 'sequential';
+        synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+        clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
+      };
+    }> = [];
+
+    await page.route('**/api/chat', async (route) => {
+      const body = route.request().postDataJSON() as {
+        id: string;
+        message?: {
+          parts?: Array<{ type?: string; text?: string }>;
+        };
+        agentSettings?: {
+          executionMode: 'parallel' | 'sequential';
+          synthesisRoute: 'auto' | 'table_route' | 'genie_route';
+          clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
+        };
+      };
+
+      expect(body.agentSettings).toBeDefined();
+
+      const messageText = body.message?.parts?.find(
+        (part) => part.type === 'text',
+      )?.text;
+
+      requests.push({
+        id: body.id,
+        messageText,
+        agentSettings: body.agentSettings!,
+      });
+
+      const responseText =
+        requests.length === 1
+          ? '### Clarification Needed\n\nWhich member trend do you want by month?'
+          : 'Settings preserved after clarification.';
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: buildUiMessageStream([responseText]),
+      });
+    });
+
+    await chatPage.createNewChat();
+    await page.getByTestId('agent-settings-trigger').click();
+    await page.getByTestId('synthesis-route-table_route').click();
+    await page.getByTestId('clarification-sensitivity-slider').fill('4');
+    await page.getByTestId('agent-settings-confirm').click();
+
+    await chatPage.sendUserMessage('show member trend');
+    await expect.poll(() => requests.length).toBe(1);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toEqual({
+      id: requests[0]!.id,
+      messageText: 'show member trend',
+      agentSettings: {
+        executionMode: 'parallel',
+        synthesisRoute: 'table_route',
+        clarificationSensitivity: 'on',
+      },
+    });
+
+    const firstRequestId = requests[0]!.id;
+
+    await chatPage.sendUserMessage('monthly for 2024');
+    await expect.poll(() => requests.length).toBe(2);
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toEqual({
+      id: firstRequestId,
+      messageText: 'monthly for 2024',
+      agentSettings: {
+        executionMode: 'parallel',
+        synthesisRoute: 'table_route',
+        clarificationSensitivity: 'on',
+      },
+    });
+  });
+
   test('should isolate settings across multiple open tabs', async ({
     adaContext,
   }) => {

@@ -33,6 +33,9 @@ MANIFEST
 htmlcov/
 .tox/
 .hypothesis/
+**/test-results/**
+**/tests/**
+**/playwright-report/**
 
 # IDEs
 .vscode/

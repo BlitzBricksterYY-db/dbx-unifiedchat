@@ -362,7 +362,14 @@ Guidelines:
                         hasattr(t, "interrupts") and t.interrupts for t in existing_state.tasks
                     ):
                         logger.info(f"Resuming from interrupt on thread {thread_id}")
-                        input_data = Command(resume=latest_query)
+                        input_data = Command(
+                            resume=latest_query,
+                            update={
+                                "execution_mode": execution_mode,
+                                "force_synthesis_route": force_synthesis_route,
+                                "clarification_sensitivity": clarification_sensitivity,
+                            },
+                        )
                     else:
                         input_data = initial_state
 

@@ -494,11 +494,11 @@ Use ## headings, **bold** keywords, and bullet lists. Be professional and helpfu
         return {
             "current_turn": turn,
             "question_clear": True,
-            # Preserve the clarification prompt in message history so traces show
+            # Preserve or not the clarification prompt in message history so traces show
             # the assistant turn that led to the user's follow-up response.
             "messages": [
-                AIMessage(content=markdown.strip()),
-                HumanMessage(content=user_response),
+                #AIMessage(content=markdown.strip()),
+                HumanMessage(content=user_response)
             ],
         }
 

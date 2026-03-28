@@ -479,6 +479,8 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
         if user_id:
             run_config["configurable"]["user_id"] = user_id
 
+        execution_mode = ci.get("execution_mode", "parallel")
+        force_synthesis_route = ci.get("force_synthesis_route", "auto")
         clarification_sensitivity = ci.get("clarification_sensitivity", "medium")
         
         # SIMPLIFIED: Unified state initialization for all scenarios
@@ -487,6 +489,8 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
         initial_state = {
             **RESET_STATE_TEMPLATE,  # Reset all per-query execution fields
             "original_query": latest_query,
+            "execution_mode": execution_mode,
+            "force_synthesis_route": force_synthesis_route,
             "clarification_sensitivity": clarification_sensitivity,
             "messages": [
                 SystemMessage(content="""You are a multi-agent Q&A analysis system.
@@ -512,7 +516,7 @@ Guidelines:
         
         first_message = True
         seen_ids = set()
-    seen_content_events: set[tuple[str, str]] = set()
+        seen_content_events: set[tuple[str, str]] = set()
         
         # Execute workflow with CheckpointSaver for distributed serving
         # CRITICAL: CheckpointSaver as context manager ensures all instances share state
@@ -531,7 +535,14 @@ Guidelines:
                 hasattr(t, "interrupts") and t.interrupts for t in existing_state.tasks
             ):
                 logger.info(f"Resuming from interrupt on thread {thread_id}")
-                input_data = Command(resume=latest_query)
+                input_data = Command(
+                    resume=latest_query,
+                    update={
+                        "execution_mode": execution_mode,
+                        "force_synthesis_route": force_synthesis_route,
+                        "clarification_sensitivity": clarification_sensitivity,
+                    },
+                )
             else:
                 input_data = initial_state
 
