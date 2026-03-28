@@ -12,7 +12,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from mlflow.entities import SpanType
 
-from ..core.state import AgentState, GraphInput
+from ..core.state import AgentState
 from ..agents.clarification import ClarificationAgent
 from ..agents.planning import planning_node
 from ..agents.sql_synthesis import sql_synthesis_table_node, sql_synthesis_genie_node
@@ -137,7 +137,7 @@ def create_super_agent_hybrid(config=None) -> StateGraph:
     print("BUILDING HYBRID SUPER AGENT WORKFLOW")
     print("="*80)
 
-    workflow = StateGraph(AgentState, input=GraphInput)
+    workflow = StateGraph(AgentState)
 
     workflow.add_node(
         "unified_intent_context_clarification",

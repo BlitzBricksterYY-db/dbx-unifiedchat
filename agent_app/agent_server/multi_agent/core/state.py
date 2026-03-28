@@ -39,9 +39,60 @@ class QueryExecutionResult(TypedDict, total=False):
     row_grain_hint: Optional[str]
 
 
-class GraphInput(TypedDict):
-    """Minimal input schema exposed to LangGraph Studio / API callers."""
+class GraphInput(TypedDict, total=False):
+    """Entry schema for fresh-turn state passed into the parent LangGraph.
+
+    This mirrors the keys populated in the serving layer's ``initial_state`` so
+    LangGraph does not drop UI/runtime overrides before the unified
+    clarification subgraph runs.
+    """
+
+    # Core conversation input
     messages: Annotated[List[Any], operator.add]
+    original_query: Optional[str]
+    user_id: Optional[str]
+    thread_id: Optional[str]
+
+    # UI/runtime overrides
+    execution_mode: Optional[str]
+    force_synthesis_route: Optional[str]
+    clarification_sensitivity: Optional[str]
+
+    # Fresh-turn per-query state reset fields
+    question_clear: bool
+    is_meta_question: Optional[bool]
+    meta_answer: Optional[str]
+    is_irrelevant: Optional[bool]
+    plan: Optional[Dict[str, Any]]
+    sub_questions: Optional[List[str]]
+    requires_multiple_spaces: Optional[bool]
+    relevant_space_ids: Optional[List[str]]
+    relevant_spaces: Optional[List[Dict[str, Any]]]
+    vector_search_relevant_spaces_info: Optional[List[Dict[str, str]]]
+    requires_join: Optional[bool]
+    join_strategy: Optional[str]
+    execution_plan: Optional[str]
+    genie_route_plan: Optional[Dict[str, str]]
+    sql_query: Optional[str]
+    sql_queries: Optional[List[str]]
+    sql_query_labels: Optional[List[str]]
+    sql_synthesis_explanation: Optional[str]
+    sql_synthesis_explanations: Optional[List[Dict[str, Any]]]
+    synthesis_error: Optional[str]
+    has_sql: Optional[bool]
+    execution_result: Optional[QueryExecutionResult]
+    execution_results: Optional[List[QueryExecutionResult]]
+    execution_error: Optional[str]
+    final_summary: Optional[str]
+    next_agent: Optional[str]
+    sql_retry_count: Optional[int]
+    sql_retry_max: Optional[int]
+    sql_retry_feedback: Optional[str]
+    loop_reason: Optional[str]
+    preserved_results: Optional[List[QueryExecutionResult]]
+    sequential_step: Optional[int]
+    total_sub_questions: Optional[int]
+    join_strategy_route: Optional[str]
 
 
 class AgentState(TypedDict):
