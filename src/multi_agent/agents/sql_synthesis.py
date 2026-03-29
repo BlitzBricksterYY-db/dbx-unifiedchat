@@ -293,12 +293,6 @@ def sql_synthesis_table_node(state: AgentState) -> dict:
         # Extract all SQL queries using helper function
         sql_queries, query_labels = extract_sql_queries_from_agent_result(result, "sql_synthesis_table")
 
-        # If count_only mode, wrap each query to return only counts
-        if state.get("count_only") and sql_queries:
-            print("🔢 Count-only mode: wrapping queries with SELECT COUNT(*)")
-            sql_queries = [f"SELECT COUNT(*) AS count FROM ({q})" for q in sql_queries]
-            writer({"type": "agent_thinking", "agent": "sql_synthesis_table", "content": "🔢 Count-only mode enabled — wrapping queries to return row counts only"})
-
         if sql_queries:
             # Multi-query support
             print(f"✓ Extracted {len(sql_queries)} SQL quer{'y' if len(sql_queries) == 1 else 'ies'}")
@@ -453,12 +447,6 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
         
         # Extract all SQL queries using helper function
         sql_queries, query_labels = extract_sql_queries_from_agent_result(result, "sql_synthesis_genie")
-
-        # If count_only mode, wrap each query to return only counts
-        if state.get("count_only") and sql_queries:
-            print("🔢 Count-only mode: wrapping queries with SELECT COUNT(*)")
-            sql_queries = [f"SELECT COUNT(*) AS count FROM ({q})" for q in sql_queries]
-            writer({"type": "agent_thinking", "agent": "sql_synthesis_genie", "content": "🔢 Count-only mode enabled — wrapping queries to return row counts only"})
 
         if sql_queries:
             # Multi-query support

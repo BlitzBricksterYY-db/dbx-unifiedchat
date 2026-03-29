@@ -25,6 +25,19 @@ from .state import RESET_STATE_TEMPLATE
 
 logger = logging.getLogger(__name__)
 
+PRIVACY_QUERY_POSTFIX = (
+    " ALWAYS REPORT PATIENT COUNT ONLY "
+    "(NEVER REVEAL PATIENT-LEVEL DATA TO AVOID PII LEAKAGE)"
+)
+
+
+def _append_privacy_query_postfix(query: str, enabled: bool) -> str:
+    if not enabled or not query:
+        return query
+    if query.endswith(PRIVACY_QUERY_POSTFIX):
+        return query
+    return f"{query}{PRIVACY_QUERY_POSTFIX}"
+
 #########################################################
 """
 Load configuration via ModelConfig.
@@ -484,6 +497,7 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
         force_synthesis_route = ci.get("force_synthesis_route", "auto")
         clarification_sensitivity = ci.get("clarification_sensitivity", "medium")
         count_only = ci.get("count_only", False)
+        latest_query = _append_privacy_query_postfix(latest_query, count_only)
         
         # SIMPLIFIED: Unified state initialization for all scenarios
         # CheckpointSaver will restore previous conversation context automatically

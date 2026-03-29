@@ -374,7 +374,7 @@ export function AgentSettingsPanel({
               </span>
             </div>
             <p className="mt-0.5 text-[10px] text-zinc-400">
-              Return only row counts, no data columns
+              Adds a privacy instruction to avoid patient-level data and only report patient counts
             </p>
           </div>
 
