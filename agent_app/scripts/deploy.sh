@@ -63,12 +63,40 @@ echo "  Target  : $TARGET"
 echo "  Profile : ${PROFILE:-<default>}"
 echo
 
-# Resolve the Lakebase instance name from resources/database.yml.
-# The YAML uses ${bundle.target} which awk can't resolve, so we substitute
-# the shell $TARGET variable ourselves.
-LAKEBASE_INSTANCE_NAME=$(awk '
-  /name:.*multi-agent-genie-system-state-db/ {gsub(/.*name:[[:space:]]*/, ""); print; exit}
-' resources/database.yml 2>/dev/null | sed "s/\${bundle.target}/${TARGET}/g" || true)
+resolve_bundle_var() {
+  local var_name="$1"
+  python - "$TARGET" "$var_name" <<'PY'
+import pathlib
+import sys
+
+import yaml
+
+target = sys.argv[1]
+var_name = sys.argv[2]
+
+config = yaml.safe_load(pathlib.Path("databricks.yml").read_text()) or {}
+variables = config.get("variables", {})
+target_variables = ((config.get("targets") or {}).get(target) or {}).get("variables", {})
+
+value = target_variables.get(var_name)
+if value is None:
+    value = (variables.get(var_name) or {}).get("default")
+
+if value is None:
+    raise SystemExit(0)
+
+if isinstance(value, str):
+    value = value.replace("${bundle.target}", target)
+
+print(value)
+PY
+}
+
+LAKEBASE_INSTANCE_NAME="$(resolve_bundle_var lakebase_instance_name || true)"
+CATALOG_NAME="$(resolve_bundle_var catalog || true)"
+SCHEMA_NAME="$(resolve_bundle_var schema || true)"
+DATA_CATALOG_NAME="$(resolve_bundle_var data_catalog || true)"
+DATA_SCHEMA_NAME="$(resolve_bundle_var data_schema || true)"
 
 bootstrap_lakebase_role() {
   if [[ -z "${LAKEBASE_INSTANCE_NAME:-}" ]]; then
@@ -80,12 +108,21 @@ bootstrap_lakebase_role() {
   fi
 
   echo "Bootstrapping Lakebase role for existing app in $LAKEBASE_INSTANCE_NAME..."
+  GRANT_ARGS=()
+  if [[ -n "${CATALOG_NAME:-}" && -n "${SCHEMA_NAME:-}" ]]; then
+    GRANT_ARGS+=(--catalog-name "$CATALOG_NAME" --schema-name "$SCHEMA_NAME")
+  fi
+  if [[ -n "${DATA_CATALOG_NAME:-}" && -n "${DATA_SCHEMA_NAME:-}" ]]; then
+    GRANT_ARGS+=(--data-catalog-name "$DATA_CATALOG_NAME" --data-schema-name "$DATA_SCHEMA_NAME")
+  fi
+
   for memory_type in langgraph-short-term langgraph-long-term; do
     uv run python scripts/grant_lakebase_permissions.py \
       --app-name "$APP_NAME" \
       --profile "${PROFILE:-}" \
       --memory-type "$memory_type" \
-      --instance-name "$LAKEBASE_INSTANCE_NAME"
+      --instance-name "$LAKEBASE_INSTANCE_NAME" \
+      "${GRANT_ARGS[@]}"
   done
   echo "✅ Lakebase role bootstrap complete"
   echo
