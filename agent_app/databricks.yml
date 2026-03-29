@@ -24,7 +24,7 @@ resources:
 
   database_instances:
     app_state_db:
-      name: app-multi-agent-genie-system-state-db
+      name: multi-agent-genie-system-state-db
       capacity: CU_1
 
   apps:
@@ -78,7 +78,7 @@ resources:
           - name: GENIE_SPACE_IDS
             value: "01f11b27d1121e2bb00d6ecd846b1988,01f11b27d23a1ab195fa7ba8efc06d13,01f11b27d3ea149694cf608c3d278673"
           - name: LAKEBASE_INSTANCE_NAME
-            value: "app-multi-agent-genie-system-state-db"
+            value: "multi-agent-genie-system-state-db"
           - name: LAKEBASE_EMBEDDING_ENDPOINT
             value: "databricks-gte-large-en"
           - name: LAKEBASE_EMBEDDING_DIMS
