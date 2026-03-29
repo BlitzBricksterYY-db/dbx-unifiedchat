@@ -22,29 +22,62 @@ CHATBOT_DIR = Path("e2e-chatbot-app-next")
 GRANT_SCRIPT = Path("scripts/grant_lakebase_permissions.py")
 
 
-def _run(cmd, *, cwd=None, label="command"):
-    """Run a command, stream output, and exit on failure."""
+def _run(cmd, *, cwd=None, label="command", check=True):
+    """Run a command, stream output, and optionally exit on failure."""
     result = subprocess.run(cmd, cwd=cwd)
-    if result.returncode != 0:
+    if check and result.returncode != 0:
         print(f"ERROR: {label} exited with code {result.returncode}")
         sys.exit(result.returncode)
+    return result.returncode
 
 
 def grant_lakebase_permissions():
-    """Bootstrap Lakebase roles for the app service principal (in-app only)."""
+    """Bootstrap Lakebase roles for the app service principal (best effort)."""
     app_name = os.environ.get("DATABRICKS_APP_NAME")
     instance_name = os.environ.get("LAKEBASE_INSTANCE_NAME")
     if not app_name or not instance_name or not GRANT_SCRIPT.exists():
         return
 
-    for memory_type in ("langgraph-short-term", "langgraph-long-term"):
-        _run(
-            ["uv", "run", "python", str(GRANT_SCRIPT),
-             "--app-name", app_name,
-             "--memory-type", memory_type,
-             "--instance-name", instance_name],
-            label=f"Lakebase grant ({memory_type})",
+    extra_args = []
+    catalog_name = os.environ.get("CATALOG_NAME")
+    schema_name = os.environ.get("SCHEMA_NAME")
+    data_catalog_name = os.environ.get("DATA_CATALOG_NAME")
+    data_schema_name = os.environ.get("DATA_SCHEMA_NAME")
+    if catalog_name and schema_name:
+        extra_args.extend(["--catalog-name", catalog_name, "--schema-name", schema_name])
+    if data_catalog_name and data_schema_name:
+        extra_args.extend(
+            [
+                "--data-catalog-name",
+                data_catalog_name,
+                "--data-schema-name",
+                data_schema_name,
+            ]
         )
+
+    for memory_type in ("langgraph-short-term", "langgraph-long-term"):
+        rc = _run(
+            [
+                "uv",
+                "run",
+                "python",
+                str(GRANT_SCRIPT),
+                "--app-name",
+                app_name,
+                "--memory-type",
+                memory_type,
+                "--instance-name",
+                instance_name,
+                *extra_args,
+            ],
+            label=f"Lakebase grant ({memory_type})",
+            check=False,
+        )
+        if rc != 0:
+            print(
+                f"WARNING: Lakebase grant ({memory_type}) did not complete during "
+                "startup; continuing so the app can finish booting."
+            )
 
 
 def run_database_migrations():

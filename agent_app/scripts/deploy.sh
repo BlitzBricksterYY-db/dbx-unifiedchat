@@ -99,6 +99,9 @@ DATA_CATALOG_NAME="$(resolve_bundle_var data_catalog || true)"
 DATA_SCHEMA_NAME="$(resolve_bundle_var data_schema || true)"
 
 bootstrap_lakebase_role() {
+  local phase="${1:-bootstrap}"
+  local fail_ok="${2:-false}"
+
   if [[ -z "${LAKEBASE_INSTANCE_NAME:-}" ]]; then
     return
   fi
@@ -107,24 +110,32 @@ bootstrap_lakebase_role() {
     return
   fi
 
-  echo "Bootstrapping Lakebase role for existing app in $LAKEBASE_INSTANCE_NAME..."
-  GRANT_ARGS=()
+  echo "Bootstrapping Lakebase role (${phase}) in $LAKEBASE_INSTANCE_NAME..."
+  local grant_args=()
   if [[ -n "${CATALOG_NAME:-}" && -n "${SCHEMA_NAME:-}" ]]; then
-    GRANT_ARGS+=(--catalog-name "$CATALOG_NAME" --schema-name "$SCHEMA_NAME")
+    grant_args+=(--catalog-name "$CATALOG_NAME" --schema-name "$SCHEMA_NAME")
   fi
   if [[ -n "${DATA_CATALOG_NAME:-}" && -n "${DATA_SCHEMA_NAME:-}" ]]; then
-    GRANT_ARGS+=(--data-catalog-name "$DATA_CATALOG_NAME" --data-schema-name "$DATA_SCHEMA_NAME")
+    grant_args+=(--data-catalog-name "$DATA_CATALOG_NAME" --data-schema-name "$DATA_SCHEMA_NAME")
   fi
 
   for memory_type in langgraph-short-term langgraph-long-term; do
-    uv run python scripts/grant_lakebase_permissions.py \
+    if uv run python scripts/grant_lakebase_permissions.py \
       --app-name "$APP_NAME" \
       --profile "${PROFILE:-}" \
       --memory-type "$memory_type" \
       --instance-name "$LAKEBASE_INSTANCE_NAME" \
-      "${GRANT_ARGS[@]}"
+      "${grant_args[@]}"; then
+      continue
+    fi
+
+    if [[ "$fail_ok" == "true" ]]; then
+      echo "WARNING: Lakebase bootstrap (${phase}, ${memory_type}) failed; continuing."
+    else
+      return 1
+    fi
   done
-  echo "✅ Lakebase role bootstrap complete"
+  echo "✅ Lakebase role bootstrap complete (${phase})"
   echo
 }
 
@@ -140,12 +151,17 @@ fi
 # instance before moving the app's database resource. Databricks updates
 # database privileges across instances, but does not recreate the Postgres role
 # during the same app update.
-bootstrap_lakebase_role
+bootstrap_lakebase_role "pre-deploy"
 
 # Deploy
 echo "Deploying bundle (target: $TARGET)..."
 databricks bundle deploy -t "$TARGET" "${PROFILE_ARGS[@]}"
 echo "✅ Deploy complete"
+echo
+
+# Brand-new workspaces only have an app/SP after the first deploy, so retry the
+# bootstrap immediately after deployment as well.
+bootstrap_lakebase_role "post-deploy" true
 
 # Optional: run (start) the app
 if [[ "$RUN_AFTER" == true ]]; then
@@ -153,6 +169,8 @@ if [[ "$RUN_AFTER" == true ]]; then
   echo "Starting app ($BUNDLE_APP_KEY)..."
   databricks bundle run "$BUNDLE_APP_KEY" -t "$TARGET" "${PROFILE_ARGS[@]}"
   echo "✅ App started"
+  echo
+  bootstrap_lakebase_role "post-run" true
 fi
 
 echo
