@@ -1,5 +1,5 @@
 resources:
   database_instances:
     app_state_db:
-      name: multi-agent-genie-system-state-db-${bundle.target}
+      name: ${var.lakebase_instance_name}
       capacity: ${var.lakebase_capacity}

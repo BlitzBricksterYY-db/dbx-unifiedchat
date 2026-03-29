@@ -10,12 +10,18 @@ variables:
     default: "serverless_dbx_unifiedchat_dev_catalog"
   schema:
     default: "multi_agent_genie"
+  data_catalog:
+    default: "healthverity_claims_sample_patient_dataset_dev"
+  data_schema:
+    default: "hv_claims_sample"
 
   # SQL warehouse
   warehouse_id:
     default: "32f4d1aae5fcf8ca"
 
   # Lakebase
+  lakebase_instance_name:
+    default: "multi-agent-genie-system-state-db-${bundle.target}"
   lakebase_capacity:
     default: "CU_1"
 

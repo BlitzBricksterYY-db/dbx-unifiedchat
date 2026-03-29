@@ -1,7 +1,8 @@
-"""Grant Lakebase Postgres permissions to a Databricks Apps service principal.
+"""Grant Lakebase and Unity Catalog permissions to a Databricks Apps service principal.
 
-After deploying the app, run this script to grant the app's SP access to all
-Lakebase schemas and tables used by the agent's memory.
+After deploying the app, run this script to grant the app's SP access to the
+Lakebase schemas/tables used by the agent's memory, plus the Unity Catalog
+catalog/schema that contain the app's data assets.
 
 Usage:
     # Provisioned instance:
@@ -147,9 +148,50 @@ def resolve_app_sp_client_id(app_name: str, profile: str | None) -> str:
     return sp_client_id
 
 
+def grant_uc_permissions(
+    workspace_client,
+    grantee: str,
+    catalog_name: str,
+    schema_name: str,
+    uc_catalog,
+    schema_privileges,
+) -> None:
+    schema_full_name = f"{catalog_name}.{schema_name}"
+    grants = [
+        (
+            "catalog",
+            uc_catalog.SecurableType.CATALOG,
+            catalog_name,
+            [uc_catalog.Privilege.USE_CATALOG],
+        ),
+        (
+            "schema",
+            uc_catalog.SecurableType.SCHEMA,
+            schema_full_name,
+            schema_privileges,
+        ),
+    ]
+
+    for label, securable_type, full_name, privileges in grants:
+        print(f"Granting Unity Catalog {label} privileges on '{full_name}'...")
+        try:
+            workspace_client.grants.update(
+                securable_type=securable_type,
+                full_name=full_name,
+                changes=[
+                    uc_catalog.PermissionsChange(
+                        add=privileges,
+                        principal=grantee,
+                    )
+                ],
+            )
+        except Exception as e:
+            print(f"  Warning: Unity Catalog {label} grant failed: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Grant Lakebase permissions to an app service principal."
+        description="Grant Lakebase and Unity Catalog permissions to an app service principal."
     )
     parser.add_argument(
         "sp_client_id",
@@ -168,6 +210,30 @@ def main():
         default=os.getenv("DATABRICKS_CONFIG_PROFILE"),
         help="Databricks CLI profile to use when resolving --app-name "
         "(default: DATABRICKS_CONFIG_PROFILE from .env)",
+    )
+    parser.add_argument(
+        "--catalog-name",
+        default=os.getenv("CATALOG_NAME"),
+        help="Unity Catalog catalog name for app data access "
+        "(default: CATALOG_NAME from .env)",
+    )
+    parser.add_argument(
+        "--schema-name",
+        default=os.getenv("SCHEMA_NAME"),
+        help="Unity Catalog schema name for app data access "
+        "(default: SCHEMA_NAME from .env)",
+    )
+    parser.add_argument(
+        "--data-catalog-name",
+        default=os.getenv("DATA_CATALOG_NAME"),
+        help="Optional second Unity Catalog catalog name for source data access "
+        "(default: DATA_CATALOG_NAME from .env)",
+    )
+    parser.add_argument(
+        "--data-schema-name",
+        default=os.getenv("DATA_SCHEMA_NAME"),
+        help="Optional second Unity Catalog schema name for source data access "
+        "(default: DATA_SCHEMA_NAME from .env)",
     )
     parser.add_argument(
         "--memory-type",
@@ -213,12 +279,32 @@ def main():
         )
         sys.exit(1)
 
+    if bool(args.catalog_name) != bool(args.schema_name):
+        print(
+            "Error: provide both Unity Catalog values together:\n"
+            "  --catalog-name <catalog> --schema-name <schema>\n"
+            "or omit both to skip Unity Catalog grants.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if bool(args.data_catalog_name) != bool(args.data_schema_name):
+        print(
+            "Error: provide both source-data Unity Catalog values together:\n"
+            "  --data-catalog-name <catalog> --data-schema-name <schema>\n"
+            "or omit both to skip source-data UC grants.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     from databricks_ai_bridge.lakebase import (
         LakebaseClient,
         SchemaPrivilege,
         SequencePrivilege,
         TablePrivilege,
     )
+    from databricks.sdk import WorkspaceClient
+    from databricks.sdk.service import catalog as uc_catalog
 
     client = LakebaseClient(
         instance_name=args.instance_name or None,
@@ -239,6 +325,15 @@ def main():
     else:
         print(f"Using autoscaling project: {args.project}, branch: {args.branch}")
     print(f"Memory type: {memory_type}")
+    if args.catalog_name and args.schema_name:
+        print(f"Unity Catalog target: {args.catalog_name}.{args.schema_name}")
+    else:
+        print("Unity Catalog target: not provided, skipping UC grants")
+    if args.data_catalog_name and args.data_schema_name:
+        print(
+            f"Source data Unity Catalog target: "
+            f"{args.data_catalog_name}.{args.data_schema_name}"
+        )
 
     # Build schema -> tables map for the selected memory type
     schema_tables: dict[str, list[str]] = {
@@ -329,6 +424,49 @@ def main():
                     client, sp_id, s, sequence_privileges
                 ),
                 label="sequence",
+            )
+
+    if (
+        (args.catalog_name and args.schema_name)
+        or (args.data_catalog_name and args.data_schema_name)
+    ):
+        workspace_client = (
+            WorkspaceClient(profile=args.profile) if args.profile else WorkspaceClient()
+        )
+    else:
+        workspace_client = None
+
+    if args.catalog_name and args.schema_name:
+        grant_uc_permissions(
+            workspace_client=workspace_client,
+            grantee=sp_id,
+            catalog_name=args.catalog_name,
+            schema_name=args.schema_name,
+            uc_catalog=uc_catalog,
+            schema_privileges=[
+                uc_catalog.Privilege.USE_SCHEMA,
+                uc_catalog.Privilege.SELECT,
+                uc_catalog.Privilege.EXECUTE,
+            ],
+        )
+
+    if args.data_catalog_name and args.data_schema_name:
+        if (
+            args.data_catalog_name == args.catalog_name
+            and args.data_schema_name == args.schema_name
+        ):
+            print("Source data Unity Catalog target matches primary target, skipping.")
+        else:
+            grant_uc_permissions(
+                workspace_client=workspace_client,
+                grantee=sp_id,
+                catalog_name=args.data_catalog_name,
+                schema_name=args.data_schema_name,
+                uc_catalog=uc_catalog,
+                schema_privileges=[
+                    uc_catalog.Privilege.USE_SCHEMA,
+                    uc_catalog.Privilege.SELECT,
+                ],
             )
 
     print(

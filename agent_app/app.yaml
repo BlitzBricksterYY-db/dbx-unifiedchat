@@ -18,6 +18,10 @@ env:
     value: "serverless_dbx_unifiedchat_dev_catalog"
   - name: SCHEMA_NAME
     value: "multi_agent_genie"
+  - name: DATA_CATALOG_NAME
+    value: "healthverity_claims_sample_patient_dataset_dev"
+  - name: DATA_SCHEMA_NAME
+    value: "hv_claims_sample"
   - name: UC_FUNCTION_NAMES
     value: "get_space_summary,get_table_overview,get_column_detail,get_space_instructions,get_space_details"
   - name: LLM_ENDPOINT
