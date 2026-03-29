@@ -1,227 +1,77 @@
 bundle:
-  name: multi_agent_genie_app_dev
+  name: multi_agent_genie_app
 
-resources:
-  schemas:
-    multi_agent_genie_schema:
-      name: multi_agent_genie
-      catalog_name: serverless_dbx_unifiedchat_dev_catalog
-      grants:
-        - principal: "16a587d9-78e1-427b-a28b-a7636fd3d7dc"
-          privileges:
-            - USE_SCHEMA
-            - SELECT
-            - EXECUTE
-      lifecycle:
-        prevent_destroy: true
+include:
+  - resources/*.yml
 
-    # healthverity_claims_sample_patient_dataset_dev is a Delta Sharing catalog (read-only),
-    # schema grants must be applied manually by the catalog owner:
-    #   GRANT USE_SCHEMA ON SCHEMA healthverity_claims_sample_patient_dataset_dev.hv_claims_sample
-    #     TO `16a587d9-78e1-427b-a28b-a7636fd3d7dc`;
-    #   GRANT SELECT ON SCHEMA healthverity_claims_sample_patient_dataset_dev.hv_claims_sample
-    #     TO `16a587d9-78e1-427b-a28b-a7636fd3d7dc`;
+variables:
+  # Unity Catalog
+  catalog:
+    default: "serverless_dbx_unifiedchat_dev_catalog"
+  schema:
+    default: "multi_agent_genie"
 
-  database_instances:
-    app_state_db:
-      name: multi-agent-genie-system-state-db
-      capacity: CU_1
+  # SQL warehouse
+  warehouse_id:
+    default: "32f4d1aae5fcf8ca"
 
-  apps:
-    agent_migration:
-      name: "multi-agent-genie-app-dev"
-      description: "Migrated multi-agent Genie system from Model Serving to Databricks Apps"
-      source_code_path: ./
-      config:
-        command: ["uv", "run", "start-app", "--port", "9000"]
-        env:
-          - name: CHAT_PROXY_TIMEOUT_SECONDS
-            value: "300"
-          - name: CATALOG_NAME
-            value: "serverless_dbx_unifiedchat_dev_catalog"
-          - name: SCHEMA_NAME
-            value: "multi_agent_genie"
-          - name: UC_FUNCTION_NAMES
-            value: "get_space_summary,get_table_overview,get_column_detail,get_space_instructions,get_space_details"
-          - name: LLM_ENDPOINT
-            value: "databricks-claude-sonnet-4-5"
-          - name: LLM_ENDPOINT_CLARIFICATION
-            value: "databricks-claude-haiku-4-5"
-          - name: LLM_ENDPOINT_PLANNING
-            value: "databricks-claude-sonnet-4-5"
-          - name: LLM_ENDPOINT_SQL_SYNTHESIS_TABLE
-            value: "databricks-claude-sonnet-4-5"
-          - name: LLM_ENDPOINT_SQL_SYNTHESIS_GENIE
-            value: "databricks-claude-sonnet-4-5"
-          - name: LLM_ENDPOINT_EXECUTION
-            value: "databricks-claude-haiku-4-5"
-          - name: LLM_ENDPOINT_SUMMARIZE
-            value: "databricks-gpt-5-4"
-          - name: LLM_ENDPOINT_DETECT_CODE_LOOKUP
-            value: "databricks-gpt-5-4-mini"
-          - name: EMBEDDING_MODEL
-            value: "databricks-gte-large-en"
-          - name: VS_ENDPOINT_NAME
-            value: "genie_multi_agent_vs"
-          - name: SAMPLE_SIZE
-            value: "20"
-          - name: MAX_UNIQUE_VALUES
-            value: "20"
-          - name: VOLUME_NAME
-            value: "volume"
-          - name: ENRICHED_DOCS_TABLE
-            value: "enriched_genie_docs"
-          - name: SOURCE_TABLE
-            value: "enriched_genie_docs_chunks"
-          - name: SQL_WAREHOUSE_ID
-            value: "32f4d1aae5fcf8ca"
-          - name: GENIE_SPACE_IDS
-            value: "01f11b27d1121e2bb00d6ecd846b1988,01f11b27d23a1ab195fa7ba8efc06d13,01f11b27d3ea149694cf608c3d278673"
-          - name: LAKEBASE_INSTANCE_NAME
-            value: "multi-agent-genie-system-state-db"
-          - name: LAKEBASE_EMBEDDING_ENDPOINT
-            value: "databricks-gte-large-en"
-          - name: LAKEBASE_EMBEDDING_DIMS
-            value: "1024"
-          - name: MLFLOW_EXPERIMENT_ID
-            value_from: experiment
-          - name: MLFLOW_TRACKING_URI
-            value: "databricks"
-          - name: MLFLOW_REGISTRY_URI
-            value: "databricks-uc"
+  # Lakebase
+  lakebase_capacity:
+    default: "CU_1"
 
-      resources:
-        # Artifact location on UC Volume so trace uploads go through the workspace
-        # Files API (reachable from App container), not the blob storage proxy
-        # (us-east-1.storage.cloud.databricks.com, which App containers cannot reach).
-        - name: 'experiment'
-          experiment:
-            experiment_id: "4357851413903846"
-            permission: 'CAN_MANAGE'
+  # MLflow experiment
+  experiment_id:
+    default: "4357851413903846"
 
-        # Serving endpoints (LLM)
-        - name: 'serving-endpoint-sonnet'
-          serving_endpoint:
-            name: 'databricks-claude-sonnet-4-5'
-            permission: 'CAN_QUERY'
-        - name: 'serving-endpoint-haiku'
-          serving_endpoint:
-            name: 'databricks-claude-haiku-4-5'
-            permission: 'CAN_QUERY'
-        - name: 'serving-endpoint-embedding'
-          serving_endpoint:
-            name: 'databricks-gte-large-en'
-            permission: 'CAN_QUERY'
+  # LLM endpoints
+  llm_endpoint:
+    default: "databricks-gpt-5-4-mini"
+  llm_endpoint_clarification:
+    default: "databricks-gpt-5-4-mini"
+  llm_endpoint_planning:
+    default: "databricks-claude-sonnet-4-5"
+  llm_endpoint_sql_synthesis_table:
+    default: "databricks-claude-sonnet-4-5"
+  llm_endpoint_sql_synthesis_genie:
+    default: "databricks-claude-sonnet-4-5"
+  llm_endpoint_execution:
+    default: "databricks-claude-haiku-4-5"
+  llm_endpoint_summarize:
+    default: "databricks-gpt-5-4"
+  llm_endpoint_detect_code_lookup:
+    default: "databricks-gpt-5-4-mini"
 
-        # Genie spaces
-        - name: 'genie-space-1'
-          genie_space:
-            name: 'genie-space-1'
-            space_id: '01f11b27d1121e2bb00d6ecd846b1988'
-            permission: 'CAN_RUN'
-        - name: 'genie-space-2'
-          genie_space:
-            name: 'genie-space-2'
-            space_id: '01f11b27d23a1ab195fa7ba8efc06d13'
-            permission: 'CAN_RUN'
-        - name: 'genie-space-3'
-          genie_space:
-            name: 'genie-space-3'
-            space_id: '01f11b27d3ea149694cf608c3d278673'
-            permission: 'CAN_RUN'
+  # Embedding & vector search
+  embedding_model:
+    default: "databricks-gte-large-en"
+  vs_endpoint_name:
+    default: "genie_multi_agent_vs"
 
-        # UC functions
-        - name: 'uc-fn-get-space-summary'
-          uc_securable:
-            securable_full_name: 'serverless_dbx_unifiedchat_dev_catalog.multi_agent_genie.get_space_summary'
-            securable_type: 'FUNCTION'
-            permission: 'EXECUTE'
-        - name: 'uc-fn-get-table-overview'
-          uc_securable:
-            securable_full_name: 'serverless_dbx_unifiedchat_dev_catalog.multi_agent_genie.get_table_overview'
-            securable_type: 'FUNCTION'
-            permission: 'EXECUTE'
-        - name: 'uc-fn-get-column-detail'
-          uc_securable:
-            securable_full_name: 'serverless_dbx_unifiedchat_dev_catalog.multi_agent_genie.get_column_detail'
-            securable_type: 'FUNCTION'
-            permission: 'EXECUTE'
-        - name: 'uc-fn-get-space-instructions'
-          uc_securable:
-            securable_full_name: 'serverless_dbx_unifiedchat_dev_catalog.multi_agent_genie.get_space_instructions'
-            securable_type: 'FUNCTION'
-            permission: 'EXECUTE'
-        - name: 'uc-fn-get-space-details'
-          uc_securable:
-            securable_full_name: 'serverless_dbx_unifiedchat_dev_catalog.multi_agent_genie.get_space_details'
-            securable_type: 'FUNCTION'
-            permission: 'EXECUTE'
-
-        # Lakebase (short-term + long-term memory)
-        - name: 'database'
-          database:
-            database_name: 'databricks_postgres'
-            instance_name: ${resources.database_instances.app_state_db.name}
-            permission: 'CAN_CONNECT_AND_CREATE'
-
-        # SQL warehouse
-        - name: 'sql-warehouse'
-          sql_warehouse:
-            id: '32f4d1aae5fcf8ca'
-            permission: 'CAN_USE'
-
-        # UC Volume (for trace artifacts via Files API)
-        - name: 'trace-volume'
-          uc_securable:
-            securable_full_name: 'serverless_dbx_unifiedchat_dev_catalog.multi_agent_genie.volume'
-            securable_type: 'VOLUME'
-            permission: 'WRITE_VOLUME'
-
-        # Vector search index
-        - name: 'vs-index'
-          uc_securable:
-            securable_full_name: 'serverless_dbx_unifiedchat_dev_catalog.multi_agent_genie.enriched_genie_docs_chunks_vs_index'
-            securable_type: 'TABLE'
-            permission: 'SELECT'
-
-        # Tables
-        - name: 'enriched-docs-chunks'
-          uc_securable:
-            securable_full_name: 'serverless_dbx_unifiedchat_dev_catalog.multi_agent_genie.enriched_genie_docs_chunks'
-            securable_type: 'TABLE'
-            permission: 'SELECT'
-        # - name: 'hv-diagnosis'
-        #   uc_securable:
-        #     securable_full_name: 'healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.diagnosis'
-        #     securable_type: 'TABLE'
-        #     permission: 'SELECT'
-        # - name: 'hv-enrollment'
-        #   uc_securable:
-        #     securable_full_name: 'healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.enrollment'
-        #     securable_type: 'TABLE'
-        #     permission: 'SELECT'
-        # - name: 'hv-medical-claim'
-        #   uc_securable:
-        #     securable_full_name: 'healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.medical_claim'
-        #     securable_type: 'TABLE'
-        #     permission: 'SELECT'
-        # - name: 'hv-pharmacy-claim'
-        #   uc_securable:
-        #     securable_full_name: 'healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.pharmacy_claim'
-        #     securable_type: 'TABLE'
-        #     permission: 'SELECT'
-        # NOTE: procedure and provider tables need manual grants after deploy:
-        #   GRANT SELECT ON TABLE healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.procedure TO `<sp-app-id>`;
-        #   GRANT SELECT ON TABLE healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.provider TO `<sp-app-id>`;
+  # Genie spaces
+  genie_space_id_1:
+    default: "01f11b27d1121e2bb00d6ecd846b1988"
+  genie_space_id_2:
+    default: "01f11b27d23a1ab195fa7ba8efc06d13"
+  genie_space_id_3:
+    default: "01f11b27d3ea149694cf608c3d278673"
+  genie_space_ids:
+    default: "01f11b27d1121e2bb00d6ecd846b1988,01f11b27d23a1ab195fa7ba8efc06d13,01f11b27d3ea149694cf608c3d278673"
 
 targets:
   dev:
-    mode: development
     default: true
+    mode: development
 
   prod:
     mode: production
-    resources:
-      apps:
-        agent_migration:
-          name: multi-agent-genie-app-dev
+    workspace:
+      root_path: /Workspace/Users/yang.yang@databricks.com/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      catalog: "serverless_dbx_unifiedchat_prod_catalog"
+      # Override these per-environment as needed:
+      # warehouse_id: "<prod-warehouse-id>"
+      # experiment_id: "<prod-experiment-id>"
+      # genie_space_id_1: "<prod-space-id>"
+      # genie_space_id_2: "<prod-space-id>"
+      # genie_space_id_3: "<prod-space-id>"
+      # genie_space_ids: "<comma-separated-prod-ids>"

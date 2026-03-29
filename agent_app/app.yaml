@@ -1,0 +1,68 @@
+# Databricks Apps runtime configuration.
+#
+# When deploying via DABs (databricks bundle deploy), the config: block in
+# resources/app.yml takes precedence over this file.  This app.yaml serves as
+# a reference for standalone CLI deployments or local development.
+
+command:
+  - "uv"
+  - "run"
+  - "start-app"
+  - "--port"
+  - "9000"
+
+env:
+  - name: CHAT_PROXY_TIMEOUT_SECONDS
+    value: "300"
+  - name: CATALOG_NAME
+    value: "serverless_dbx_unifiedchat_dev_catalog"
+  - name: SCHEMA_NAME
+    value: "multi_agent_genie"
+  - name: UC_FUNCTION_NAMES
+    value: "get_space_summary,get_table_overview,get_column_detail,get_space_instructions,get_space_details"
+  - name: LLM_ENDPOINT
+    value: "databricks-claude-sonnet-4-5"
+  - name: LLM_ENDPOINT_CLARIFICATION
+    value: "databricks-claude-haiku-4-5"
+  - name: LLM_ENDPOINT_PLANNING
+    value: "databricks-claude-sonnet-4-5"
+  - name: LLM_ENDPOINT_SQL_SYNTHESIS_TABLE
+    value: "databricks-claude-sonnet-4-5"
+  - name: LLM_ENDPOINT_SQL_SYNTHESIS_GENIE
+    value: "databricks-claude-sonnet-4-5"
+  - name: LLM_ENDPOINT_EXECUTION
+    value: "databricks-claude-haiku-4-5"
+  - name: LLM_ENDPOINT_SUMMARIZE
+    value: "databricks-gpt-5-4"
+  - name: LLM_ENDPOINT_DETECT_CODE_LOOKUP
+    value: "databricks-gpt-5-4-mini"
+  - name: EMBEDDING_MODEL
+    value: "databricks-gte-large-en"
+  - name: VS_ENDPOINT_NAME
+    value: "genie_multi_agent_vs"
+  - name: SAMPLE_SIZE
+    value: "20"
+  - name: MAX_UNIQUE_VALUES
+    value: "20"
+  - name: VOLUME_NAME
+    value: "volume"
+  - name: ENRICHED_DOCS_TABLE
+    value: "enriched_genie_docs"
+  - name: SOURCE_TABLE
+    value: "enriched_genie_docs_chunks"
+  - name: SQL_WAREHOUSE_ID
+    value: "32f4d1aae5fcf8ca"
+  - name: GENIE_SPACE_IDS
+    value: "01f11b27d1121e2bb00d6ecd846b1988,01f11b27d23a1ab195fa7ba8efc06d13,01f11b27d3ea149694cf608c3d278673"
+  - name: LAKEBASE_INSTANCE_NAME
+    valueFrom: database
+  - name: LAKEBASE_EMBEDDING_ENDPOINT
+    value: "databricks-gte-large-en"
+  - name: LAKEBASE_EMBEDDING_DIMS
+    value: "1024"
+  - name: MLFLOW_EXPERIMENT_ID
+    valueFrom: experiment
+  - name: MLFLOW_TRACKING_URI
+    value: "databricks"
+  - name: MLFLOW_REGISTRY_URI
+    value: "databricks-uc"

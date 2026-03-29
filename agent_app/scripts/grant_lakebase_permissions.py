@@ -99,6 +99,26 @@ def grant_sequences_direct(client, grantee: str, schema: str, privileges) -> Non
     )
 
 
+def _execute_grant(use_direct: bool, sdk_fn, direct_fn, label: str) -> None:
+    """Run a grant via SDK or direct SQL, with unified error handling."""
+    try:
+        if use_direct:
+            direct_fn()
+        else:
+            sdk_fn()
+    except Exception as e:
+        error_text = str(e).lower()
+        if use_direct and "role" in error_text and "does not exist" in error_text:
+            print(
+                "  Error: the app service principal role is not ready in Postgres yet.\n"
+                "  Start the Databricks App once so it connects to Lakebase, then "
+                "re-run this script.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"  Warning: {label} grant failed (may not exist yet): {e}")
+
+
 def resolve_app_sp_client_id(app_name: str, profile: str | None) -> str:
     cmd = ["databricks", "apps", "get", app_name, "--output", "json"]
     if profile:
@@ -265,45 +285,29 @@ def main():
 
     for schema, tables in schema_tables.items():
         print(f"Granting schema privileges on '{schema}'...")
-        try:
-            if use_direct_grants:
-                grant_schema_direct(client, sp_id, schema, schema_privileges)
-            else:
-                client.grant_schema(
-                    grantee=sp_id, schemas=[schema], privileges=schema_privileges
-                )
-        except Exception as e:
-            error_text = str(e).lower()
-            if use_direct_grants and ("role" in error_text and "does not exist" in error_text):
-                print(
-                    "  Error: the app service principal role is not ready in Postgres yet.\n"
-                    "  Start the Databricks App once so it connects to Lakebase, then "
-                    "re-run this script.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            print(f"  Warning: schema grant failed (may not exist yet): {e}")
+        _execute_grant(
+            use_direct_grants,
+            sdk_fn=lambda s=schema: client.grant_schema(
+                grantee=sp_id, schemas=[s], privileges=schema_privileges
+            ),
+            direct_fn=lambda s=schema: grant_schema_direct(
+                client, sp_id, s, schema_privileges
+            ),
+            label="schema",
+        )
 
         qualified_tables = [f"{schema}.{t}" for t in tables]
         print(f"  Granting table privileges on {qualified_tables}...")
-        try:
-            if use_direct_grants:
-                grant_tables_direct(client, sp_id, schema, tables, table_privileges)
-            else:
-                client.grant_table(
-                    grantee=sp_id, tables=qualified_tables, privileges=table_privileges
-                )
-        except Exception as e:
-            error_text = str(e).lower()
-            if use_direct_grants and ("role" in error_text and "does not exist" in error_text):
-                print(
-                    "  Error: the app service principal role is not ready in Postgres yet.\n"
-                    "  Start the Databricks App once so it connects to Lakebase, then "
-                    "re-run this script.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            print(f"  Warning: table grant failed (may not exist yet): {e}")
+        _execute_grant(
+            use_direct_grants,
+            sdk_fn=lambda qt=qualified_tables: client.grant_table(
+                grantee=sp_id, tables=qt, privileges=table_privileges
+            ),
+            direct_fn=lambda s=schema, t=tables: grant_tables_direct(
+                client, sp_id, s, t, table_privileges
+            ),
+            label="table",
+        )
 
     # 3. Grant sequence privileges where needed.
     sequence_schemas = set(SHARED_SEQUENCE_SCHEMAS)
@@ -316,26 +320,16 @@ def main():
         ]
         for schema in sorted(sequence_schemas):
             print(f"Granting sequence privileges on '{schema}' schema...")
-            try:
-                if use_direct_grants:
-                    grant_sequences_direct(client, sp_id, schema, sequence_privileges)
-                else:
-                    client.grant_all_sequences_in_schema(
-                        grantee=sp_id,
-                        schemas=[schema],
-                        privileges=sequence_privileges,
-                    )
-            except Exception as e:
-                error_text = str(e).lower()
-                if use_direct_grants and ("role" in error_text and "does not exist" in error_text):
-                    print(
-                        "  Error: the app service principal role is not ready in Postgres yet.\n"
-                        "  Start the Databricks App once so it connects to Lakebase, then "
-                        "re-run this script.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-                print(f"  Warning: sequence grant failed (may not exist yet): {e}")
+            _execute_grant(
+                use_direct_grants,
+                sdk_fn=lambda s=schema: client.grant_all_sequences_in_schema(
+                    grantee=sp_id, schemas=[s], privileges=sequence_privileges
+                ),
+                direct_fn=lambda s=schema: grant_sequences_direct(
+                    client, sp_id, s, sequence_privileges
+                ),
+                label="sequence",
+            )
 
     print(
         "\nPermission grants complete. If some grants failed because tables don't "

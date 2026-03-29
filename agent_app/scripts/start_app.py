@@ -1,448 +1,99 @@
 #!/usr/bin/env python3
 """
-Start script for running frontend and backend processes concurrently.
+Start script for the multi-agent Genie app.
 
-Requirements:
-1. Not reporting ready until BOTH frontend and backend processes are ready
-2. Exiting as soon as EITHER process fails
-3. Printing error logs if either process fails
+Runs the backend (AgentServer via uvicorn) and, unless --no-ui is passed,
+the Next.js chatbot frontend.  Exits when either process exits.
 
 Usage:
-    start-app [OPTIONS]
-
-All options are passed through to the backend server (start-server).
-See 'uv run start-server --help' for available options.
+    start-app [--no-ui] [--port PORT] [BACKEND_ARGS ...]
 """
 
 import argparse
 import os
-import re
-import shutil
 import signal
-import socket
 import subprocess
 import sys
-import threading
-import time
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Readiness patterns
-BACKEND_READY = [r"Uvicorn running on", r"Application startup complete", r"Started server process"]
-FRONTEND_READY = [r"Server is running on http://localhost"]
 CHATBOT_DIR = Path("e2e-chatbot-app-next")
 GRANT_SCRIPT = Path("scripts/grant_lakebase_permissions.py")
 
 
-def check_port_available(port: int) -> bool:
-    """Check if a port is available by attempting to bind to it."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("localhost", port))
-        return True
-    except OSError:
-        return False
+def _run(cmd, *, cwd=None, label="command"):
+    """Run a command, stream output, and exit on failure."""
+    result = subprocess.run(cmd, cwd=cwd)
+    if result.returncode != 0:
+        print(f"ERROR: {label} exited with code {result.returncode}")
+        sys.exit(result.returncode)
 
 
-def kill_port(port: int) -> bool:
-    """Kill processes listening on a port. Returns True if any were killed."""
-    try:
-        result = subprocess.run(
-            ["lsof", "-ti", f"tcp:{port}"],
-            capture_output=True, text=True, check=False,
-        )
-        pids = result.stdout.strip()
-        if not pids:
-            return False
-        for pid_str in pids.splitlines():
-            try:
-                os.kill(int(pid_str.strip()), signal.SIGKILL)
-            except (ProcessLookupError, ValueError):
-                pass
-        print(f"✓ Killed stale process(es) on port {port} (PID: {pids.replace(chr(10), ', ')})")
-        time.sleep(0.3)
-        return True
-    except Exception:
-        return False
+def grant_lakebase_permissions():
+    """Bootstrap Lakebase roles for the app service principal (in-app only)."""
+    app_name = os.environ.get("DATABRICKS_APP_NAME")
+    instance_name = os.environ.get("LAKEBASE_INSTANCE_NAME")
+    if not app_name or not instance_name or not GRANT_SCRIPT.exists():
+        return
 
-
-class ProcessManager:
-    def __init__(self, port=8000, no_ui=False):
-        self.backend_process = None
-        self.frontend_process = None
-        self.backend_ready = False
-        self.frontend_ready = False
-        self.failed = threading.Event()
-        self.backend_log = None
-        self.frontend_log = None
-        self.port = port
-        self.no_ui = no_ui
-        self.chatbot_dependencies_ready = False
-
-    def check_ports(self):
-        """Check that required ports are available, auto-killing stale processes."""
-        backend_port = self.port
-
-        if not check_port_available(backend_port):
-            print(f"Port {backend_port} (backend) is in use, attempting to free it...")
-            if not kill_port(backend_port) or not check_port_available(backend_port):
-                print(f"ERROR: Could not free port {backend_port} (backend).")
-                print(f"  To free it manually: lsof -ti :{backend_port} | xargs kill -9")
-                sys.exit(1)
-
-        if not self.no_ui:
-            frontend_port = int(os.environ.get("CHAT_APP_PORT", os.environ.get("PORT", "3000")))
-
-            if backend_port == frontend_port:
-                print(
-                    f"ERROR: Backend and frontend are both configured to use port {backend_port}."
-                )
-                print("  Set CHAT_APP_PORT in .env to a different port (e.g., CHAT_APP_PORT=3000).")
-                sys.exit(1)
-
-            if not check_port_available(frontend_port):
-                print(f"Port {frontend_port} (frontend) is in use, attempting to free it...")
-                if not kill_port(frontend_port) or not check_port_available(frontend_port):
-                    port_source = (
-                        "CHAT_APP_PORT"
-                        if os.environ.get("CHAT_APP_PORT")
-                        else "PORT"
-                        if os.environ.get("PORT")
-                        else "default"
-                    )
-                    print(f"ERROR: Could not free port {frontend_port} (frontend, source: {port_source}).")
-                    print(f"  To free it manually: lsof -ti :{frontend_port} | xargs kill -9")
-                    print(f"  Or set a different port: CHAT_APP_PORT=<port> in .env")
-                    sys.exit(1)
-
-    def monitor_process(self, process, name, log_file, patterns):
-        is_ready = False
-        try:
-            for line in iter(process.stdout.readline, ""):
-                if not line:
-                    break
-
-                line = line.rstrip()
-                log_file.write(line + "\n")
-                print(f"[{name}] {line}")
-
-                # Check readiness
-                if not is_ready and any(re.search(p, line, re.IGNORECASE) for p in patterns):
-                    is_ready = True
-                    if name == "backend":
-                        self.backend_ready = True
-                    else:
-                        self.frontend_ready = True
-                    print(f"✓ {name.capitalize()} is ready!")
-
-                    if self.no_ui and self.backend_ready:
-                        print("\n" + "=" * 50)
-                        print("✓ Backend is ready! (running without UI)")
-                        print(f"✓ API available at http://localhost:{self.port}")
-                        print("=" * 50 + "\n")
-                    elif self.backend_ready and self.frontend_ready:
-                        print("\n" + "=" * 50)
-                        print("✓ Both frontend and backend are ready!")
-                        print(f"✓ Open the frontend at http://localhost:{self.port}")
-                        print("=" * 50 + "\n")
-
-            process.wait()
-            if process.returncode != 0:
-                self.failed.set()
-
-        except Exception as e:
-            print(f"Error monitoring {name}: {e}")
-            self.failed.set()
-
-    def clone_frontend_if_needed(self):
-        if CHATBOT_DIR.exists():
-            return True
-
-        print("Cloning e2e-chatbot-app-next...")
-        for url in [
-            "https://github.com/databricks/app-templates.git",
-            "git@github.com:databricks/app-templates.git",
-        ]:
-            try:
-                subprocess.run(
-                    ["git", "clone", "--filter=blob:none", "--sparse", url, "temp-app-templates"],
-                    check=True,
-                    capture_output=True,
-                )
-                break
-            except subprocess.CalledProcessError:
-                continue
-        else:
-            print("ERROR: Failed to clone repository.")
-            print(
-                "Manually download from: https://download-directory.github.io/?url=https://github.com/databricks/app-templates/tree/main/e2e-chatbot-app-next"
-            )
-            return False
-
-        subprocess.run(
-            ["git", "sparse-checkout", "set", "e2e-chatbot-app-next"],
-            cwd="temp-app-templates",
-            check=True,
-        )
-        Path("temp-app-templates/e2e-chatbot-app-next").rename(CHATBOT_DIR)
-        shutil.rmtree("temp-app-templates", ignore_errors=True)
-        return True
-
-    def run_database_migrations(self):
-        if not CHATBOT_DIR.exists():
-            print(f"WARNING: Chatbot app directory not found at {CHATBOT_DIR}. Skipping migrations.")
-            return
-
-        self.ensure_chatbot_dependencies()
-        print("Running chatbot database migrations...")
-        result = subprocess.run(
-            ["npm", "run", "db:migrate"],
-            cwd=CHATBOT_DIR,
-            capture_output=True,
-            text=True,
+    for memory_type in ("langgraph-short-term", "langgraph-long-term"):
+        _run(
+            ["uv", "run", "python", str(GRANT_SCRIPT),
+             "--app-name", app_name,
+             "--memory-type", memory_type,
+             "--instance-name", instance_name],
+            label=f"Lakebase grant ({memory_type})",
         )
 
-        if result.stdout:
-            print(result.stdout.rstrip())
-        if result.returncode != 0:
-            if result.stderr:
-                print(result.stderr.rstrip())
-            print("ERROR: Chatbot database migrations failed.")
-            sys.exit(result.returncode)
 
-        print("✓ Chatbot database migrations complete")
-
-    def grant_lakebase_permissions_if_needed(self):
-        app_name = os.environ.get("DATABRICKS_APP_NAME")
-        instance_name = os.environ.get("LAKEBASE_INSTANCE_NAME")
-
-        if not app_name:
-            print("Skipping Lakebase grants (not running inside Databricks Apps).")
-            return
-
-        if not instance_name:
-            print("Skipping Lakebase grants (LAKEBASE_INSTANCE_NAME not set).")
-            return
-
-        if not GRANT_SCRIPT.exists():
-            print(f"WARNING: Grant script not found at {GRANT_SCRIPT}. Skipping Lakebase grants.")
-            return
-
-        for memory_type in ("langgraph-short-term", "langgraph-long-term"):
-            print(f"Granting Lakebase permissions for {memory_type}...")
-            result = subprocess.run(
-                [
-                    "uv",
-                    "run",
-                    "python",
-                    str(GRANT_SCRIPT),
-                    "--app-name",
-                    app_name,
-                    "--memory-type",
-                    memory_type,
-                    "--instance-name",
-                    instance_name,
-                ],
-                capture_output=True,
-                text=True,
-            )
-
-            if result.stdout:
-                print(result.stdout.rstrip())
-            if result.returncode != 0:
-                if result.stderr:
-                    print(result.stderr.rstrip())
-                print(f"ERROR: Failed to grant Lakebase permissions for {memory_type}.")
-                sys.exit(result.returncode)
-
-        print("✓ Lakebase permissions ensured")
-
-    def ensure_chatbot_dependencies(self):
-        if self.chatbot_dependencies_ready:
-            return
-
-        print("Running npm install...")
-        result = subprocess.run(
-            ["npm", "install"],
-            cwd=CHATBOT_DIR,
-            capture_output=True,
-            text=True,
-        )
-
-        if result.stdout:
-            print(result.stdout.rstrip())
-        if result.returncode != 0:
-            if result.stderr:
-                print(result.stderr.rstrip())
-            print("ERROR: npm install failed.")
-            sys.exit(result.returncode)
-
-        self.chatbot_dependencies_ready = True
-        print("✓ Frontend dependencies installed")
-
-    def start_process(self, cmd, name, log_file, patterns, cwd=None):
-        print(f"Starting {name}...")
-        process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, cwd=cwd
-        )
-
-        thread = threading.Thread(
-            target=self.monitor_process, args=(process, name, log_file, patterns), daemon=True
-        )
-        thread.start()
-        return process
-
-    def print_logs(self, log_path):
-        print(f"\nLast 50 lines of {log_path}:")
-        print("-" * 40)
-        try:
-            lines = Path(log_path).read_text().splitlines()
-            print("\n".join(lines[-50:]))
-        except FileNotFoundError:
-            print(f"(no {log_path} found)")
-        print("-" * 40)
-
-    def cleanup(self):
-        print("\n" + "=" * 42)
-        print("Shutting down..." if self.no_ui else "Shutting down both processes...")
-        print("=" * 42)
-
-        for proc in [self.backend_process, self.frontend_process]:
-            if proc:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=5)
-                except (subprocess.TimeoutExpired, Exception):
-                    proc.kill()
-
-        if self.backend_log:
-            self.backend_log.close()
-        if self.frontend_log:
-            self.frontend_log.close()
-
-    def run(self, backend_args=None):
-        load_dotenv(dotenv_path=".env", override=True)
-        if not os.environ.get("DATABRICKS_APP_NAME"):
-            self.check_ports()
-
-        if not self.no_ui:
-            if not self.clone_frontend_if_needed():
-                print("WARNING: Failed to clone frontend. Continuing with backend only.")
-                self.no_ui = True
-            else:
-                # Set API_PROXY environment variable for frontend to connect to backend
-                os.environ["API_PROXY"] = f"http://localhost:{self.port}/invocations"
-
-        # Open log files
-        self.backend_log = open("backend.log", "w", buffering=1)
-        if not self.no_ui:
-            self.frontend_log = open("frontend.log", "w", buffering=1)
-
-        try:
-            self.grant_lakebase_permissions_if_needed()
-            self.run_database_migrations()
-
-            # Build backend command, passing through all arguments
-            backend_cmd = ["uv", "run", "start-server"]
-            if backend_args:
-                backend_cmd.extend(backend_args)
-
-            # Start backend
-            self.backend_process = self.start_process(
-                backend_cmd, "backend", self.backend_log, BACKEND_READY
-            )
-
-            if not self.no_ui:
-                # Setup and start frontend
-                frontend_dir = CHATBOT_DIR
-                self.ensure_chatbot_dependencies()
-                for cmd, desc in [("npm run build", "build")]:
-                    print(f"Running npm {desc}...")
-                    result = subprocess.run(
-                        cmd.split(), cwd=frontend_dir, capture_output=True, text=True
-                    )
-                    if result.returncode != 0:
-                        print(f"npm {desc} failed: {result.stderr}")
-                        return 1
-
-                self.frontend_process = self.start_process(
-                    ["npm", "run", "start"],
-                    "frontend",
-                    self.frontend_log,
-                    FRONTEND_READY,
-                    cwd=frontend_dir,
-                )
-
-                print(
-                    f"\nMonitoring processes (Backend PID: {self.backend_process.pid}, Frontend PID: {self.frontend_process.pid})\n"
-                )
-            else:
-                print(f"\nMonitoring backend process (PID: {self.backend_process.pid})\n")
-
-            # Wait for failure
-            while not self.failed.is_set():
-                time.sleep(0.1)
-                if self.backend_process.poll() is not None:
-                    self.failed.set()
-                    break
-                if (
-                    not self.no_ui
-                    and self.frontend_process
-                    and self.frontend_process.poll() is not None
-                ):
-                    self.failed.set()
-                    break
-
-            # Determine which failed
-            if self.no_ui or self.backend_process.poll() is not None:
-                failed_name = "backend"
-                failed_proc = self.backend_process
-            else:
-                failed_name = "frontend"
-                failed_proc = self.frontend_process
-            exit_code = failed_proc.returncode if failed_proc else 1
-
-            print(
-                f"\n{'=' * 42}\nERROR: {failed_name} process exited with code {exit_code}\n{'=' * 42}"
-            )
-            self.print_logs("backend.log")
-            if not self.no_ui:
-                self.print_logs("frontend.log")
-            return exit_code
-
-        except KeyboardInterrupt:
-            print("\nInterrupted")
-            return 0
-
-        finally:
-            self.cleanup()
+def run_database_migrations():
+    """Run chatbot DB migrations if the frontend directory exists."""
+    if not CHATBOT_DIR.exists():
+        return
+    _run(["npm", "install"], cwd=CHATBOT_DIR, label="npm install")
+    _run(["npm", "run", "db:migrate"], cwd=CHATBOT_DIR, label="db:migrate")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Start agent frontend and backend",
-        usage="%(prog)s [OPTIONS]\n\nAll options are passed through to start-server. "
-        "Use 'uv run start-server --help' for available options.",
-    )
-    parser.add_argument(
-        "--no-ui",
-        action="store_true",
-        help="Run backend only, skip frontend UI",
-    )
-    args, backend_args = parser.parse_known_args()
+    parser = argparse.ArgumentParser(description="Start agent app")
+    parser.add_argument("--no-ui", action="store_true", help="Backend only")
+    parser.add_argument("--port", type=int, default=8000)
+    args, extra = parser.parse_known_args()
 
-    # Extract port from backend_args if specified
-    port = 8000
-    for i, arg in enumerate(backend_args):
-        if arg == "--port" and i + 1 < len(backend_args):
-            try:
-                port = int(backend_args[i + 1])
-            except ValueError:
-                pass
-            break
+    load_dotenv(dotenv_path=".env", override=True)
 
-    sys.exit(ProcessManager(port=port, no_ui=args.no_ui).run(backend_args))
+    # Pre-flight
+    grant_lakebase_permissions()
+    run_database_migrations()
+
+    # Backend
+    backend_cmd = ["uv", "run", "start-server", "--port", str(args.port)] + extra
+    backend = subprocess.Popen(backend_cmd)
+
+    # Frontend
+    frontend = None
+    if not args.no_ui and CHATBOT_DIR.exists():
+        os.environ["API_PROXY"] = f"http://localhost:{args.port}/invocations"
+        _run(["npm", "run", "build"], cwd=CHATBOT_DIR, label="npm build")
+        frontend = subprocess.Popen(["npm", "run", "start"], cwd=CHATBOT_DIR)
+
+    # Wait for either process to exit, then tear down the other.
+    def shutdown(signum=None, frame=None):
+        for p in (backend, frontend):
+            if p and p.poll() is None:
+                p.terminate()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+
+    procs = [p for p in (backend, frontend) if p]
+    while True:
+        for p in procs:
+            ret = p.poll()
+            if ret is not None:
+                shutdown()
 
 
 if __name__ == "__main__":

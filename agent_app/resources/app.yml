@@ -1,0 +1,164 @@
+resources:
+  apps:
+    agent_migration:
+      name: "multi-agent-genie-app-${bundle.target}"
+      description: "Multi-agent Genie system on Databricks Apps"
+      source_code_path: ../
+      config:
+        command: ["uv", "run", "start-app", "--port", "9000"]
+        env:
+          - name: CHAT_PROXY_TIMEOUT_SECONDS
+            value: "300"
+          - name: CATALOG_NAME
+            value: ${var.catalog}
+          - name: SCHEMA_NAME
+            value: ${var.schema}
+          - name: UC_FUNCTION_NAMES
+            value: "get_space_summary,get_table_overview,get_column_detail,get_space_instructions,get_space_details"
+          - name: LLM_ENDPOINT
+            value: ${var.llm_endpoint}
+          - name: LLM_ENDPOINT_CLARIFICATION
+            value: ${var.llm_endpoint_clarification}
+          - name: LLM_ENDPOINT_PLANNING
+            value: ${var.llm_endpoint_planning}
+          - name: LLM_ENDPOINT_SQL_SYNTHESIS_TABLE
+            value: ${var.llm_endpoint_sql_synthesis_table}
+          - name: LLM_ENDPOINT_SQL_SYNTHESIS_GENIE
+            value: ${var.llm_endpoint_sql_synthesis_genie}
+          - name: LLM_ENDPOINT_EXECUTION
+            value: ${var.llm_endpoint_execution}
+          - name: LLM_ENDPOINT_SUMMARIZE
+            value: ${var.llm_endpoint_summarize}
+          - name: LLM_ENDPOINT_DETECT_CODE_LOOKUP
+            value: ${var.llm_endpoint_detect_code_lookup}
+          - name: EMBEDDING_MODEL
+            value: ${var.embedding_model}
+          - name: VS_ENDPOINT_NAME
+            value: ${var.vs_endpoint_name}
+          - name: SAMPLE_SIZE
+            value: "20"
+          - name: MAX_UNIQUE_VALUES
+            value: "20"
+          - name: VOLUME_NAME
+            value: "volume"
+          - name: ENRICHED_DOCS_TABLE
+            value: "enriched_genie_docs"
+          - name: SOURCE_TABLE
+            value: "enriched_genie_docs_chunks"
+          - name: SQL_WAREHOUSE_ID
+            value: ${var.warehouse_id}
+          - name: GENIE_SPACE_IDS
+            value: ${var.genie_space_ids}
+          - name: LAKEBASE_INSTANCE_NAME
+            value_from: database
+          - name: LAKEBASE_EMBEDDING_ENDPOINT
+            value: ${var.embedding_model}
+          - name: LAKEBASE_EMBEDDING_DIMS
+            value: "1024"
+          - name: MLFLOW_EXPERIMENT_ID
+            value_from: experiment
+          - name: MLFLOW_TRACKING_URI
+            value: "databricks"
+          - name: MLFLOW_REGISTRY_URI
+            value: "databricks-uc"
+
+      resources:
+        - name: 'experiment'
+          experiment:
+            experiment_id: ${var.experiment_id}
+            permission: 'CAN_MANAGE'
+
+        # Serving endpoints (LLM + embedding)
+        - name: 'serving-endpoint-sonnet'
+          serving_endpoint:
+            name: ${var.llm_endpoint}
+            permission: 'CAN_QUERY'
+        - name: 'serving-endpoint-haiku'
+          serving_endpoint:
+            name: ${var.llm_endpoint_clarification}
+            permission: 'CAN_QUERY'
+        - name: 'serving-endpoint-embedding'
+          serving_endpoint:
+            name: ${var.embedding_model}
+            permission: 'CAN_QUERY'
+
+        # Genie spaces
+        - name: 'genie-space-1'
+          genie_space:
+            name: 'genie-space-1'
+            space_id: ${var.genie_space_id_1}
+            permission: 'CAN_RUN'
+        - name: 'genie-space-2'
+          genie_space:
+            name: 'genie-space-2'
+            space_id: ${var.genie_space_id_2}
+            permission: 'CAN_RUN'
+        - name: 'genie-space-3'
+          genie_space:
+            name: 'genie-space-3'
+            space_id: ${var.genie_space_id_3}
+            permission: 'CAN_RUN'
+
+        # UC functions
+        - name: 'uc-fn-get-space-summary'
+          uc_securable:
+            securable_full_name: '${var.catalog}.${var.schema}.get_space_summary'
+            securable_type: 'FUNCTION'
+            permission: 'EXECUTE'
+        - name: 'uc-fn-get-table-overview'
+          uc_securable:
+            securable_full_name: '${var.catalog}.${var.schema}.get_table_overview'
+            securable_type: 'FUNCTION'
+            permission: 'EXECUTE'
+        - name: 'uc-fn-get-column-detail'
+          uc_securable:
+            securable_full_name: '${var.catalog}.${var.schema}.get_column_detail'
+            securable_type: 'FUNCTION'
+            permission: 'EXECUTE'
+        - name: 'uc-fn-get-space-instructions'
+          uc_securable:
+            securable_full_name: '${var.catalog}.${var.schema}.get_space_instructions'
+            securable_type: 'FUNCTION'
+            permission: 'EXECUTE'
+        - name: 'uc-fn-get-space-details'
+          uc_securable:
+            securable_full_name: '${var.catalog}.${var.schema}.get_space_details'
+            securable_type: 'FUNCTION'
+            permission: 'EXECUTE'
+
+        # Lakebase (short-term + long-term memory)
+        - name: 'database'
+          database:
+            database_name: 'databricks_postgres'
+            instance_name: ${resources.database_instances.app_state_db.name}
+            permission: 'CAN_CONNECT_AND_CREATE'
+
+        # SQL warehouse
+        - name: 'sql-warehouse'
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: 'CAN_USE'
+
+        # UC Volume (for trace artifacts via Files API)
+        - name: 'trace-volume'
+          uc_securable:
+            securable_full_name: '${var.catalog}.${var.schema}.volume'
+            securable_type: 'VOLUME'
+            permission: 'WRITE_VOLUME'
+
+        # Vector search index
+        - name: 'vs-index'
+          uc_securable:
+            securable_full_name: '${var.catalog}.${var.schema}.enriched_genie_docs_chunks_vs_index'
+            securable_type: 'TABLE'
+            permission: 'SELECT'
+
+        # Tables
+        - name: 'enriched-docs-chunks'
+          uc_securable:
+            securable_full_name: '${var.catalog}.${var.schema}.enriched_genie_docs_chunks'
+            securable_type: 'TABLE'
+            permission: 'SELECT'
+        # NOTE: HealthVerity tables require manual grants after deploy:
+        #   GRANT SELECT ON TABLE healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.<table>
+        #     TO `<sp-app-id>`;

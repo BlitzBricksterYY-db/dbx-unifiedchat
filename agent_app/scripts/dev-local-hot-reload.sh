@@ -19,7 +19,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-DEFAULT_LAKEBASE_INSTANCE="multi-agent-genie-system-state-db"
+DEFAULT_LAKEBASE_INSTANCE="multi-agent-genie-system-state-db-dev"
 DEFAULT_PGDATABASE="databricks_postgres"
 DEFAULT_PGPORT="5432"
 AGENT_PORT="8000"

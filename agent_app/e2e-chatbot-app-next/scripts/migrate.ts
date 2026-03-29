@@ -81,31 +81,48 @@ async function main() {
     console.log('🔄 Applying pending migrations...');
 
     const migrationsTableName = '__drizzle_migrations';
-    const [sequenceRow] = await migrationConnection<
-      { sequence_name: string | null }[]
-    >`
-      SELECT pg_get_serial_sequence(
-        ${`${schemaName}.${migrationsTableName}`},
-        'id'
-      ) AS sequence_name
+
+    // Sync the migrations table sequence only if the table already exists.
+    // On a fresh database the table is created by `migrate()` below.
+    const [tableExists] = await migrationConnection<{ exists: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = ${schemaName}
+          AND table_name   = ${migrationsTableName}
+      ) AS exists
     `;
 
-    if (sequenceRow?.sequence_name) {
-      const [maxIdRow] = await migrationConnection<{ max_id: number }[]>`
-        SELECT COALESCE(MAX(id), 0)::int AS max_id
-        FROM ${migrationConnection(schemaName)}.${migrationConnection(migrationsTableName)}
+    if (tableExists?.exists) {
+      const [sequenceRow] = await migrationConnection<
+        { sequence_name: string | null }[]
+      >`
+        SELECT pg_get_serial_sequence(
+          ${`${schemaName}.${migrationsTableName}`},
+          'id'
+        ) AS sequence_name
       `;
 
-      const maxId = maxIdRow?.max_id ?? 0;
-      await migrationConnection`
-        SELECT setval(
-          ${sequenceRow.sequence_name},
-          GREATEST(${maxId}, 1),
-          ${maxId > 0}
-        )
-      `;
+      if (sequenceRow?.sequence_name) {
+        const [maxIdRow] = await migrationConnection<{ max_id: number }[]>`
+          SELECT COALESCE(MAX(id), 0)::int AS max_id
+          FROM ${migrationConnection(schemaName)}.${migrationConnection(migrationsTableName)}
+        `;
+
+        const maxId = maxIdRow?.max_id ?? 0;
+        await migrationConnection`
+          SELECT setval(
+            ${sequenceRow.sequence_name},
+            GREATEST(${maxId}, 1),
+            ${maxId > 0}
+          )
+        `;
+        console.log(
+          `🔧 Synced ${schemaName}.${migrationsTableName} sequence to max id ${maxId}`,
+        );
+      }
+    } else {
       console.log(
-        `🔧 Synced ${schemaName}.${migrationsTableName} sequence to max id ${maxId}`,
+        `ℹ️ ${schemaName}.${migrationsTableName} does not exist yet — skipping sequence sync`,
       );
     }
 

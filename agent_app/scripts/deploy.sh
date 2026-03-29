@@ -55,17 +55,20 @@ fi
 
 cd "$APP_DIR"
 
-echo "=== Deploy: multi-agent-genie-app-dev ==="
+APP_NAME="multi-agent-genie-app-${TARGET}"
+BUNDLE_APP_KEY="agent_migration"
+
+echo "=== Deploy: $APP_NAME ==="
 echo "  Target  : $TARGET"
 echo "  Profile : ${PROFILE:-<default>}"
 echo
 
-APP_NAME="multi-agent-genie-app-dev"
+# Resolve the Lakebase instance name from resources/database.yml.
+# The YAML uses ${bundle.target} which awk can't resolve, so we substitute
+# the shell $TARGET variable ourselves.
 LAKEBASE_INSTANCE_NAME=$(awk '
-  /^  database_instances:$/ {in_db=1; next}
-  in_db && /^  [a-z]/ {in_db=0}
-  in_db && /^[[:space:]]+name:[[:space:]]/ {print $2; exit}
-' databricks.yml)
+  /name:.*multi-agent-genie-system-state-db/ {gsub(/.*name:[[:space:]]*/, ""); print; exit}
+' resources/database.yml 2>/dev/null | sed "s/\${bundle.target}/${TARGET}/g" || true)
 
 bootstrap_lakebase_role() {
   if [[ -z "${LAKEBASE_INSTANCE_NAME:-}" ]]; then
@@ -110,15 +113,9 @@ echo "✅ Deploy complete"
 # Optional: run (start) the app
 if [[ "$RUN_AFTER" == true ]]; then
   echo
-  BUNDLE_NAME=$(awk '/^  apps:$/ {getline; if ($0 ~ /^    [a-zA-Z0-9_-]+:$/) {sub(/:$/, "", $1); print $1}}' databricks.yml)
-  if [[ -z "$BUNDLE_NAME" ]]; then
-    echo "⚠️  Could not determine bundle name from databricks.yml"
-    echo "  Run manually: databricks bundle run <name> -t $TARGET ${PROFILE_ARGS[*]:-}"
-  else
-    echo "Starting app ($BUNDLE_NAME)..."
-    databricks bundle run "$BUNDLE_NAME" -t "$TARGET" "${PROFILE_ARGS[@]}"
-    echo "✅ App started"
-  fi
+  echo "Starting app ($BUNDLE_APP_KEY)..."
+  databricks bundle run "$BUNDLE_APP_KEY" -t "$TARGET" "${PROFILE_ARGS[@]}"
+  echo "✅ App started"
 fi
 
 echo
