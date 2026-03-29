@@ -279,6 +279,7 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
     const model = await myProvider.languageModel(selectedChatModel);
     const modelMessages = await convertToModelMessages(uiMessages);
     const chatAgentSettings = requestBody.agentSettings;
+    const traceKind = message ? 'chat-turn' : 'continuation';
     const requestHeaders = {
       [CONTEXT_HEADER_CONVERSATION_ID]: id,
       [CONTEXT_HEADER_USER_ID]: session.user.email ?? session.user.id,
@@ -287,6 +288,8 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
       'x-agent-clarification-sensitivity':
         chatAgentSettings?.clarificationSensitivity ?? 'medium',
       'x-agent-count-only': String(chatAgentSettings?.countOnly ?? false),
+      'x-chat-request-kind': traceKind,
+      'x-chat-trace-source': 'chat-route',
       ...(req.headers['x-forwarded-access-token']
         ? { 'x-forwarded-access-token': req.headers['x-forwarded-access-token'] as string }
         : {}),
@@ -365,7 +368,15 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
         if (failed) {
           console.log('Streaming failed, falling back to generateText...');
           const fallbackResult = await fallbackToGenerateText(
-            { model, messages: modelMessages, headers: requestHeaders },
+            {
+              model,
+              messages: modelMessages,
+              headers: {
+                ...requestHeaders,
+                'x-chat-request-kind': 'chat-fallback',
+                'x-chat-original-request-kind': traceKind,
+              },
+            },
             writer,
           );
 
@@ -651,6 +662,11 @@ async function generateTitleFromUserMessage({
         : part,
     ),
   };
+  const titleInput = truncatedMessage.parts
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text.trim())
+    .filter(Boolean)
+    .join('\n\n');
 
   const { text: title } = await generateText({
     model,
@@ -659,7 +675,10 @@ async function generateTitleFromUserMessage({
     - ensure it is not more than 80 characters long
     - the title should be a summary of the user's message
     - do not use quotes or colons. do not include other expository content ("I'll help...")`,
-    prompt: JSON.stringify(truncatedMessage),
+    // Keep title-generation inputs recognizable in provider-side traces.
+    prompt: titleInput
+      ? `TITLE_GENERATION_REQUEST\n${titleInput}`
+      : `TITLE_GENERATION_REQUEST\n${JSON.stringify(truncatedMessage)}`,
   });
 
   return title;

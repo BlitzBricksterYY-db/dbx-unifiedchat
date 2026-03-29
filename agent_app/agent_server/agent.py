@@ -16,7 +16,7 @@ from uuid import uuid4
 import litellm
 import mlflow
 from mlflow.entities import SpanType
-from mlflow.genai.agent_server import invoke, stream
+from mlflow.genai.agent_server import get_request_headers, invoke, stream
 from mlflow.types.responses import (
     ResponsesAgentRequest,
     ResponsesAgentResponse,
@@ -141,6 +141,28 @@ def _get_user_id(request: ResponsesAgentRequest):
     if request.custom_inputs and "user_id" in request.custom_inputs:
         return request.custom_inputs["user_id"]
     return None
+
+
+def _get_request_header(name: str) -> Optional[str]:
+    try:
+        value = get_request_headers().get(name)
+    except Exception:
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def _format_request_preview(content, limit: int = 500) -> str:
+    if isinstance(content, str):
+        preview = content
+    else:
+        try:
+            preview = json.dumps(content, default=str)
+        except Exception:
+            preview = str(content)
+    preview = " ".join(preview.split())
+    if len(preview) <= limit:
+        return preview
+    return preview[: limit - 1] + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -275,13 +297,9 @@ async def stream_handler(
 
     thread_id = _get_or_create_thread_id(request)
     user_id = _get_user_id(request)
-
-    mlflow.update_current_trace(
-        metadata={
-            "chat.thread_id": thread_id,
-            **({"chat.user_id": user_id} if user_id else {}),
-        }
-    )
+    trace_kind = _get_request_header("x-chat-request-kind") or "chat-turn"
+    trace_source = _get_request_header("x-chat-trace-source") or "chat-route"
+    original_trace_kind = _get_request_header("x-chat-original-request-kind")
 
     ci = dict(request.custom_inputs or {})
     ci["thread_id"] = thread_id
@@ -295,7 +313,23 @@ async def stream_handler(
     first_token_time = None
 
     cc_msgs = to_chat_completions_input([i.model_dump() for i in request.input])
-    latest_query = cc_msgs[-1]["content"] if cc_msgs else ""
+    latest_query_input = cc_msgs[-1]["content"] if cc_msgs else ""
+    request_preview = _format_request_preview(latest_query_input)
+    if trace_kind != "chat-turn" and request_preview:
+        request_preview = f"[{trace_kind}] {request_preview}"
+
+    mlflow.update_current_trace(
+        request_preview=request_preview,
+        metadata={
+            "chat.thread_id": thread_id,
+            "chat.request_kind": trace_kind,
+            "chat.trace_source": trace_source,
+            **({"chat.original_request_kind": original_trace_kind} if original_trace_kind else {}),
+            **({"chat.user_id": user_id} if user_id else {}),
+        },
+    )
+
+    latest_query = latest_query_input
 
     run_config = {"configurable": {"thread_id": thread_id}}
     if user_id:
