@@ -7,19 +7,19 @@ include:
 variables:
   # Unity Catalog
   catalog:
-    default: "serverless_dbx_unifiedchat_catalog"
+    default: "databricks_c3od_poc"
   schema:
     default: "multi_agent_genie"
   data_catalog:
-    default: "healthverity_claims_sample_patient_dataset"
+    default: "genie"
   data_schema:
-    default: "hv_claims_sample"
+    default: "dbo"
   uc_function_names:
     default: "get_space_summary,get_table_overview,get_column_detail,get_space_instructions,get_space_details"
 
   # SQL warehouse
   warehouse_id:
-    default: "a4ed2ccbda385db9"
+    default: "cca0b29ed7524730"
 
   # Lakebase
   lakebase_instance_name:
@@ -29,13 +29,13 @@ variables:
 
   # MLflow experiment
   experiment_id:
-    default: "1430933840630413"
+    default: "1512532220879769"
 
   # LLM endpoints
   llm_endpoint:
-    default: "databricks-gpt-5-4-mini"
+    default: "databricks-claude-haiku-4-5"
   llm_endpoint_clarification:
-    default: "databricks-gpt-5-4-mini"
+    default: "databricks-claude-haiku-4-5"
   llm_endpoint_planning:
     default: "databricks-claude-sonnet-4-5"
   llm_endpoint_sql_synthesis_table:
@@ -45,9 +45,9 @@ variables:
   llm_endpoint_execution:
     default: "databricks-claude-haiku-4-5"
   llm_endpoint_summarize:
-    default: "databricks-gpt-5-4"
+    default: "databricks-claude-sonnet-4-5"
   llm_endpoint_detect_code_lookup:
-    default: "databricks-gpt-5-4-mini"
+    default: "databricks-claude-haiku-4-5"
 
   # Embedding & vector search
   embedding_model:
@@ -76,14 +76,18 @@ variables:
     default: "databricks-uc"
 
   # Genie spaces
-  # genie_space_id_1:
-  #   default: "01f11b27d1121e2bb00d6ecd846b1988"
-  # genie_space_id_2:
-  #   default: "01f11b27d23a1ab195fa7ba8efc06d13"
-  # genie_space_id_3:
-  #   default: "01f11b27d3ea149694cf608c3d278673"
+  genie_space_id_1:
+    default: "01f072dbd668159d99934dfd3b17f544"
+  genie_space_id_2:
+    default: "01f08f4d1f5f172ea825ec8c9a3c6064"
+  genie_space_id_3:
+    default: "01f073c5476313fe8f51966e3ce85bd7"
+  genie_space_id_4:
+    default: "01f07795f6981dc4a99d62c9fc7c2caa"
+  genie_space_id_5:
+    default: "01f08a9fd9ca125a986d01c1a7a5b2fe"
   genie_space_ids:
-    default: "01f106e1239d14b28d6ab46f9c15e540,01f106e121e7173d8cf84bb80e842d6c,01f106e120b718e084598e92dcf14d4e"
+    default: "01f072dbd668159d99934dfd3b17f544,01f08f4d1f5f172ea825ec8c9a3c6064,01f073c5476313fe8f51966e3ce85bd7,01f07795f6981dc4a99d62c9fc7c2caa,01f08a9fd9ca125a986d01c1a7a5b2fe"
 
 targets:
   dev:
