@@ -43,24 +43,65 @@ class ResultSummarizeAgent:
     @staticmethod
     def _safe_json_dumps(obj: Any, indent: int = 2) -> str:
         """
-        Safely serialize objects to JSON, converting dates/datetime to strings.
+        Safely serialize objects to JSON, normalizing common non-JSON types.
         
         Args:
             obj: Object to serialize
             indent: JSON indentation level
             
         Returns:
-            JSON string with date/datetime objects converted to ISO format strings
+            JSON string with common non-JSON types converted to serializable values
         """
-        def default_handler(o):
-            if isinstance(o, (date, datetime)):
-                return o.isoformat()
-            elif isinstance(o, Decimal):
-                return float(o)
-            else:
-                raise TypeError(f'Object of type {o.__class__.__name__} is not JSON serializable')
-        
-        return json.dumps(obj, indent=indent, default=default_handler)
+        def normalize(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {str(k): normalize(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [normalize(item) for item in value]
+            if isinstance(value, tuple):
+                return [normalize(item) for item in value]
+            if isinstance(value, set):
+                return [normalize(item) for item in value]
+            if isinstance(value, (date, datetime)):
+                return value.isoformat()
+            if isinstance(value, Decimal):
+                return float(value)
+            if isinstance(value, bytes):
+                return value.decode("utf-8", errors="replace")
+
+            try:
+                import numpy as np  # type: ignore
+
+                if isinstance(value, np.ndarray):
+                    return normalize(value.tolist())
+                if isinstance(value, np.generic):
+                    return normalize(value.item())
+            except ImportError:
+                pass
+
+            if hasattr(value, "tolist") and callable(value.tolist):
+                try:
+                    return normalize(value.tolist())
+                except Exception:
+                    pass
+
+            if hasattr(value, "item") and callable(value.item):
+                try:
+                    return normalize(value.item())
+                except Exception:
+                    pass
+
+            if hasattr(value, "isoformat") and callable(value.isoformat):
+                try:
+                    return value.isoformat()
+                except Exception:
+                    pass
+
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                return value
+
+            raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
+
+        return json.dumps(normalize(obj), indent=indent)
     
     def generate_summary(self, state: AgentState, writer=None) -> str:
         """

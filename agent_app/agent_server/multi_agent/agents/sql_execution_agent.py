@@ -37,6 +37,8 @@ If you're not using resource registration, you can still manually configure:
 import re
 import json
 from typing import Dict, Any, List
+from datetime import date, datetime
+from decimal import Decimal
 
 
 class SQLExecutionAgent:
@@ -82,6 +84,71 @@ class SQLExecutionAgent:
         """
         self.name = "SQLExecution"
         self.warehouse_id = warehouse_id
+
+    @staticmethod
+    def _normalize_result_value(value: Any) -> Any:
+        """Convert connector return values into JSON-safe Python types."""
+        if isinstance(value, dict):
+            return {
+                str(key): SQLExecutionAgent._normalize_result_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [SQLExecutionAgent._normalize_result_value(item) for item in value]
+        if isinstance(value, tuple):
+            return [SQLExecutionAgent._normalize_result_value(item) for item in value]
+        if isinstance(value, set):
+            return [SQLExecutionAgent._normalize_result_value(item) for item in value]
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+
+        try:
+            import numpy as np  # type: ignore
+
+            if isinstance(value, np.ndarray):
+                return SQLExecutionAgent._normalize_result_value(value.tolist())
+            if isinstance(value, np.generic):
+                return SQLExecutionAgent._normalize_result_value(value.item())
+        except ImportError:
+            pass
+
+        if hasattr(value, "tolist") and callable(value.tolist):
+            try:
+                return SQLExecutionAgent._normalize_result_value(value.tolist())
+            except Exception:
+                pass
+
+        if hasattr(value, "item") and callable(value.item):
+            try:
+                return SQLExecutionAgent._normalize_result_value(value.item())
+            except Exception:
+                pass
+
+        if hasattr(value, "isoformat") and callable(value.isoformat):
+            try:
+                return value.isoformat()
+            except Exception:
+                pass
+
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+
+        return str(value)
+
+    @staticmethod
+    def _normalize_result_rows(columns: List[str], rows: List[Any]) -> List[Dict[str, Any]]:
+        """Build row dicts with normalized values safe for JSON serialization."""
+        return [
+            {
+                column: SQLExecutionAgent._normalize_result_value(value)
+                for column, value in zip(columns, row)
+            }
+            for row in rows
+        ]
     
     def execute_sql(
         self, 
@@ -210,7 +277,7 @@ class SQLExecutionAgent:
                     print(f"📋 Columns: {', '.join(columns)}\n")
                     
                     # Step 5: Convert results to list of dicts for compatibility
-                    result_data = [dict(zip(columns, row)) for row in results]
+                    result_data = self._normalize_result_rows(columns, results)
                     
                 # Cursor automatically closed here by context manager
             
