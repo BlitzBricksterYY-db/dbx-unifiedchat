@@ -129,6 +129,16 @@ Use `-t prod` for the production target when needed.
 
 The active deployment path is now the Databricks App in `agent_app/`.
 
+Before running `agent_app/scripts/deploy.sh`, make sure you have:
+
+* Databricks CLI installed, authenticated, and able to run `databricks bundle deploy` / `databricks bundle run`
+* A Databricks CLI profile available via `--profile <profile>` or `DATABRICKS_CONFIG_PROFILE` in `agent_app/.env`
+* `uv` installed locally, because the deploy script uses `uv run` for Lakebase permission bootstrapping
+* Python 3.10+ with `PyYAML` available locally, because the script reads `agent_app/databricks.yml` via `import yaml`
+* Permission in the target workspace to deploy Databricks Apps / Asset Bundles and access the configured Lakebase, SQL warehouse, catalogs, and schemas
+
+`Node.js`, `npm`, and `jq` are used by the local development workflows, but are not required just to run `agent_app/scripts/deploy.sh`.
+
 ```bash
 cd agent_app
 ./scripts/deploy.sh --run

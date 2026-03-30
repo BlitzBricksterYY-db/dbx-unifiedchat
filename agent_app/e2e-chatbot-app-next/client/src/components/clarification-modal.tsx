@@ -1,7 +1,8 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useLayoutEffect } from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
 import { CheckIcon, CopyIcon, X } from 'lucide-react';
 import type { UseChatHelpers } from '@ai-sdk/react';
 import type { ChatMessage } from '@chat-template/core';
@@ -25,13 +26,24 @@ export function ClarificationModal({
 }: ClarificationModalProps) {
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
   const [customInput, setCustomInput] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const confirmValue = selectedOption ?? customInput.trim();
 
   const handleOptionSelect = useCallback((option: string) => {
     setSelectedOption(option);
-    setCustomInput('');
   }, []);
+
+  const handleOptionCardClick = useCallback(
+    (option: string) => {
+      const selection = window.getSelection?.();
+      if (selection && selection.toString().trim()) {
+        return;
+      }
+      handleOptionSelect(option);
+    },
+    [handleOptionSelect],
+  );
 
   const handleCustomInputChange = useCallback(
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -76,6 +88,14 @@ export function ClarificationModal({
     [customInput, handleConfirm],
   );
 
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+
+    textarea.style.height = 'auto';
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`;
+  }, [customInput]);
+
   return (
     <DialogPrimitive.Root open onOpenChange={(open) => !open && onClose()}>
       <DialogPrimitive.Portal>
@@ -112,9 +132,16 @@ export function ClarificationModal({
                       Selected
                     </div>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => handleOptionSelect(option)}
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => handleOptionCardClick(option)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        handleOptionSelect(option);
+                      }
+                    }}
                     className={cn(
                       'w-full cursor-pointer rounded-xl border px-4 pb-4 text-left text-sm leading-relaxed shadow-sm transition-all',
                       selectedOption === option ? 'pt-12' : 'pt-4',
@@ -123,8 +150,10 @@ export function ClarificationModal({
                         : 'border-border/70 bg-background text-foreground hover:border-primary/30 hover:bg-muted/40 hover:shadow-md',
                     )}
                   >
-                    {option}
-                  </button>
+                    <p className="cursor-text select-text whitespace-pre-wrap pr-16">
+                      {option}
+                    </p>
+                  </div>
                   <Button
                     type="button"
                     variant="ghost"
@@ -150,13 +179,14 @@ export function ClarificationModal({
                 ? 'Or provide a custom response:'
                 : 'Your response:'}
             </p>
-            <textarea
+            <Textarea
+              ref={textareaRef}
               value={customInput}
               onChange={handleCustomInputChange}
               onKeyDown={handleKeyDown}
               placeholder="Type your response..."
               rows={2}
-              className="w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className="min-h-0 resize-none overflow-y-auto border-border text-sm shadow-sm transition-colors focus-visible:ring-1"
             />
           </div>
 

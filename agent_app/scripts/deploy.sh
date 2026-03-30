@@ -92,12 +92,41 @@ print(value)
 PY
 }
 
+resolve_workspace_file_path() {
+  databricks bundle validate -t "$TARGET" "${PROFILE_ARGS[@]}" --output json | python -c '
+import json
+import sys
+
+config = json.load(sys.stdin)
+file_path = ((config.get("workspace") or {}).get("file_path") or "").strip()
+if file_path:
+    print(file_path)
+'
+}
+
 LAKEBASE_INSTANCE_NAME="$(resolve_bundle_var lakebase_instance_name || true)"
 CATALOG_NAME="$(resolve_bundle_var catalog || true)"
 SCHEMA_NAME="$(resolve_bundle_var schema || true)"
 DATA_CATALOG_NAME="$(resolve_bundle_var data_catalog || true)"
 DATA_SCHEMA_NAME="$(resolve_bundle_var data_schema || true)"
 SQL_WAREHOUSE_ID="$(resolve_bundle_var warehouse_id || true)"
+WORKSPACE_FILE_PATH="$(resolve_workspace_file_path || true)"
+
+cleanup_remote_sync_artifacts() {
+  if [[ -z "${WORKSPACE_FILE_PATH:-}" ]]; then
+    return
+  fi
+
+  # Bundle sync excludes prevent future uploads, but stale remote files remain.
+  local stale_paths=(
+    "$WORKSPACE_FILE_PATH/.venv"
+  )
+
+  for stale_path in "${stale_paths[@]}"; do
+    echo "Removing stale remote sync path: $stale_path"
+    databricks workspace delete "$stale_path" --recursive "${PROFILE_ARGS[@]}" >/dev/null 2>&1 || true
+  done
+}
 
 bootstrap_lakebase_role() {
   local phase="${1:-bootstrap}"
@@ -156,6 +185,7 @@ fi
 # database privileges across instances, but does not recreate the Postgres role
 # during the same app update.
 bootstrap_lakebase_role "pre-deploy"
+cleanup_remote_sync_artifacts
 
 # Deploy
 echo "Deploying bundle (target: $TARGET)..."

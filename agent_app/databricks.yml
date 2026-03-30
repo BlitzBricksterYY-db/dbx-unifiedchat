@@ -103,3 +103,7 @@ targets:
       # genie_space_id_2: "<prod-space-id>"
       # genie_space_id_3: "<prod-space-id>"
       # genie_space_ids: "<comma-separated-prod-ids>"
+
+sync:
+  exclude:
+    - ./.venv/**

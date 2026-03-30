@@ -569,7 +569,7 @@ def _execute_sql_fallback(sql_query: str, warehouse_id: str) -> Dict[str, Any]:
                 print(f"📋 Columns: {', '.join(columns)}\n")
                 
                 # Convert results to list of dicts
-                result_data = [dict(zip(columns, row)) for row in results]
+                result_data = SQLExecutionAgent._normalize_result_rows(columns, results)
                 
                 return {
                     "success": True,
