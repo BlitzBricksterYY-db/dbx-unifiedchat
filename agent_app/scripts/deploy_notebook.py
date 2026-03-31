@@ -1,4 +1,13 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# dependencies = [
+#   "pyyaml",
+#   "databricks-sdk",
+#   "databricks-ai-bridge[memory]",
+# ]
+# ///
 # MAGIC %md
 # MAGIC # Multi-Agent Genie Deploy
 # MAGIC
@@ -17,7 +26,15 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install pyyaml databricks-sdk databricks-ai-bridge python-dotenv
+# MAGIC %pip install pyyaml=6.0.2 databricks-sdk==0.67.0 databricks-ai-bridge[memory]==0.17.0
+
+# COMMAND ----------
+
+import pkg_resources
+
+packages = ["pyyaml", "databricks-sdk", "databricks-ai-bridge"]
+versions = {pkg: pkg_resources.get_distribution(pkg).version for pkg in packages}
+display(versions)
 
 # COMMAND ----------
 
@@ -40,7 +57,7 @@ def _widget(name: str, default: str, *, choices: list[str] | None = None) -> str
     return dbutils.widgets.get(name)
 
 
-initial_project_dir = Path(os.getcwd()).expanduser().resolve()
+initial_project_dir = Path(os.getcwd()).expanduser().resolve().parent
 project_dir_value = _widget("project_dir", str(initial_project_dir))
 project_dir = Path(project_dir_value).expanduser().resolve()
 target = _widget("target", "dev", choices=["dev", "prod"])
@@ -100,6 +117,79 @@ print_preflight_report(config, preflight)
 # COMMAND ----------
 
 print_terminal_handoff(config)
+
+# COMMAND ----------
+
+import subprocess
+
+commands = [
+    ["databricks", "bundle", "validate"],
+    ["databricks", "bundle", "deploy"]
+]
+
+for cmd in commands:
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    print(f"Command: {' '.join(cmd)}")
+    print(f"Return code: {result.returncode}")
+    print(f"Stdout:\n{result.stdout}")
+    print(f"Stderr:\n{result.stderr}")
+
+# COMMAND ----------
+
+# DBTITLE 1,SDK-based validate and deploy
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.apps import AppDeployment, AppDeploymentMode
+
+w = WorkspaceClient()
+
+app_name = config.app_name
+source_code_path = str(config.project_dir)
+
+# ── Step 1: Validate ────────────────────────────────────────
+print("=" * 60)
+print("Step 1: Validation")
+print("=" * 60)
+try:
+    app = w.apps.get(app_name)
+    print(f"  App '{app_name}' exists")
+    print(f"  Compute status : {app.compute_status}")
+    print(f"  URL            : {app.url}")
+    print(f"  SP client ID   : {app.service_principal_client_id}")
+except Exception as e:
+    print(f"  App '{app_name}' not found – creating …")
+    app = w.apps.create_and_wait(
+        name=app_name,
+        description="Multi-agent Genie system on Databricks Apps",
+    )
+    print(f"  Created app: {app.name}")
+
+# ── Step 2: Deploy ──────────────────────────────────────────
+print("\n" + "=" * 60)
+print("Step 2: Deploy")
+print("=" * 60)
+print(f"  Source: {source_code_path}")
+print(f"  Mode  : SNAPSHOT")
+print("  Waiting for deployment to complete …\n")
+
+deployment = w.apps.deploy_and_wait(
+    app_name=app_name,
+    app_deployment=AppDeployment(
+        source_code_path=source_code_path,
+        mode=AppDeploymentMode.SNAPSHOT,
+    ),
+)
+
+print(f"  Deployment ID : {deployment.deployment_id}")
+print(f"  Status        : {deployment.status}")
+print(f"  Deploy mode   : {deployment.mode}")
+if hasattr(deployment, 'status_message') and deployment.status_message:
+    print(f"  Message       : {deployment.status_message}")
+
+# COMMAND ----------
+
+### You may need to do this ###
+# 1, if bundle file stale, remove .databricks/ in the current working directory
+# 2, if report terrform too big, remove the terrfom and bin folder inside .databricks/
 
 # COMMAND ----------
 

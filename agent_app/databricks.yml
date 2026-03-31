@@ -110,3 +110,4 @@ targets:
 sync:
   exclude:
     - ./.venv/**
+    - ./.databricks/**
