@@ -72,6 +72,14 @@ resources:
             experiment_id: ${var.experiment_id}
             permission: 'CAN_MANAGE'
 
+        # UC Volume for MLflow trace artifacts
+        - name: 'trace-volume'
+          uc_securable:
+            securable_type: 'VOLUME'
+            securable_full_name: ${var.catalog}.${var.schema}.${var.volume_name}
+            permission: 'WRITE_VOLUME'
+        
+
         # Serving endpoints (LLM + embedding)
         - name: 'serving-endpoint-sonnet'
           serving_endpoint:

@@ -100,9 +100,9 @@ targets:
       root_path: /Workspace/Users/yang.yang@databricks.com/.bundle/${bundle.name}/${bundle.target}
     variables:
       catalog: "serverless_dbx_unifiedchat_catalog"
+      experiment_id: "2377237249204444"
       # Override these per-environment as needed:
       # warehouse_id: "<prod-warehouse-id>"
-      # experiment_id: "<prod-experiment-id>"
       # genie_space_id_1: "<prod-space-id>"
       # genie_space_id_2: "<prod-space-id>"
       # genie_space_id_3: "<prod-space-id>"
