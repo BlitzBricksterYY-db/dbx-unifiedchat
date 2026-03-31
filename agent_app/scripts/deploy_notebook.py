@@ -17,7 +17,7 @@
 # MAGIC - resolves target-specific bundle settings from `databricks.yml`
 # MAGIC - checks workspace auth and current app state
 # MAGIC - prints the exact `databricks bundle ...` commands to run in the web terminal
-# MAGIC - applies Lakebase and Unity Catalog bootstrap grants after deploy
+# MAGIC - applies Lakebase, Unity Catalog, app database, and Genie space bootstrap grants after deploy
 # MAGIC - verifies the app service principal after deployment
 # MAGIC
 # MAGIC What it does not do:
@@ -84,6 +84,7 @@ print_terminal_handoff = module.print_terminal_handoff
 bootstrap_lakebase_role = module.bootstrap_lakebase_role
 print_bootstrap_results = module.print_bootstrap_results
 verify_deployment = module.verify_deployment
+resolve_effective_profile = module.resolve_effective_profile
 
 config = NotebookDeployConfig(
     project_dir=project_dir,
@@ -140,7 +141,8 @@ for cmd in commands:
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.apps import AppDeployment, AppDeploymentMode
 
-w = WorkspaceClient()
+effective_profile = resolve_effective_profile(project_dir, target, profile or None)
+w = WorkspaceClient(profile=effective_profile) if effective_profile else WorkspaceClient()
 
 app_name = config.app_name
 source_code_path = str(config.project_dir)
@@ -196,8 +198,8 @@ if hasattr(deployment, 'status_message') and deployment.status_message:
 # MAGIC %md
 # MAGIC ## 3. Post-Deploy Bootstrap
 # MAGIC
-# MAGIC After the terminal deploy completes, rerun this cell to grant Lakebase and
-# MAGIC Unity Catalog access to the app service principal.
+# MAGIC After the terminal deploy completes, rerun this cell to grant Lakebase,
+# MAGIC Unity Catalog, app database, and Genie space access to the app service principal.
 
 # COMMAND ----------
 
