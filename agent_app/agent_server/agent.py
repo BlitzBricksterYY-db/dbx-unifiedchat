@@ -103,6 +103,16 @@ _compiled_workflow_app = None
 _compiled_workflow_checkpointer = None
 _compiled_workflow_checkpointer_exit = None
 _compiled_workflow_lock = threading.Lock()
+_RECOVERABLE_CHECKPOINTER_ERROR_MARKERS = (
+    "adminshutdown",
+    "terminating connection due to administrator command",
+    "server closed the connection unexpectedly",
+    "ssl connection has been closed unexpectedly",
+    "connection is closed",
+    "connection not open",
+    "broken pipe",
+    "connection reset by peer",
+)
 
 
 def _get_store():
@@ -141,6 +151,31 @@ def _close_compiled_workflow_resources() -> None:
     finally:
         _compiled_workflow_checkpointer_exit = None
         _compiled_workflow_checkpointer = None
+
+
+def _reset_compiled_workflow_app(reason: Optional[str] = None) -> None:
+    """Drop cached workflow state so the next request rebuilds it."""
+    global _compiled_workflow_app
+    with _compiled_workflow_lock:
+        if reason:
+            logger.warning(f"Resetting cached workflow app: {reason}")
+        _compiled_workflow_app = None
+        _close_compiled_workflow_resources()
+
+
+def _is_recoverable_checkpointer_error(exc: Exception) -> bool:
+    """Detect transient DB/checkpointer connection failures worth retrying once."""
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = f"{type(current).__name__}: {current}".lower()
+        if any(marker in message for marker in _RECOVERABLE_CHECKPOINTER_ERROR_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+
+    return False
 
 
 atexit.register(_close_compiled_workflow_resources)
@@ -470,48 +505,73 @@ Guidelines:
                 last_state: dict = {}
                 from langgraph.types import Command
 
-                app = _get_compiled_workflow_app()
-                logger.info(f"Executing cached workflow app (thread: {thread_id})")
+                for attempt in range(2):
+                    attempt_emitted_events = False
+                    try:
+                        app = _get_compiled_workflow_app()
+                        logger.info(
+                            f"Executing cached workflow app (thread: {thread_id}, attempt: {attempt + 1})"
+                        )
 
-                existing_state = app.get_state(run_config)
-                if existing_state.tasks and any(
-                    hasattr(t, "interrupts") and t.interrupts for t in existing_state.tasks
-                ):
-                    logger.info(f"Resuming from interrupt on thread {thread_id}")
-                    input_data = Command(
-                        resume=latest_query,
-                        update={
-                            "execution_mode": execution_mode,
-                            "force_synthesis_route": force_synthesis_route,
-                            "clarification_sensitivity": clarification_sensitivity,
-                            "count_only": count_only,
-                        },
-                    )
-                else:
-                    input_data = initial_state
+                        existing_state = app.get_state(run_config)
+                        if existing_state.tasks and any(
+                            hasattr(t, "interrupts") and t.interrupts for t in existing_state.tasks
+                        ):
+                            logger.info(f"Resuming from interrupt on thread {thread_id}")
+                            input_data = Command(
+                                resume=latest_query,
+                                update={
+                                    "execution_mode": execution_mode,
+                                    "force_synthesis_route": force_synthesis_route,
+                                    "clarification_sensitivity": clarification_sensitivity,
+                                    "count_only": count_only,
+                                },
+                            )
+                        else:
+                            input_data = initial_state
 
-                for raw_event in app.stream(
-                    input_data,
-                    run_config,
-                    stream_mode=["updates", "messages", "custom", "tasks"],
-                    subgraphs=True,
-                ):
-                    # subgraphs=True: 3-tuple (ns, mode, data)
-                    # or 2-tuple (ns, (mode, data)) depending on LangGraph version
-                    if len(raw_event) == 3:
-                        ns, mode, data = raw_event
-                    elif isinstance(raw_event[0], tuple):
-                        ns = raw_event[0]
-                        mode, data = raw_event[1]
-                    else:
-                        ns, mode, data = (), raw_event[0], raw_event[1]
+                        for raw_event in app.stream(
+                            input_data,
+                            run_config,
+                            stream_mode=["updates", "messages", "custom", "tasks"],
+                            subgraphs=True,
+                        ):
+                            # subgraphs=True: 3-tuple (ns, mode, data)
+                            # or 2-tuple (ns, (mode, data)) depending on LangGraph version
+                            if len(raw_event) == 3:
+                                ns, mode, data = raw_event
+                            elif isinstance(raw_event[0], tuple):
+                                ns = raw_event[0]
+                                mode, data = raw_event[1]
+                            else:
+                                ns, mode, data = (), raw_event[0], raw_event[1]
 
-                    if mode == "updates" and not ns and isinstance(data, dict):
-                        last_state.update(data)
-                    # Normalise to 3-tuple for downstream consumer
-                    loop.call_soon_threadsafe(
-                        queue.put_nowait, (ns, mode, data)
-                    )
+                            if mode == "updates" and not ns and isinstance(data, dict):
+                                last_state.update(data)
+                            # Only retry before any stream events were emitted to avoid duplicates.
+                            attempt_emitted_events = True
+                            loop.call_soon_threadsafe(
+                                queue.put_nowait, (ns, mode, data)
+                            )
+                        break
+                    except Exception as exc:
+                        is_retryable = (
+                            attempt == 0
+                            and not attempt_emitted_events
+                            and _is_recoverable_checkpointer_error(exc)
+                        )
+                        if not is_retryable:
+                            raise
+
+                        logger.warning(
+                            "Recoverable workflow checkpointer error on thread %s; "
+                            "resetting cached workflow app and retrying once: %s",
+                            thread_id,
+                            exc,
+                        )
+                        _reset_compiled_workflow_app(reason=str(exc))
+                        last_state = {}
+                        continue
 
                 workflow_output: dict = {"status": "completed"}
                 if summary := last_state.get("final_summary"):
