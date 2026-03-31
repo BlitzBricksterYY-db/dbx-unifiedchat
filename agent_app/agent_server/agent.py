@@ -5,9 +5,11 @@ Converted from SuperAgentHybridResponsesAgent (Model Serving) to
 MLflow GenAI Server decorated functions (Databricks Apps).
 """
 
+import atexit
 import contextvars
 import json
 import logging
+import sys
 import threading
 import time
 from typing import AsyncGenerator, Optional
@@ -97,6 +99,10 @@ except Exception as e:
 
 _store = None
 _store_lock = threading.Lock()
+_compiled_workflow_app = None
+_compiled_workflow_checkpointer = None
+_compiled_workflow_checkpointer_exit = None
+_compiled_workflow_lock = threading.Lock()
 
 
 def _get_store():
@@ -120,6 +126,66 @@ def _get_store():
         _store = store
         logger.info("DatabricksStore initialized")
     return _store
+
+
+def _close_compiled_workflow_resources() -> None:
+    """Best-effort cleanup for the long-lived compiled workflow checkpointer."""
+    global _compiled_workflow_checkpointer_exit, _compiled_workflow_checkpointer
+    exit_fn = _compiled_workflow_checkpointer_exit
+    if exit_fn is None:
+        return
+    try:
+        exit_fn(None, None, None)
+    except Exception as exc:
+        logger.warning(f"Failed to close compiled workflow checkpointer: {exc}")
+    finally:
+        _compiled_workflow_checkpointer_exit = None
+        _compiled_workflow_checkpointer = None
+
+
+atexit.register(_close_compiled_workflow_resources)
+
+
+def _get_compiled_workflow_app():
+    """Compile the workflow once and reuse it across requests."""
+    global _compiled_workflow_app, _compiled_workflow_checkpointer, _compiled_workflow_checkpointer_exit
+    if _compiled_workflow_app is not None:
+        return _compiled_workflow_app
+
+    with _compiled_workflow_lock:
+        if _compiled_workflow_app is not None:
+            return _compiled_workflow_app
+
+        from databricks_langchain import CheckpointSaver
+
+        logger.info("Compiling workflow app for reuse")
+        cm = CheckpointSaver(instance_name=LAKEBASE_INSTANCE_NAME)
+        checkpointer = cm
+        exit_fn = None
+
+        if hasattr(cm, "__enter__") and hasattr(cm, "__exit__"):
+            entered = cm.__enter__()
+            if entered is not None:
+                checkpointer = entered
+            exit_fn = cm.__exit__
+
+        try:
+            compiled = _workflow.compile(checkpointer=checkpointer)
+        except Exception:
+            if exit_fn is not None:
+                try:
+                    exit_fn(*sys.exc_info())
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        f"Failed to clean up workflow checkpointer after compile error: {cleanup_exc}"
+                    )
+            raise
+
+        _compiled_workflow_app = compiled
+        _compiled_workflow_checkpointer = checkpointer
+        _compiled_workflow_checkpointer_exit = exit_fn
+        logger.info("Workflow app compiled and cached")
+        return _compiled_workflow_app
 
 
 # ---------------------------------------------------------------------------
@@ -378,8 +444,6 @@ Guidelines:
 
     def _run_workflow():
         """Stream events from the sync LangGraph workflow into an asyncio.Queue."""
-        from databricks_langchain import CheckpointSaver
-
         try:
             with mlflow.start_span(
                 name="langgraph_workflow",
@@ -404,51 +468,50 @@ Guidelines:
                     }
                 )
                 last_state: dict = {}
-                with CheckpointSaver(instance_name=LAKEBASE_INSTANCE_NAME) as checkpointer:
-                    from langgraph.types import Command
+                from langgraph.types import Command
 
-                    app = _workflow.compile(checkpointer=checkpointer)
-                    logger.info(f"Executing workflow with checkpointer (thread: {thread_id})")
+                app = _get_compiled_workflow_app()
+                logger.info(f"Executing cached workflow app (thread: {thread_id})")
 
-                    existing_state = app.get_state(run_config)
-                    if existing_state.tasks and any(
-                        hasattr(t, "interrupts") and t.interrupts for t in existing_state.tasks
-                    ):
-                        logger.info(f"Resuming from interrupt on thread {thread_id}")
-                        input_data = Command(
-                            resume=latest_query,
-                            update={
-                                "execution_mode": execution_mode,
-                                "force_synthesis_route": force_synthesis_route,
-                                "clarification_sensitivity": clarification_sensitivity,
-                                "count_only": count_only,
-                            },
-                        )
+                existing_state = app.get_state(run_config)
+                if existing_state.tasks and any(
+                    hasattr(t, "interrupts") and t.interrupts for t in existing_state.tasks
+                ):
+                    logger.info(f"Resuming from interrupt on thread {thread_id}")
+                    input_data = Command(
+                        resume=latest_query,
+                        update={
+                            "execution_mode": execution_mode,
+                            "force_synthesis_route": force_synthesis_route,
+                            "clarification_sensitivity": clarification_sensitivity,
+                            "count_only": count_only,
+                        },
+                    )
+                else:
+                    input_data = initial_state
+
+                for raw_event in app.stream(
+                    input_data,
+                    run_config,
+                    stream_mode=["updates", "messages", "custom", "tasks"],
+                    subgraphs=True,
+                ):
+                    # subgraphs=True: 3-tuple (ns, mode, data)
+                    # or 2-tuple (ns, (mode, data)) depending on LangGraph version
+                    if len(raw_event) == 3:
+                        ns, mode, data = raw_event
+                    elif isinstance(raw_event[0], tuple):
+                        ns = raw_event[0]
+                        mode, data = raw_event[1]
                     else:
-                        input_data = initial_state
+                        ns, mode, data = (), raw_event[0], raw_event[1]
 
-                    for raw_event in app.stream(
-                        input_data,
-                        run_config,
-                        stream_mode=["updates", "messages", "custom", "tasks"],
-                        subgraphs=True,
-                    ):
-                        # subgraphs=True: 3-tuple (ns, mode, data)
-                        # or 2-tuple (ns, (mode, data)) depending on LangGraph version
-                        if len(raw_event) == 3:
-                            ns, mode, data = raw_event
-                        elif isinstance(raw_event[0], tuple):
-                            ns = raw_event[0]
-                            mode, data = raw_event[1]
-                        else:
-                            ns, mode, data = (), raw_event[0], raw_event[1]
-
-                        if mode == "updates" and not ns and isinstance(data, dict):
-                            last_state.update(data)
-                        # Normalise to 3-tuple for downstream consumer
-                        loop.call_soon_threadsafe(
-                            queue.put_nowait, (ns, mode, data)
-                        )
+                    if mode == "updates" and not ns and isinstance(data, dict):
+                        last_state.update(data)
+                    # Normalise to 3-tuple for downstream consumer
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait, (ns, mode, data)
+                    )
 
                 workflow_output: dict = {"status": "completed"}
                 if summary := last_state.get("final_summary"):
