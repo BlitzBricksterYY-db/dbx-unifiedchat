@@ -189,7 +189,7 @@ export function AgentSettingsPanel({
           </div>
 
           <div className="mb-3">
-            <label className="mb-1 block text-xs text-zinc-500 dark:text-zinc-400">
+            <label className="mb-1 block font-semibold text-xs text-zinc-700 dark:text-zinc-200">
               Execution Mode
             </label>
             <div className="flex items-center gap-2">
@@ -241,7 +241,7 @@ export function AgentSettingsPanel({
           </div>
 
           <div className="mb-3 border-zinc-200 border-t pt-3 dark:border-zinc-700">
-            <label className="mb-1 block text-xs text-zinc-500 dark:text-zinc-400">
+            <label className="mb-1 block font-semibold text-xs text-zinc-700 dark:text-zinc-200">
               SQL Synthesis Agent Route
             </label>
             <div className="flex rounded-md border border-zinc-200 dark:border-zinc-700">
@@ -280,7 +280,7 @@ export function AgentSettingsPanel({
           </div>
 
           <div className="border-zinc-200 border-t pt-3 dark:border-zinc-700">
-            <label className="mb-1 block text-xs text-zinc-500 dark:text-zinc-400">
+            <label className="mb-1 block font-semibold text-xs text-zinc-700 dark:text-zinc-200">
               Clarification Sensitivity
             </label>
             <input
@@ -332,7 +332,7 @@ export function AgentSettingsPanel({
           </div>
 
           <div className="border-zinc-200 border-t pt-3 dark:border-zinc-700">
-            <label className="mb-1 block text-xs text-zinc-500 dark:text-zinc-400">
+            <label className="mb-1 block font-semibold text-xs text-zinc-700 dark:text-zinc-200">
               Count Only
             </label>
             <div className="flex items-center gap-2">
