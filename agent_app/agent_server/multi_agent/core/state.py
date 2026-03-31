@@ -11,6 +11,17 @@ import operator
 import uuid as uuid_module
 
 
+def _prefer_latest(existing: Any, incoming: Any) -> Any:
+    """Reducer for scalar runtime overrides in parallel LangGraph branches.
+
+    Clarification fan-out can cause the same per-request override to be seen more
+    than once in a single logical step (for example when replaying interrupted
+    state from the checkpointer). Treat ``None`` as "no update" and otherwise
+    let the latest value win.
+    """
+    return existing if incoming is None else incoming
+
+
 class ConversationTurn(TypedDict):
     """Represents a single conversation turn with all its context."""
     turn_id: str
@@ -54,10 +65,10 @@ class GraphInput(TypedDict, total=False):
     thread_id: Optional[str]
 
     # UI/runtime overrides
-    execution_mode: Optional[str]
-    force_synthesis_route: Optional[str]
-    clarification_sensitivity: Optional[str]
-    count_only: Optional[bool]
+    execution_mode: Annotated[Optional[str], _prefer_latest]
+    force_synthesis_route: Annotated[Optional[str], _prefer_latest]
+    clarification_sensitivity: Annotated[Optional[str], _prefer_latest]
+    count_only: Annotated[Optional[bool], _prefer_latest]
 
     # Fresh-turn per-query state reset fields
     question_clear: bool
@@ -104,8 +115,8 @@ class AgentState(TypedDict):
 
     # Clarification
     question_clear: bool
-    clarification_sensitivity: Optional[str]  # "off" | "low" | "medium" | "high" | "on"
-    count_only: Optional[bool]
+    clarification_sensitivity: Annotated[Optional[str], _prefer_latest]  # "off" | "low" | "medium" | "high" | "on"
+    count_only: Annotated[Optional[bool], _prefer_latest]
 
     # Meta-question handling
     is_meta_question: Optional[bool]
@@ -163,12 +174,12 @@ class AgentState(TypedDict):
     preserved_results: Optional[List[QueryExecutionResult]]
 
     # Sequential execution mode
-    execution_mode: Optional[str]  # "parallel" | "sequential"
+    execution_mode: Annotated[Optional[str], _prefer_latest]  # "parallel" | "sequential"
     sequential_step: Optional[int]
     total_sub_questions: Optional[int]
 
     # UI override
-    force_synthesis_route: Optional[str]  # "auto" | "table_route" | "genie_route"
+    force_synthesis_route: Annotated[Optional[str], _prefer_latest]  # "auto" | "table_route" | "genie_route"
     join_strategy_route: Optional[str]
 
 
