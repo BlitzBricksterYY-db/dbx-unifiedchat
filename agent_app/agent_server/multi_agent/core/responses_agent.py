@@ -342,7 +342,8 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
             "meta_question_detected": lambda d: f"\n💡 Meta-question detected",
             "clarification_requested": lambda d: f"\n❓ Clarification needed: {d.get('reason', 'unknown')}",
             "clarification_skipped": lambda d: f"\n⏭️ Clarification skipped: {d.get('reason', 'unknown')}",
-            "clarification_result": lambda d: f"\n🧭 {d.get('content', f\"Clarification result: {d.get('result', 'unknown')}\")}",
+            "clarification_result": lambda d: "\n🧭 "
+            + d.get("content", f"Clarification result: {d.get('result', 'unknown')}"),
             "agent_step": lambda d: f"\n📍 {d.get('agent', 'agent').upper()}: {d.get('content', d.get('step', 'processing'))}",
             "agent_result": lambda d: f"\n✅ {d.get('agent', 'agent').upper()}: {d.get('result', 'completed')} - {d.get('content', '')}",
             "sql_synthesis_start": lambda d: f"\n🔧 Starting SQL synthesis via {d.get('route', 'unknown')} route for {len(d.get('spaces', []))} space(s)",
@@ -552,15 +553,11 @@ Guidelines:
                 hasattr(t, "interrupts") and t.interrupts for t in existing_state.tasks
             ):
                 logger.info(f"Resuming from interrupt on thread {thread_id}")
-                input_data = Command(
-                    resume=latest_query,
-                    update={
-                        "execution_mode": execution_mode,
-                        "force_synthesis_route": force_synthesis_route,
-                        "clarification_sensitivity": clarification_sensitivity,
-                        "count_only": count_only,
-                    },
-                )
+                # Resume with only the user's clarification answer.
+                # Re-sending scalar runtime overrides here can collide with
+                # the clarification subgraph's parallel fan-out and trigger
+                # INVALID_CONCURRENT_GRAPH_UPDATE on keys like execution_mode.
+                input_data = Command(resume=latest_query)
             else:
                 input_data = initial_state
 

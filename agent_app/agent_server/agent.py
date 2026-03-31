@@ -518,15 +518,11 @@ Guidelines:
                             hasattr(t, "interrupts") and t.interrupts for t in existing_state.tasks
                         ):
                             logger.info(f"Resuming from interrupt on thread {thread_id}")
-                            input_data = Command(
-                                resume=latest_query,
-                                update={
-                                    "execution_mode": execution_mode,
-                                    "force_synthesis_route": force_synthesis_route,
-                                    "clarification_sensitivity": clarification_sensitivity,
-                                    "count_only": count_only,
-                                },
-                            )
+                            # Resume with only the user's clarification answer.
+                            # Re-sending scalar runtime overrides here can collide with
+                            # the clarification subgraph's parallel fan-out and trigger
+                            # INVALID_CONCURRENT_GRAPH_UPDATE on keys like execution_mode.
+                            input_data = Command(resume=latest_query)
                         else:
                             input_data = initial_state
 
