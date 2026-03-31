@@ -23,7 +23,7 @@ variables:
 
   # Lakebase
   lakebase_instance_name:
-    default: "multi-agent-genie-system-state-db-${bundle.target}"
+    default: "c3od-agent-genie-system-state-db-${bundle.target}"
   lakebase_capacity:
     default: "CU_1"
 
@@ -91,13 +91,13 @@ variables:
 
 targets:
   dev:
-    default: false
+    default: true
     mode: development
     workspace:
       profile: dev
 
   prod:
-    default: true
+    default: false
     mode: production
     workspace:
       profile: prod
