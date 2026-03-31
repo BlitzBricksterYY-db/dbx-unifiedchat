@@ -415,7 +415,7 @@ export function Chat({
             feedback={feedback}
           />
 
-          <div className="sticky bottom-0 z-1 mx-auto flex w-full max-w-7xl flex-col gap-1 border-t-0 bg-background px-2 pb-3 md:px-4 md:pb-4">
+          <div className="sticky bottom-0 z-30 mx-auto flex w-full max-w-7xl flex-col gap-1 border-t-0 bg-background px-2 pb-3 md:px-4 md:pb-4">
             {!isReadonly && (
               <>
                 <div className="flex justify-end">
