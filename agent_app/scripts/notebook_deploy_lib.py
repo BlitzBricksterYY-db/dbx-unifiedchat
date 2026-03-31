@@ -8,8 +8,10 @@ import yaml
 from databricks.sdk import WorkspaceClient
 
 from scripts.grant_lakebase_permissions import (
+    DEFAULT_DATABASE_NAME,
     PermissionGrantConfig,
     apply_permission_grants,
+    hydrate_config_from_bundle,
 )
 
 
@@ -35,6 +37,7 @@ class NotebookDeployConfig:
 @dataclass
 class PreflightReport:
     settings: dict[str, str | None]
+    effective_profile: str | None
     workspace_user: str | None
     app_exists: bool
     service_principal_client_id: str | None
@@ -84,16 +87,32 @@ def resolve_bundle_var(project_dir: Path, target: str, var_name: str) -> str | N
 
 
 def bundle_settings(project_dir: Path, target: str) -> dict[str, str | None]:
-    keys = (
-        "catalog",
-        "schema",
-        "data_catalog",
-        "data_schema",
-        "warehouse_id",
-        "lakebase_instance_name",
-        "experiment_id",
+    resolved = hydrate_config_from_bundle(
+        PermissionGrantConfig(
+            memory_type="langgraph-short-term",
+            target=target,
+            bundle_config_path=str(project_dir / "databricks.yml"),
+            database_name=DEFAULT_DATABASE_NAME,
+        )
     )
-    return {key: resolve_bundle_var(project_dir, target, key) for key in keys}
+    return {
+        "catalog": resolved.catalog_name,
+        "schema": resolved.schema_name,
+        "data_catalog": resolved.data_catalog_name,
+        "data_schema": resolved.data_schema_name,
+        "warehouse_id": resolved.warehouse_id,
+        "lakebase_instance_name": resolved.instance_name,
+        "database_name": resolved.database_name,
+        "genie_space_ids": ",".join(resolved.genie_space_ids or []),
+        "experiment_id": resolve_bundle_var(project_dir, target, "experiment_id"),
+    }
+
+
+def resolve_effective_profile(project_dir: Path, target: str, profile: str | None) -> str | None:
+    if profile:
+        return profile
+    config = load_bundle_config(project_dir)
+    return (((config.get("targets") or {}).get(target) or {}).get("workspace") or {}).get("profile")
 
 
 def resolve_source_code_path(
@@ -135,14 +154,17 @@ def get_app_info(app_name: str, profile: str | None) -> tuple[bool, str | None]:
 
 def collect_preflight_report(config: NotebookDeployConfig) -> PreflightReport:
     warnings: list[str] = []
+    effective_profile = resolve_effective_profile(
+        config.project_dir, config.target, config.profile
+    )
     workspace_user = None
     try:
-        workspace_user = get_workspace_user(config.profile)
+        workspace_user = get_workspace_user(effective_profile)
     except Exception as e:
         warnings.append(f"Workspace auth check failed: {e}")
 
     settings = bundle_settings(config.project_dir, config.target)
-    app_exists, sp_client_id = get_app_info(config.app_name, config.profile)
+    app_exists, sp_client_id = get_app_info(config.app_name, effective_profile)
 
     raw_source_code_path = None
     source_code_path = None
@@ -164,6 +186,7 @@ def collect_preflight_report(config: NotebookDeployConfig) -> PreflightReport:
 
     return PreflightReport(
         settings=settings,
+        effective_profile=effective_profile,
         workspace_user=workspace_user,
         app_exists=app_exists,
         service_principal_client_id=sp_client_id,
@@ -177,6 +200,7 @@ def print_preflight_report(config: NotebookDeployConfig, report: PreflightReport
     print(f"  project_dir: {config.project_dir}")
     print(f"  target: {config.target}")
     print(f"  profile: {config.profile or '<workspace auth>'}")
+    print(f"  effective_profile: {report.effective_profile or '<workspace auth>'}")
     print(f"  app_name: {config.app_name}")
     print(f"  sync_first: {config.sync_first}")
     print(f"  run_after: {config.run_after}")
@@ -247,7 +271,10 @@ def bootstrap_lakebase_role(
         print("Skipping Lakebase bootstrap: no lakebase_instance_name resolved.")
         return []
 
-    app_exists, _ = get_app_info(config.app_name, config.profile)
+    effective_profile = resolve_effective_profile(
+        config.project_dir, config.target, config.profile
+    )
+    app_exists, _ = get_app_info(config.app_name, effective_profile)
     if not app_exists:
         print(
             f"Skipping Lakebase bootstrap ({phase}): app '{config.app_name}' does not exist yet."
@@ -255,7 +282,7 @@ def bootstrap_lakebase_role(
         return []
 
     print(f"Bootstrapping Lakebase role ({phase}) in {instance_name}...")
-    workspace_client = _workspace_client(config.profile)
+    workspace_client = _workspace_client(effective_profile)
     results: list[tuple[str, bool, str | None]] = []
     for memory_type in ("langgraph-short-term", "langgraph-long-term"):
         try:
@@ -263,13 +290,9 @@ def bootstrap_lakebase_role(
                 PermissionGrantConfig(
                     memory_type=memory_type,
                     app_name=config.app_name,
-                    profile=config.profile,
-                    instance_name=instance_name,
-                    catalog_name=settings["catalog"],
-                    schema_name=settings["schema"],
-                    data_catalog_name=settings["data_catalog"],
-                    data_schema_name=settings["data_schema"],
-                    warehouse_id=settings["warehouse_id"],
+                    profile=effective_profile,
+                    target=config.target,
+                    bundle_config_path=str(config.project_dir / "databricks.yml"),
                 ),
                 workspace_client=workspace_client,
             )
@@ -304,7 +327,10 @@ def print_bootstrap_results(
 
 
 def verify_deployment(config: NotebookDeployConfig) -> None:
-    app_exists, sp_client_id = get_app_info(config.app_name, config.profile)
+    effective_profile = resolve_effective_profile(
+        config.project_dir, config.target, config.profile
+    )
+    app_exists, sp_client_id = get_app_info(config.app_name, effective_profile)
     print("Post-deploy verification")
     print(f"  app_exists: {app_exists}")
     print(f"  service_principal_client_id: {sp_client_id or '<not available yet>'}")
