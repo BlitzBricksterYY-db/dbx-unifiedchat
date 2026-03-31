@@ -96,14 +96,6 @@ fi
 
 cd "$APP_DIR"
 
-APP_NAME="multi-agent-genie-app-${TARGET}"
-BUNDLE_APP_KEY="agent_migration"
-
-echo "=== Deploy: $APP_NAME ==="
-echo "  Target  : $TARGET"
-echo "  Profile : ${PROFILE:-<default>}"
-echo
-
 resolve_bundle_var() {
   local var_name="$1"
   python - "$TARGET" "$var_name" <<'PY'
@@ -133,8 +125,15 @@ print(value)
 PY
 }
 
+bundle_validate_output() {
+  if [[ -z "${BUNDLE_VALIDATE_OUTPUT:-}" ]]; then
+    BUNDLE_VALIDATE_OUTPUT="$(databricks bundle validate -t "$TARGET" "${PROFILE_ARGS[@]}" --output json)"
+  fi
+  printf '%s\n' "$BUNDLE_VALIDATE_OUTPUT"
+}
+
 resolve_workspace_file_path() {
-  databricks bundle validate -t "$TARGET" "${PROFILE_ARGS[@]}" --output json | python -c '
+  bundle_validate_output | python -c '
 import json
 import sys
 
@@ -145,6 +144,39 @@ if file_path:
 '
 }
 
+resolve_bundle_app_name() {
+  bundle_validate_output | python -c '
+import json
+import sys
+
+config = json.load(sys.stdin)
+apps = (config.get("resources") or {}).get("apps") or {}
+if not apps:
+    raise SystemExit(1)
+
+_, app_config = next(iter(apps.items()))
+name = (app_config.get("name") or "").strip()
+if name:
+    print(name)
+'
+}
+
+resolve_bundle_app_key() {
+  bundle_validate_output | python -c '
+import json
+import sys
+
+config = json.load(sys.stdin)
+apps = (config.get("resources") or {}).get("apps") or {}
+if not apps:
+    raise SystemExit(1)
+
+app_key = next(iter(apps.keys()), "").strip()
+if app_key:
+    print(app_key)
+'
+}
+
 LAKEBASE_INSTANCE_NAME="$(resolve_bundle_var lakebase_instance_name || true)"
 CATALOG_NAME="$(resolve_bundle_var catalog || true)"
 SCHEMA_NAME="$(resolve_bundle_var schema || true)"
@@ -152,6 +184,18 @@ DATA_CATALOG_NAME="$(resolve_bundle_var data_catalog || true)"
 DATA_SCHEMA_NAME="$(resolve_bundle_var data_schema || true)"
 SQL_WAREHOUSE_ID="$(resolve_bundle_var warehouse_id || true)"
 WORKSPACE_FILE_PATH="$(resolve_workspace_file_path || true)"
+APP_NAME="$(resolve_bundle_app_name || true)"
+BUNDLE_APP_KEY="$(resolve_bundle_app_key || true)"
+
+if [[ -z "$APP_NAME" || -z "$BUNDLE_APP_KEY" ]]; then
+  echo "Failed to resolve app metadata from bundle configuration."
+  exit 1
+fi
+
+echo "=== Deploy: $APP_NAME ==="
+echo "  Target  : $TARGET"
+echo "  Profile : ${PROFILE:-<default>}"
+echo
 
 cleanup_remote_sync_artifacts() {
   if [[ -z "${WORKSPACE_FILE_PATH:-}" ]]; then
