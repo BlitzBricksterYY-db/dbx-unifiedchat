@@ -1,7 +1,7 @@
 resources:
   apps:
     agent_migration:
-      name: "multi-agent-genie-app-${bundle.target}"
+      name: "dbx-unifiedchat-app-${bundle.target}"
       description: "Multi-agent Genie system on Databricks Apps"
       source_code_path: ../
       config:
@@ -86,59 +86,10 @@ resources:
             name: ${var.embedding_model}
             permission: 'CAN_QUERY'
 
-        # UC functions
-        - name: 'uc-fn-get-space-summary'
-          uc_securable:
-            securable_full_name: '${var.catalog}.${var.schema}.get_space_summary'
-            securable_type: 'FUNCTION'
-            permission: 'EXECUTE'
-        - name: 'uc-fn-get-table-overview'
-          uc_securable:
-            securable_full_name: '${var.catalog}.${var.schema}.get_table_overview'
-            securable_type: 'FUNCTION'
-            permission: 'EXECUTE'
-        - name: 'uc-fn-get-column-detail'
-          uc_securable:
-            securable_full_name: '${var.catalog}.${var.schema}.get_column_detail'
-            securable_type: 'FUNCTION'
-            permission: 'EXECUTE'
-        - name: 'uc-fn-get-space-instructions'
-          uc_securable:
-            securable_full_name: '${var.catalog}.${var.schema}.get_space_instructions'
-            securable_type: 'FUNCTION'
-            permission: 'EXECUTE'
-        - name: 'uc-fn-get-space-details'
-          uc_securable:
-            securable_full_name: '${var.catalog}.${var.schema}.get_space_details'
-            securable_type: 'FUNCTION'
-            permission: 'EXECUTE'
-
         # SQL warehouse
         - name: 'sql-warehouse'
           sql_warehouse:
             id: ${var.warehouse_id}
             permission: 'CAN_USE'
 
-        # UC Volume (for trace artifacts via Files API)
-        - name: 'trace-volume'
-          uc_securable:
-            securable_full_name: '${var.catalog}.${var.schema}.volume'
-            securable_type: 'VOLUME'
-            permission: 'WRITE_VOLUME'
 
-        # Vector search index
-        - name: 'vs-index'
-          uc_securable:
-            securable_full_name: '${var.catalog}.${var.schema}.enriched_genie_docs_chunks_vs_index'
-            securable_type: 'TABLE'
-            permission: 'SELECT'
-
-        # Tables
-        - name: 'enriched-docs-chunks'
-          uc_securable:
-            securable_full_name: '${var.catalog}.${var.schema}.enriched_genie_docs_chunks'
-            securable_type: 'TABLE'
-            permission: 'SELECT'
-        # NOTE: HealthVerity tables require manual grants after deploy:
-        #   GRANT SELECT ON TABLE healthverity_claims_sample_patient_dataset_dev.hv_claims_sample.<table>
-        #     TO `<sp-app-id>`;
