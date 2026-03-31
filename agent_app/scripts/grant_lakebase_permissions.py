@@ -20,6 +20,9 @@ import argparse
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
+
+import yaml
 
 # Per-memory-type table definitions for public schema.
 MEMORY_TYPE_TABLES: dict[str, list[str]] = {
@@ -55,6 +58,9 @@ SHARED_SCHEMAS: dict[str, list[str]] = {
     "ai_chatbot": ["Chat", "Message", "User", "Vote", "__drizzle_migrations"],
 }
 
+DEFAULT_DATABASE_NAME = "databricks_postgres"
+DEFAULT_BUNDLE_CONFIG_PATH = Path(__file__).resolve().parents[1] / "databricks.yml"
+
 
 @dataclass
 class PermissionGrantConfig:
@@ -62,11 +68,15 @@ class PermissionGrantConfig:
     sp_client_id: str | None = None
     app_name: str | None = None
     profile: str | None = None
+    target: str | None = None
+    bundle_config_path: str | None = None
     catalog_name: str | None = None
     schema_name: str | None = None
     data_catalog_name: str | None = None
     data_schema_name: str | None = None
     instance_name: str | None = None
+    database_name: str | None = None
+    genie_space_ids: list[str] | None = None
     project: str | None = None
     branch: str | None = None
     warehouse_id: str | None = None
@@ -76,6 +86,86 @@ def build_workspace_client(profile: str | None):
     from databricks.sdk import WorkspaceClient
 
     return WorkspaceClient(profile=profile) if profile else WorkspaceClient()
+
+
+def _parse_csv(raw_value: str | None) -> list[str]:
+    if not raw_value:
+        return []
+    return [part.strip() for part in raw_value.split(",") if part.strip()]
+
+
+def _load_bundle_config(path: str | None) -> dict:
+    config_path = Path(path) if path else DEFAULT_BUNDLE_CONFIG_PATH
+    if not config_path.exists():
+        return {}
+    return yaml.safe_load(config_path.read_text()) or {}
+
+
+def _resolve_bundle_target(bundle_config: dict, target: str | None, profile: str | None) -> str | None:
+    targets = bundle_config.get("targets") or {}
+    if target:
+        if target not in targets:
+            raise ValueError(f"Bundle target '{target}' not found in databricks.yml.")
+        return target
+
+    if profile:
+        for target_name, target_config in targets.items():
+            workspace_profile = ((target_config or {}).get("workspace") or {}).get("profile")
+            if workspace_profile == profile:
+                return target_name
+
+    for target_name, target_config in targets.items():
+        if (target_config or {}).get("default") is True:
+            return target_name
+
+    return next(iter(targets), None)
+
+
+def _resolve_bundle_variable(bundle_config: dict, target: str | None, variable_name: str):
+    value = None
+    if target:
+        value = (((bundle_config.get("targets") or {}).get(target) or {}).get("variables") or {}).get(variable_name)
+
+    if value is None:
+        value = ((bundle_config.get("variables") or {}).get(variable_name) or {}).get("default")
+
+    if isinstance(value, str) and target:
+        value = value.replace("${bundle.target}", target)
+
+    return value
+
+
+def hydrate_config_from_bundle(config: PermissionGrantConfig) -> PermissionGrantConfig:
+    bundle_config = _load_bundle_config(config.bundle_config_path)
+    if not bundle_config:
+        config.database_name = config.database_name or DEFAULT_DATABASE_NAME
+        config.genie_space_ids = config.genie_space_ids or []
+        return config
+
+    target = _resolve_bundle_target(bundle_config, config.target, config.profile)
+    config.target = config.target or target
+
+    if not config.profile and target:
+        config.profile = (((bundle_config.get("targets") or {}).get(target) or {}).get("workspace") or {}).get("profile")
+
+    config.catalog_name = config.catalog_name or _resolve_bundle_variable(bundle_config, target, "catalog")
+    config.schema_name = config.schema_name or _resolve_bundle_variable(bundle_config, target, "schema")
+    config.data_catalog_name = config.data_catalog_name or _resolve_bundle_variable(bundle_config, target, "data_catalog")
+    config.data_schema_name = config.data_schema_name or _resolve_bundle_variable(bundle_config, target, "data_schema")
+    config.instance_name = config.instance_name or _resolve_bundle_variable(bundle_config, target, "lakebase_instance_name")
+    config.warehouse_id = config.warehouse_id or _resolve_bundle_variable(bundle_config, target, "warehouse_id")
+    config.database_name = config.database_name or DEFAULT_DATABASE_NAME
+
+    if not config.genie_space_ids:
+        genie_space_ids = _parse_csv(_resolve_bundle_variable(bundle_config, target, "genie_space_ids"))
+        if not genie_space_ids:
+            for variable_name in ("genie_space_id_1", "genie_space_id_2", "genie_space_id_3"):
+                value = _resolve_bundle_variable(bundle_config, target, variable_name)
+                if isinstance(value, str) and value.strip():
+                    genie_space_ids.append(value.strip())
+        config.genie_space_ids = genie_space_ids
+
+    return config
 
 
 def quote_ident(identifier: str) -> str:
@@ -290,6 +380,61 @@ def validate_permission_config(config: PermissionGrantConfig) -> None:
         )
 
 
+def sync_app_resource_permissions(config: PermissionGrantConfig, workspace_client) -> None:
+    from databricks.sdk.service import apps as apps_service
+
+    if not config.app_name:
+        print("App resource grants require --app-name; skipping database and Genie resource sync.")
+        return
+
+    current_app = workspace_client.apps.get(config.app_name)
+    resources = list(current_app.resources or [])
+    updated_resources: list[apps_service.AppResource] = []
+
+    for resource in resources:
+        if config.instance_name and resource.name == "database":
+            continue
+        if config.genie_space_ids and resource.genie_space is not None:
+            continue
+        updated_resources.append(resource)
+
+    if config.instance_name:
+        print(
+            "Ensuring app database resource grants "
+            f"{config.database_name}@{config.instance_name} with CAN_CONNECT_AND_CREATE..."
+        )
+        updated_resources.append(
+            apps_service.AppResource(
+                name="database",
+                database=apps_service.AppResourceDatabase(
+                    instance_name=config.instance_name,
+                    database_name=config.database_name or DEFAULT_DATABASE_NAME,
+                    permission=apps_service.AppResourceDatabaseDatabasePermission.CAN_CONNECT_AND_CREATE,
+                ),
+            )
+        )
+
+    if config.genie_space_ids:
+        print(f"Ensuring app Genie space grants for {len(config.genie_space_ids)} space(s)...")
+        for index, space_id in enumerate(config.genie_space_ids, start=1):
+            resource_name = f"genie-space-{index}"
+            updated_resources.append(
+                apps_service.AppResource(
+                    name=resource_name,
+                    genie_space=apps_service.AppResourceGenieSpace(
+                        name=resource_name,
+                        space_id=space_id,
+                        permission=apps_service.AppResourceGenieSpaceGenieSpacePermission.CAN_RUN,
+                    ),
+                )
+            )
+
+    workspace_client.apps.update(
+        config.app_name,
+        apps_service.App(name=config.app_name, resources=updated_resources),
+    )
+
+
 def apply_permission_grants(
     config: PermissionGrantConfig,
     *,
@@ -303,6 +448,7 @@ def apply_permission_grants(
     )
     from databricks.sdk.service import catalog as uc_catalog
 
+    config = hydrate_config_from_bundle(config)
     validate_permission_config(config)
 
     workspace_client = workspace_client or build_workspace_client(config.profile)
@@ -463,6 +609,8 @@ def apply_permission_grants(
                 warehouse_id=config.warehouse_id,
             )
 
+    sync_app_resource_permissions(config, workspace_client)
+
     print(
         "\nPermission grants complete. If some grants failed because tables don't "
         "exist yet, that's expected on a fresh branch — they'll be created on first "
@@ -477,11 +625,15 @@ def _build_config_from_args(args) -> PermissionGrantConfig:
         sp_client_id=args.sp_client_id,
         app_name=args.app_name,
         profile=args.profile,
+        target=args.target,
+        bundle_config_path=args.bundle_config_path,
         catalog_name=args.catalog_name,
         schema_name=args.schema_name,
         data_catalog_name=args.data_catalog_name,
         data_schema_name=args.data_schema_name,
         instance_name=args.instance_name,
+        database_name=args.database_name,
+        genie_space_ids=_parse_csv(args.genie_space_ids),
         project=args.project,
         branch=args.branch,
         warehouse_id=args.warehouse_id,
@@ -510,6 +662,15 @@ def main():
         "If omitted, the script uses ambient Databricks auth.",
     )
     parser.add_argument(
+        "--target",
+        help="Optional bundle target name to resolve defaults from databricks.yml.",
+    )
+    parser.add_argument(
+        "--bundle-config-path",
+        default=str(DEFAULT_BUNDLE_CONFIG_PATH),
+        help="Path to databricks.yml used for resolving default values.",
+    )
+    parser.add_argument(
         "--catalog-name",
         help="Unity Catalog catalog name for app data access.",
     )
@@ -534,6 +695,14 @@ def main():
     parser.add_argument(
         "--instance-name",
         help="Lakebase instance name for provisioned instances.",
+    )
+    parser.add_argument(
+        "--database-name",
+        help=f"Lakebase database name for app resource grants (default: {DEFAULT_DATABASE_NAME}).",
+    )
+    parser.add_argument(
+        "--genie-space-ids",
+        help="Comma-separated Genie space IDs for app CAN_RUN grants.",
     )
     parser.add_argument(
         "--project",
