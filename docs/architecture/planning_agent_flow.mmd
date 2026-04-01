@@ -1,0 +1,29 @@
+graph LR
+    Query[User query] --> Planner[Planning Agent]
+    Planner --> VS[Vector Search<br/>Genie space index]
+    VS --> Spaces[Relevant spaces<br/>space_id + title + score]
+    Spaces --> Analysis[Analyze question clarity<br/>scope and join need]
+
+    Analysis --> Clear{Question clear?}
+    Clear -->|No| Clarify[Clarification request]
+    Clear -->|Yes| Route{Execution route}
+
+    Route -->|Single space| Single[Single-space plan]
+    Route -->|Multi, no join| Multi[Multi-space no-join plan]
+    Route -->|Join, table route| Table[SQL synthesis table route plan]
+    Route -->|Join, genie route| Genie[SQL synthesis genie route plan]
+
+    Table --> Output[Execution plan JSON<br/>sub_questions + relevant_space_ids<br/>requires_join + join_strategy]
+    Genie --> Output
+    Single --> Output
+    Multi --> Output
+
+    classDef agentClass fill:#4A90E2,stroke:#2E5C8A,stroke-width:2px,color:#fff
+    classDef dataClass fill:#50C878,stroke:#2E7D4E,stroke-width:2px,color:#fff
+    classDef processClass fill:#F5A623,stroke:#C17D11,stroke-width:2px,color:#000
+    classDef decisionClass fill:#8E44AD,stroke:#6C3483,stroke-width:2px,color:#fff
+
+    class Planner agentClass
+    class VS,Spaces,Output dataClass
+    class Query,Analysis,Clarify,Single,Multi,Table,Genie processClass
+    class Clear,Route decisionClass

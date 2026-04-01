@@ -32,6 +32,14 @@ Visual representations of the system architecture:
 - [**Detailed Architecture**](architecture/architecture_diagram.svg) - Complete system
 - [**Clarification Flow**](architecture/clarification_flow_diagram.mmd) - Clarification handling
 - [**AgentRx Feedback Loop**](architecture/agentrx_feedback_loop.svg) - Admin-guided improvement workflow from upstream issue `#30`
+- [**Planning Agent Flow**](architecture/planning_agent_flow.svg) - Query analysis, vector search, and route selection
+- [**Planning Agent Flow (Vertical)**](architecture/planning_agent_flow_vertical.svg) - Vertical cascade version
+- [**SQL Synthesis Table Route**](architecture/sql_synthesis_table_route_flow.svg) - UC metadata-driven SQL generation
+- [**SQL Synthesis Table Route (Vertical)**](architecture/sql_synthesis_table_route_flow_vertical.svg) - Vertical cascade version
+- [**SQL Synthesis Genie Route**](architecture/sql_synthesis_genie_route_flow.svg) - Genie-tool orchestration and merge flow
+- [**SQL Synthesis Genie Route (Vertical)**](architecture/sql_synthesis_genie_route_flow_vertical.svg) - Vertical cascade version
+- [**SQL Execution Agent Flow**](architecture/sql_execution_agent_flow.svg) - SQL extraction, execution, and result formatting
+- [**SQL Execution Agent Flow (Vertical)**](architecture/sql_execution_agent_flow_vertical.svg) - Vertical cascade version
 
 All diagrams are in the [`architecture/`](architecture/) directory in multiple formats (SVG, PNG, PDF, Mermaid).
 

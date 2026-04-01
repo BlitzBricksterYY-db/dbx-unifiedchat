@@ -1,0 +1,26 @@
+graph TD
+    Plan[Execution plan<br/>join_strategy = genie_route<br/>genie_route_plan per space]
+    GenieAgent[SQL Synthesis Genie Agent]
+    Build[Create tools only for relevant Genie spaces]
+    Mode{Execution mode}
+    ToolCalls[LangGraph agent mode<br/>tool calling orchestration]
+    Parallel[RunnableParallel mode<br/>direct parallel invocation]
+    GenieTools[Genie agents as tools<br/>question per space]
+    Outputs[Per-space answers<br/>optional SQL + reasoning]
+    Merge[Merge routed outputs]
+    Final[Combined SQL synthesis result<br/>for downstream execution]
+
+    Plan --> GenieAgent --> Build --> Mode
+    Mode -->|LangGraph agent mode| ToolCalls --> GenieTools
+    Mode -->|RunnableParallel mode| Parallel --> GenieTools
+    GenieTools --> Outputs --> Merge --> Final
+
+    classDef agentClass fill:#4A90E2,stroke:#2E5C8A,stroke-width:2px,color:#fff
+    classDef dataClass fill:#50C878,stroke:#2E7D4E,stroke-width:2px,color:#fff
+    classDef processClass fill:#F5A623,stroke:#C17D11,stroke-width:2px,color:#000
+    classDef decisionClass fill:#8E44AD,stroke:#6C3483,stroke-width:2px,color:#fff
+
+    class GenieAgent agentClass
+    class Plan,Outputs,Final dataClass
+    class Build,ToolCalls,Parallel,GenieTools,Merge processClass
+    class Mode decisionClass
