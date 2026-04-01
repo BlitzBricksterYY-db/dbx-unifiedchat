@@ -1,0 +1,44 @@
+graph LR
+    %% AgentRx feedback loop from upstream issue #30
+
+    Admin[👤 Admin User] --> UI[🖥️ Admin UI]
+    UI --> Proposal[💡 Improvement Proposal<br/>Observed quality gap / desired behavior]
+    Proposal --> AgentRx[🩺 AgentRx<br/>Analyze system + recommend changes]
+
+    AgentRx --> Review{✅ Approve<br/>recommended changes?}
+    Review -->|No| Refine[🔁 Revise proposal<br/>or keep for backlog]
+    Refine --> Proposal
+
+    Review -->|Yes| Orchestrator[🔐 Admin Change Orchestrator]
+
+    subgraph Targets["Improvement Targets"]
+        direction TB
+        AgentCfg[🤖 Agent Configuration<br/>Top-level instruction updates]
+        GenieCfg[🧞 Genie Configuration<br/>Add/remove tables and Genies<br/>Room-level instructions]
+        MetadataCfg[🧱 Metadata / Smart ETL<br/>Columns, comments, abbreviations]
+    end
+
+    Orchestrator --> AgentCfg
+    Orchestrator --> GenieCfg
+    Orchestrator --> MetadataCfg
+
+    AgentCfg --> AdminOps[⚙️ Admin-Level Operations]
+    GenieCfg --> AdminOps
+    MetadataCfg --> AdminOps
+
+    AdminOps --> Refresh[🚀 Refresh deployed agent context<br/>and data access configuration]
+    Refresh --> Runtime[💬 End User Runtime]
+    Runtime --> Feedback[📈 Better accuracy, curation, and speed]
+    Feedback -. informs .-> Admin
+
+    classDef userClass fill:#E94B3C,stroke:#A33428,stroke-width:2px,color:#fff
+    classDef agentClass fill:#4A90E2,stroke:#2E5C8A,stroke-width:2px,color:#fff
+    classDef processClass fill:#F5A623,stroke:#C17D11,stroke-width:2px,color:#000
+    classDef dataClass fill:#50C878,stroke:#2E7D4E,stroke-width:2px,color:#fff
+    classDef decisionClass fill:#8E44AD,stroke:#6C3483,stroke-width:2px,color:#fff
+
+    class Admin,Runtime userClass
+    class UI,Proposal,Orchestrator,AdminOps,Refresh processClass
+    class AgentRx,AgentCfg,GenieCfg,MetadataCfg agentClass
+    class Feedback,Refine dataClass
+    class Review decisionClass

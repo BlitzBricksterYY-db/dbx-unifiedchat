@@ -4,7 +4,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from './ui/sidebar';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -15,7 +15,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from './ui/dropdown-menu';
-import { memo, useEffect, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useChatVisibility } from '@/hooks/use-chat-visibility';
 import { useChatData } from '@/hooks/useChatData';
 import {
@@ -29,6 +29,10 @@ import {
   TrashIcon,
 } from 'lucide-react';
 import type { ChatMessage } from '@chat-template/core';
+import {
+  CHAT_ACTIVE_TURN_EVENT,
+  type ChatActiveTurnDetail,
+} from '@/lib/chat-turn-sync';
 
 function getTurnLabel(message: ChatMessage, index: number) {
   const text = message.parts
@@ -60,7 +64,10 @@ const PureChatItem = ({
     chatId: chat.id,
     initialVisibilityType: chat.visibility,
   });
+  const [searchParams] = useSearchParams();
   const [isExpanded, setIsExpanded] = useState(isActive);
+  const [highlightedTurnId, setHighlightedTurnId] = useState<string | null>(null);
+  const turnLinkRefs = useRef<Record<string, HTMLAnchorElement | null>>({});
   // Lazy-load: only fetch when active or when user has expanded this item
   const { chatData, isLoading } = useChatData(chat.id, isActive || isExpanded);
   const turnMessages = useMemo(
@@ -74,6 +81,38 @@ const PureChatItem = ({
       setIsExpanded(true);
     }
   }, [isActive]);
+
+  useEffect(() => {
+    if (!isActive) {
+      setHighlightedTurnId(null);
+      return;
+    }
+
+    setHighlightedTurnId(searchParams.get('turn'));
+  }, [isActive, searchParams]);
+
+  useEffect(() => {
+    if (!isActive) return;
+
+    const handleActiveTurnChange = (event: Event) => {
+      const { detail } = event as CustomEvent<ChatActiveTurnDetail>;
+      if (detail.chatId !== chat.id) return;
+      setHighlightedTurnId(detail.turnId);
+    };
+
+    window.addEventListener(CHAT_ACTIVE_TURN_EVENT, handleActiveTurnChange);
+    return () => {
+      window.removeEventListener(CHAT_ACTIVE_TURN_EVENT, handleActiveTurnChange);
+    };
+  }, [chat.id, isActive]);
+
+  useEffect(() => {
+    if (!isActive || !highlightedTurnId) return;
+
+    turnLinkRefs.current[highlightedTurnId]?.scrollIntoView({
+      block: 'nearest',
+    });
+  }, [highlightedTurnId, isActive]);
 
   const hasTurnData = isLoading || turnMessages.length > 0;
   const handleChatClick = () => {
@@ -169,9 +208,16 @@ const PureChatItem = ({
             turnMessages.map((message, index) => (
               <Link
                 key={message.id}
+                ref={(el) => {
+                  turnLinkRefs.current[message.id] = el;
+                }}
                 to={`/chat/${chat.id}?turn=${message.id}`}
                 onClick={() => setOpenMobile(false)}
-                className="flex w-full rounded-md px-2 py-1 text-left text-sidebar-foreground/80 text-xs transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                className={`flex w-full rounded-md px-2 py-1 text-left text-xs transition-colors ${
+                  highlightedTurnId === message.id
+                    ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground'
+                    : 'text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+                }`}
               >
                 <span className="truncate">
                   {index + 1}. {getTurnLabel(message, index)}

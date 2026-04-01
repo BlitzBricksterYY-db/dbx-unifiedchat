@@ -123,14 +123,11 @@ def create_super_agent_hybrid(config=None) -> StateGraph:
         from .config import get_config
         config = get_config()
 
-    table_name = (
-        f"{config.unity_catalog.catalog_name}"
-        f".{config.unity_catalog.schema_name}"
-        f".enriched_genie_docs_chunks"
-    )
+    table_name = get_space_context_table_name(config)
     clarification_agent = ClarificationAgent(
         llm_endpoint=config.llm.clarification_endpoint,
         table_name=table_name,
+        warehouse_id=config.table_metadata.sql_warehouse_id,
     )
 
     print("\n" + "="*80)
@@ -141,7 +138,11 @@ def create_super_agent_hybrid(config=None) -> StateGraph:
 
     workflow.add_node(
         "unified_intent_context_clarification",
-        clarification_agent.subgraph,
+        _with_node_trace(
+            "unified_intent_context_clarification",
+            clarification_agent.run,
+            SpanType.AGENT,
+        ),
     )
     workflow.add_node("planning", _with_node_trace("planning", planning_node, SpanType.AGENT))
     workflow.add_node(
@@ -256,6 +257,15 @@ def create_super_agent_hybrid(config=None) -> StateGraph:
     print("="*80)
 
     return workflow
+
+
+def get_space_context_table_name(config) -> str:
+    """Return the UC table used to store Genie space summary chunks."""
+    return (
+        f"{config.unity_catalog.catalog_name}"
+        f".{config.unity_catalog.schema_name}"
+        f".{config.table_metadata.source_table}"
+    )
 
 
 def create_agent_graph(

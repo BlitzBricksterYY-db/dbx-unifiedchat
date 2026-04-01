@@ -65,6 +65,12 @@ resources:
             value: ${var.mlflow_tracking_uri}
           - name: MLFLOW_REGISTRY_URI
             value: ${var.mlflow_registry_uri}
+          - name: AGENT_PREWARM_ON_STARTUP
+            value: ${var.agent_prewarm_on_startup}
+          - name: AGENT_PREWARM_SPACE_CONTEXT
+            value: ${var.agent_prewarm_space_context}
+          - name: AGENT_KEEP_WARM_INTERVAL_SECONDS
+            value: ${var.agent_keep_warm_interval_seconds}
 
       resources:
         - name: 'experiment'

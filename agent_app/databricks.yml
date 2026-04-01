@@ -74,6 +74,12 @@ variables:
     default: "databricks"
   mlflow_registry_uri:
     default: "databricks-uc"
+  agent_prewarm_on_startup:
+    default: "true"
+  agent_prewarm_space_context:
+    default: "true"
+  agent_keep_warm_interval_seconds:
+    default: "300"
 
   # Genie spaces
   # genie_space_id_1:
@@ -101,6 +107,7 @@ targets:
     variables:
       catalog: "serverless_dbx_unifiedchat_catalog"
       experiment_id: "2377237249204444"
+      agent_keep_warm_interval_seconds: "300"
       # Override these per-environment as needed:
       # warehouse_id: "<prod-warehouse-id>"
       # genie_space_id_1: "<prod-space-id>"

@@ -9,6 +9,7 @@ import { useDataStream } from './data-stream-provider';
 import { Conversation, ConversationContent } from './elements/conversation';
 import { ArrowDownIcon, ArrowUpIcon, ChevronsUpIcon, ChevronsDownIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { dispatchActiveTurnChange } from '@/lib/chat-turn-sync';
 
 interface MessagesProps {
   chatId: string;
@@ -138,6 +139,24 @@ function PureMessages({
       navTargetRef.current = activeTurnIndex;
     }
   }, [isScrollIdle, activeTurnIndex]);
+
+  useEffect(() => {
+    const activeTurnId =
+      activeTurnIndex >= 0 ? userTurns[activeTurnIndex]?.id ?? null : null;
+    dispatchActiveTurnChange({
+      chatId,
+      turnId: activeTurnId,
+    });
+  }, [activeTurnIndex, chatId, userTurns]);
+
+  useEffect(() => {
+    return () => {
+      dispatchActiveTurnChange({
+        chatId,
+        turnId: null,
+      });
+    };
+  }, [chatId]);
 
   // ── Navigation helpers ──
   const scrollToTop = useCallback(
