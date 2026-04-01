@@ -33,12 +33,21 @@ from agent_server.utils import get_session_id
 from agent_server.multi_agent.core.graph import create_super_agent_hybrid
 from agent_server.multi_agent.core.state import RESET_STATE_TEMPLATE
 
-mlflow.langchain.autolog(run_tracer_inline=True)
-
 logging.getLogger("mlflow.utils.autologging_utils").setLevel(logging.ERROR)
 litellm.suppress_debug_info = True
 
 logger = logging.getLogger(__name__)
+
+
+def _enable_mlflow_langchain_autolog() -> None:
+    """Best-effort autolog setup that does not break unit-test imports."""
+    try:
+        mlflow.langchain.autolog(run_tracer_inline=True)
+    except Exception as exc:
+        logger.warning("Skipping mlflow.langchain.autolog setup: %s", exc)
+
+
+_enable_mlflow_langchain_autolog()
 
 PRIVACY_QUERY_POSTFIX = (
     " ALWAYS REPORT PATIENT COUNT ONLY "
@@ -52,33 +61,6 @@ def _append_privacy_query_postfix(query: str, enabled: bool) -> str:
     if query.endswith(PRIVACY_QUERY_POSTFIX):
         return query
     return f"{query}{PRIVACY_QUERY_POSTFIX}"
-
-# ---------------------------------------------------------------------------
-# Ensure DATABRICKS_HOST/TOKEN env vars are set for libraries that don't use
-# the SDK auth chain (e.g. databricks-vectorsearch).
-# ---------------------------------------------------------------------------
-import os
-_is_databricks_apps = bool(os.environ.get("DATABRICKS_CLIENT_ID"))
-if not _is_databricks_apps and not os.environ.get("DATABRICKS_TOKEN"):
-    try:
-        from databricks.sdk import WorkspaceClient as _WsClient
-        _w = _WsClient()
-        _cfg_auth = _w.config
-        if _cfg_auth.host and not os.environ.get("DATABRICKS_HOST"):
-            os.environ["DATABRICKS_HOST"] = _cfg_auth.host
-        _auth_result = _cfg_auth.authenticate()
-        if isinstance(_auth_result, dict):
-            _bearer = _auth_result.get("Authorization", "")
-        elif callable(_auth_result):
-            _bearer = _auth_result().get("Authorization", "")
-        else:
-            _bearer = ""
-        if _bearer.startswith("Bearer "):
-            os.environ["DATABRICKS_TOKEN"] = _bearer[7:]
-            os.environ.pop("DATABRICKS_CONFIG_PROFILE", None)
-            logger.info("Resolved DATABRICKS_HOST/TOKEN from SDK auth chain")
-    except Exception as _e:
-        logger.warning(f"Could not resolve Databricks auth from SDK: {_e}")
 
 # ---------------------------------------------------------------------------
 # Module-level setup (replaces __init__ of SuperAgentHybridResponsesAgent)

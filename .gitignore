@@ -34,7 +34,7 @@ htmlcov/
 .tox/
 .hypothesis/
 **/test-results/**
-**/tests/**
+#**/tests/**
 **/playwright-report/**
 
 # IDEs

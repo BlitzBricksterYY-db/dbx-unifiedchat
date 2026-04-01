@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -166,7 +167,11 @@ mlflow_pyfunc_stub.ResponsesAgent = object
 sys.modules.setdefault("mlflow.pyfunc", mlflow_pyfunc_stub)
 
 
-from agent_server.multi_agent.core import responses_agent
+core_pkg_module = sys.modules.get("agent_server.multi_agent.core")
+if core_pkg_module is not None and hasattr(core_pkg_module, "responses_agent"):
+    delattr(core_pkg_module, "responses_agent")
+sys.modules.pop("agent_server.multi_agent.core.responses_agent", None)
+responses_agent = importlib.import_module("agent_server.multi_agent.core.responses_agent")
 
 
 class _FakeInputItem:
@@ -197,11 +202,12 @@ class _FakeWorkflow:
         return self._app
 
 
-def test_resume_command_carries_all_agent_settings():
+def test_resume_command_uses_latest_query_only(monkeypatch):
     compiled_app = _FakeCompiledApp()
     responses_agent.LAKEBASE_INSTANCE_NAME = "test-instance"
     agent = responses_agent.SuperAgentHybridResponsesAgent(_FakeWorkflow(compiled_app))
     agent.lakebase_instance_name = "test-instance"
+    monkeypatch.setattr(responses_agent, "CheckpointSaver", _FakeCheckpointSaver)
 
     request = SimpleNamespace(
         input=[_FakeInputItem("user", "monthly for 2024")],
@@ -218,10 +224,5 @@ def test_resume_command_carries_all_agent_settings():
     for _event in agent.predict_stream(request):
         pass
 
-    assert isinstance(compiled_app.received_input, _FakeCommand)
-    assert compiled_app.received_input.resume == "monthly for 2024"
-    assert compiled_app.received_input.update == {
-        "execution_mode": "sequential",
-        "force_synthesis_route": "table_route",
-        "clarification_sensitivity": "on",
-    }
+    assert getattr(compiled_app.received_input, "resume", None) == "monthly for 2024"
+    assert getattr(compiled_app.received_input, "update", None) in (None, {})

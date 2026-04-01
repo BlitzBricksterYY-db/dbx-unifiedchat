@@ -24,39 +24,34 @@ Example usage:
 """
 
 import json
+import logging
 import re
-from typing import Dict, List, Any
-
-import os
+from typing import Any, Dict, List
 
 import mlflow
-from langchain_core.runnables import Runnable
 from databricks_langchain import VectorSearchRetrieverTool
-from databricks.sdk import WorkspaceClient
+from langchain_core.runnables import Runnable
 from mlflow.entities import SpanType
 
+from agent_server.databricks_runtime_auth import get_vector_search_workspace_client
 
-def _build_workspace_client() -> WorkspaceClient:
-    """Build a WorkspaceClient for VectorSearchRetrieverTool.
+logger = logging.getLogger(__name__)
+_VECTOR_SEARCH_TOOL_NAME = "search_genie_spaces"
 
-    Local dev with DATABRICKS_CONFIG_PROFILE uses databricks-cli auth, which
-    VectorSearchClient rejects.  When explicit HOST + TOKEN are available we
-    temporarily hide the profile env var to force PAT auth.
 
-    In deployed environments (Databricks Apps / Model Serving) where neither
-    HOST nor TOKEN is set, WorkspaceClient() falls back to model-serving
-    credential strategy automatically.
-    """
-    host = os.environ.get("DATABRICKS_HOST")
-    token = os.environ.get("DATABRICKS_TOKEN")
-    if host and token:
-        saved = os.environ.pop("DATABRICKS_CONFIG_PROFILE", None)
-        try:
-            return WorkspaceClient(host=host, token=token)
-        finally:
-            if saved is not None:
-                os.environ["DATABRICKS_CONFIG_PROFILE"] = saved
-    return WorkspaceClient()
+def _is_invalid_token_error(exc: Exception) -> bool:
+    """Detect auth failures that are safe to retry with a fresh client."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = f"{type(current).__name__}: {current}".lower()
+        if "invalid token" in message:
+            return True
+        current = current.__cause__ or current.__context__
+
+    return False
 
 
 class PlanningAgent:
@@ -76,20 +71,19 @@ class PlanningAgent:
         """
         self.llm = llm
         self.vector_search_index = vector_search_index
-        self._vs_tool = self._build_vs_tool()
         self.name = "Planning"
 
     def _build_vs_tool(self) -> VectorSearchRetrieverTool:
         return VectorSearchRetrieverTool(
             index_name=self.vector_search_index,
-            tool_name="search_genie_spaces",
+            tool_name=_VECTOR_SEARCH_TOOL_NAME,
             tool_description="Search for relevant Genie spaces by semantic similarity",
             num_results=5,
             columns=["space_id", "space_title", "searchable_content"],
             filters={"chunk_type": "space_summary"},
             query_type="ANN",
             include_score=True,
-            workspace_client=_build_workspace_client(),
+            workspace_client=get_vector_search_workspace_client(),
         )
 
     def search_relevant_spaces(self, query: str, num_results: int = 5) -> List[Dict[str, Any]]:
@@ -113,17 +107,33 @@ class PlanningAgent:
             attributes={
                 "index_name": self.vector_search_index,
                 "num_results": num_results,
-                "tool_name": self._vs_tool.name,
+                "tool_name": _VECTOR_SEARCH_TOOL_NAME,
             },
         ) as span:
             span.set_inputs({"query": query, "k": num_results})
+            docs = None
+            for attempt in range(2):
+                try:
+                    vs_tool = self._build_vs_tool()
+                    docs = vs_tool._vector_store.similarity_search(
+                        query=query,
+                        k=num_results,
+                        filter={"chunk_type": "space_summary"},
+                        query_type="ANN",
+                    )
+                    break
+                except Exception as exc:
+                    should_retry = attempt == 0 and _is_invalid_token_error(exc)
+                    if not should_retry:
+                        raise
+                    logger.warning(
+                        "Vector search auth failed for planning agent; "
+                        "rebuilding client and retrying once: %s",
+                        exc,
+                    )
 
-            docs = self._vs_tool._vector_store.similarity_search(
-                query=query,
-                k=num_results,
-                filter={"chunk_type": "space_summary"},
-                query_type="ANN",
-            )
+            if docs is None:
+                raise RuntimeError("Vector search returned no results after retry.")
 
             relevant_spaces = []
             for doc in docs:
