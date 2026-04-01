@@ -42,6 +42,7 @@ sys.modules.setdefault("langgraph.config", langgraph_config_stub)
 graph_stub = types.ModuleType("agent_server.multi_agent.core.graph")
 graph_stub.create_super_agent_hybrid = lambda *args, **kwargs: None
 graph_stub.create_agent_graph = lambda *args, **kwargs: None
+graph_stub.get_space_context_table_name = lambda _config: "catalog.schema.source_table"
 sys.modules.setdefault("agent_server.multi_agent.core.graph", graph_stub)
 
 from agent_server.multi_agent.agents.chart_generator import (

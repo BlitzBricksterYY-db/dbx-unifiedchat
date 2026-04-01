@@ -74,6 +74,7 @@ langchain_core_pkg = types.ModuleType("langchain_core")
 sys.modules.setdefault("langchain_core", langchain_core_pkg)
 
 runnables_stub = types.ModuleType("langchain_core.runnables")
+runnables_stub.Runnable = object
 runnables_stub.RunnableConfig = dict
 sys.modules.setdefault("langchain_core.runnables", runnables_stub)
 
@@ -112,6 +113,7 @@ messages_stub.HumanMessage = _HumanMessage
 messages_stub.AIMessage = _AIMessage
 messages_stub.AIMessageChunk = _AIMessageChunk
 messages_stub.BaseMessage = _BaseMessage
+messages_stub.convert_to_messages = lambda messages: messages
 sys.modules.setdefault("langchain_core.messages", messages_stub)
 
 utils_stub = types.ModuleType("agent_server.utils")
@@ -128,9 +130,19 @@ sys.modules.setdefault("agent_server.multi_agent.core.state", state_stub)
 
 graph_stub = types.ModuleType("agent_server.multi_agent.core.graph")
 graph_stub.create_super_agent_hybrid = lambda: None
+graph_stub.get_space_context_table_name = lambda _config: "catalog.schema.source_table"
 sys.modules.setdefault("agent_server.multi_agent.core.graph", graph_stub)
 
+langgraph_pkg = types.ModuleType("langgraph")
+sys.modules.setdefault("langgraph", langgraph_pkg)
+
+langgraph_config_stub = types.ModuleType("langgraph.config")
+langgraph_config_stub.get_stream_writer = lambda: (lambda *_args, **_kwargs: None)
+sys.modules.setdefault("langgraph.config", langgraph_config_stub)
+
 langgraph_graph_stub = types.ModuleType("langgraph.graph")
+langgraph_graph_stub.END = "__end__"
+langgraph_graph_stub.START = "__start__"
 langgraph_graph_stub.StateGraph = object
 sys.modules.setdefault("langgraph.graph", langgraph_graph_stub)
 
@@ -149,6 +161,8 @@ class _FakeCheckpointSaver:
 databricks_langchain_stub = types.ModuleType("databricks_langchain")
 databricks_langchain_stub.CheckpointSaver = _FakeCheckpointSaver
 databricks_langchain_stub.DatabricksStore = object
+databricks_langchain_stub.ChatDatabricks = object
+databricks_langchain_stub.VectorSearchRetrieverTool = object
 sys.modules.setdefault("databricks_langchain", databricks_langchain_stub)
 
 
@@ -160,6 +174,7 @@ class _FakeCommand:
 
 langgraph_types_stub = types.ModuleType("langgraph.types")
 langgraph_types_stub.Command = _FakeCommand
+langgraph_types_stub.interrupt = lambda value: value
 sys.modules.setdefault("langgraph.types", langgraph_types_stub)
 
 mlflow_pyfunc_stub = types.ModuleType("mlflow.pyfunc")

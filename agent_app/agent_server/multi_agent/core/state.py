@@ -75,6 +75,7 @@ class GraphInput(TypedDict, total=False):
     is_meta_question: Optional[bool]
     meta_answer: Optional[str]
     is_irrelevant: Optional[bool]
+    space_context: Annotated[Optional[Dict[str, str]], _prefer_latest]
     plan: Optional[Dict[str, Any]]
     sub_questions: Optional[List[str]]
     requires_multiple_spaces: Optional[bool]
@@ -124,6 +125,9 @@ class AgentState(TypedDict):
 
     # Irrelevant question handling
     is_irrelevant: Optional[bool]
+
+    # Preloaded clarification context
+    space_context: Annotated[Optional[Dict[str, str]], _prefer_latest]
 
     # Deprecated (kept for backward compatibility)
     original_query: Optional[str]
@@ -219,6 +223,7 @@ def get_reset_state_template() -> Dict[str, Any]:
         "is_meta_question": False,
         "meta_answer": None,
         "is_irrelevant": False,
+        "space_context": None,
 
         # Planning fields (per-query)
         "plan": None,

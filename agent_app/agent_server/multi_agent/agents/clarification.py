@@ -5,8 +5,10 @@ classify_query_type and check_clarity run in parallel, fan-in at merge_classific
 which routes on all available state in one place:
 
     START
-      |-- classify_query_type      (is_irrelevant, is_meta_question)
-      +-- check_clarity            (context_summary, question_clear, current_turn)
+      |
+      +-- load_space_context
+              |-- classify_query_type      (is_irrelevant, is_meta_question)
+              +-- check_clarity            (context_summary, question_clear, current_turn)
               | fan-in
           merge_classification
               | route
@@ -16,21 +18,24 @@ which routes on all available state in one place:
               |                               |
               |                         confirm_continuation
               |                               |-- answering -> handle_clear -> END
-              |                               +-- new question -> [classify_query_type,
-              |                                                    check_clarity] (loop back)
+              |                               +-- new question -> load_space_context
+              |                                                     -> [classify_query_type,
+              |                                                         check_clarity]
               +-- question_clear=True    -> handle_clear -> END
 """
 
 import json
-import time
+import threading
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from databricks_langchain import ChatDatabricks
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, convert_to_messages
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
+import mlflow
+from mlflow.entities import SpanType
 from typing_extensions import TypedDict
 
 from ..core.base_agent import BaseAgent
@@ -78,6 +83,7 @@ def _latest_human_content(messages: list) -> str:
     return ""
 
 _space_context_cache: dict = {"data": None, "timestamp": None, "table_name": None}
+_space_context_cache_lock = threading.Lock()
 _SPACE_CONTEXT_CACHE_TTL = timedelta(minutes=30)
 _VALID_CLARIFICATION_SENSITIVITIES = ["off", "low", "medium", "high", "on"]
 
@@ -126,38 +132,129 @@ def _emit_clarification_result(writer, result: str, content: str) -> None:
     )
 
 
-def load_space_context(table_name: str) -> dict:
-    """Load Genie space summaries from Delta with 30-minute TTL caching."""
-    global _space_context_cache
-    now = datetime.now()
-
+def _get_cached_space_context(table_name: str, now: datetime) -> tuple[Optional[Dict[str, str]], Optional[float]]:
+    cached_data = _space_context_cache.get("data")
+    cached_table_name = _space_context_cache.get("table_name")
+    cached_timestamp = _space_context_cache.get("timestamp")
     if (
-        _space_context_cache["data"] is not None
-        and _space_context_cache["table_name"] == table_name
-        and _space_context_cache["timestamp"] is not None
-        and now - _space_context_cache["timestamp"] < _SPACE_CONTEXT_CACHE_TTL
+        cached_data is None
+        or cached_table_name != table_name
+        or cached_timestamp is None
+        or now - cached_timestamp >= _SPACE_CONTEXT_CACHE_TTL
     ):
-        age = (now - _space_context_cache["timestamp"]).total_seconds()
-        print(f"[space_context] cache hit ({len(_space_context_cache['data'])} spaces, age: {age:.1f}s)")
-        return _space_context_cache["data"]
+        return None, None
+    age_seconds = (now - cached_timestamp).total_seconds()
+    return cached_data, age_seconds
 
-    print("[space_context] loading from database")
-    try:
-        from databricks.connect import DatabricksSession
-        spark = DatabricksSession.builder.serverless().getOrCreate()
-    except ImportError:
-        from pyspark.sql import SparkSession
-        spark = SparkSession.builder.getOrCreate()
 
-    df = spark.sql(f"""
+def _query_space_context_via_warehouse(table_name: str, warehouse_id: str) -> Dict[str, str]:
+    from databricks import sql
+    from databricks.sdk.core import Config
+
+    if not warehouse_id:
+        raise ValueError("SQL_WAREHOUSE_ID is required to load clarification space context.")
+
+    query = f"""
         SELECT space_id, searchable_content
         FROM {table_name}
         WHERE chunk_type = 'space_summary'
-    """)
-    context = {row["space_id"]: row["searchable_content"] for row in df.collect()}
-    _space_context_cache.update({"data": context, "timestamp": now, "table_name": table_name})
-    print(f"[space_context] loaded {len(context)} spaces")
-    return context
+    """
+
+    with mlflow.start_span(
+        name="space_context_connect_sql_warehouse",
+        span_type=SpanType.TOOL,
+        attributes={"warehouse_id": warehouse_id},
+    ):
+        cfg = Config()
+        connection = sql.connect(
+            server_hostname=cfg.host,
+            http_path=f"/sql/1.0/warehouses/{warehouse_id}",
+            credentials_provider=lambda: cfg.authenticate,
+            session_configuration={"ansi_mode": "true"},
+            socket_timeout=120,
+            http_retry_delay_min=1,
+            http_retry_delay_max=30,
+            http_retry_max_redirects=5,
+            http_retry_stop_after_attempts=10,
+        )
+
+    with connection:
+        with connection.cursor() as cursor:
+            with mlflow.start_span(
+                name="space_context_execute_sql",
+                span_type=SpanType.TOOL,
+                attributes={"table_name": table_name},
+            ) as execute_span:
+                execute_span.set_inputs({"query": query.strip()})
+                cursor.execute(query)
+
+            with mlflow.start_span(
+                name="space_context_fetch_rows",
+                span_type=SpanType.TOOL,
+                attributes={"table_name": table_name},
+            ) as fetch_span:
+                rows = cursor.fetchall()
+                fetch_span.set_outputs({"row_count": len(rows)})
+
+    return {row[0]: row[1] for row in rows}
+
+
+def load_space_context(table_name: str, warehouse_id: str) -> dict:
+    """Load Genie space summaries through SQL Warehouse with TTL caching."""
+    global _space_context_cache
+    now = datetime.now()
+
+    with mlflow.start_span(
+        name="load_space_context",
+        span_type=SpanType.TOOL,
+        attributes={"table_name": table_name, "warehouse_id": warehouse_id},
+    ) as span:
+        with mlflow.start_span(
+            name="space_context_cache_lookup",
+            span_type=SpanType.TOOL,
+            attributes={"table_name": table_name},
+        ) as cache_span:
+            cached_context, age_seconds = _get_cached_space_context(table_name, now)
+            cache_span.set_outputs(
+                {
+                    "cache_hit": cached_context is not None,
+                    "space_count": len(cached_context or {}),
+                    "age_seconds": age_seconds,
+                }
+            )
+        if cached_context is not None:
+            print(f"[space_context] cache hit ({len(cached_context)} spaces, age: {age_seconds:.1f}s)")
+            span.set_outputs({"cache_hit": True, "space_count": len(cached_context), "age_seconds": age_seconds})
+            return cached_context
+
+        with _space_context_cache_lock:
+            now = datetime.now()
+            cached_context, age_seconds = _get_cached_space_context(table_name, now)
+            if cached_context is not None:
+                print(f"[space_context] cache filled while waiting ({len(cached_context)} spaces)")
+                span.set_outputs(
+                    {
+                        "cache_hit": True,
+                        "space_count": len(cached_context),
+                        "age_seconds": age_seconds,
+                        "single_flight_wait": True,
+                    }
+                )
+                return cached_context
+
+            print("[space_context] loading from SQL warehouse")
+            context = _query_space_context_via_warehouse(table_name, warehouse_id)
+            loaded_at = datetime.now()
+            _space_context_cache.update(
+                {"data": context, "timestamp": loaded_at, "table_name": table_name}
+            )
+            print(f"[space_context] loaded {len(context)} spaces")
+            span.set_outputs({"cache_hit": False, "space_count": len(context)})
+            return context
+
+
+def _get_space_context(state: AgentState) -> Dict[str, str]:
+    return dict(state.get("space_context") or {})
 
 
 # ---------------------------------------------------------------------------
@@ -172,9 +269,10 @@ class ClarificationAgent(BaseAgent):
     self rather than being threaded through partial().
     """
 
-    def __init__(self, llm_endpoint: str, table_name: str):
+    def __init__(self, llm_endpoint: str, table_name: str, warehouse_id: str):
         super().__init__("clarification")
         self.table_name = table_name
+        self.warehouse_id = warehouse_id
         self.llm_endpoint = llm_endpoint
 
         base_llm = ChatDatabricks(endpoint=llm_endpoint, temperature=0.1)
@@ -192,6 +290,7 @@ class ClarificationAgent(BaseAgent):
     def _build_subgraph(self):
         graph = StateGraph(AgentState)
 
+        graph.add_node("load_space_context", self._load_space_context)
         graph.add_node("classify_query_type", self._classify_query_type)
         graph.add_node("check_clarity", self._check_clarity)
         graph.add_node("merge_classification", self._merge_classification)
@@ -201,9 +300,9 @@ class ClarificationAgent(BaseAgent):
         graph.add_node("confirm_continuation", self._confirm_continuation)
         graph.add_node("handle_clear", self._handle_clear)
 
-        # Parallel fan-out
-        graph.add_edge(START, "classify_query_type")
-        graph.add_edge(START, "check_clarity")
+        graph.add_edge(START, "load_space_context")
+        graph.add_edge("load_space_context", "classify_query_type")
+        graph.add_edge("load_space_context", "check_clarity")
 
         # Fan-in -- route on all known state in one place
         graph.add_edge("classify_query_type", "merge_classification")
@@ -235,7 +334,7 @@ class ClarificationAgent(BaseAgent):
 
         def route_after_continuation(state: AgentState):
             if not state.get("question_clear", True):
-                return ["classify_query_type", "check_clarity"]
+                return "load_space_context"
             return "handle_clear"
 
         graph.add_conditional_edges("confirm_continuation", route_after_continuation)
@@ -250,11 +349,22 @@ class ClarificationAgent(BaseAgent):
     # Node methods
     # -----------------------------------------------------------------------
 
+    def _load_space_context(self, state: AgentState) -> dict:
+        """Load and cache Genie space summaries once before clarification fan-out."""
+        if state.get("space_context") is not None:
+            return {}
+        return {
+            "space_context": load_space_context(
+                table_name=self.table_name,
+                warehouse_id=self.warehouse_id,
+            )
+        }
+
     def _classify_query_type(self, state: AgentState) -> dict:
         """Structured LLM call: is_irrelevant + is_meta_question. Runs in parallel."""
         messages = state.get("messages", [])
         current_query = _latest_human_content(messages)
-        space_context = load_space_context(self.table_name)
+        space_context = _get_space_context(state)
 
         prompt = f"""You are screening a user query before routing it to a data analytics system.
 
@@ -291,7 +401,7 @@ If the query is a normal data or business intelligence question (even a vague on
         writer = get_stream_writer()
         messages = state.get("messages", [])
         current_query = _latest_human_content(messages)
-        space_context = load_space_context(self.table_name)
+        space_context = _get_space_context(state)
         clarification_sensitivity = _get_clarification_sensitivity(state)
 
         print(f"[check_clarity] query={current_query!r} (messages count={len(messages)}, last 3 types={[type(m).__name__ for m in messages[-3:]]})")
@@ -423,7 +533,7 @@ Answer the following:
         """
         messages = state.get("messages", [])
         current_query = _latest_human_content(messages)
-        space_context = load_space_context(self.table_name)
+        space_context = _get_space_context(state)
 
         prompt = f"""The user is asking about what data or capabilities are available.
 

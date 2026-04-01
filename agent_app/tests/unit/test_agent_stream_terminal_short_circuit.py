@@ -29,7 +29,11 @@ mlflow_stub.langchain = SimpleNamespace(autolog=lambda **_kwargs: None)
 sys.modules.setdefault("mlflow", mlflow_stub)
 
 mlflow_entities_stub = types.ModuleType("mlflow.entities")
-mlflow_entities_stub.SpanType = SimpleNamespace(AGENT="agent")
+mlflow_entities_stub.SpanType = SimpleNamespace(
+    AGENT="agent",
+    TOOL="tool",
+    RETRIEVER="retriever",
+)
 sys.modules.setdefault("mlflow.entities", mlflow_entities_stub)
 
 agent_server_decorators_stub = types.ModuleType("mlflow.genai.agent_server")
@@ -99,6 +103,7 @@ messages_stub.SystemMessage = _SystemMessage
 messages_stub.HumanMessage = _HumanMessage
 messages_stub.AIMessage = _AIMessage
 messages_stub.AIMessageChunk = _AIMessageChunk
+messages_stub.convert_to_messages = lambda messages: messages
 sys.modules.setdefault("langchain_core.messages", messages_stub)
 
 utils_stub = types.ModuleType("agent_server.utils")
@@ -107,13 +112,20 @@ sys.modules.setdefault("agent_server.utils", utils_stub)
 
 state_stub = types.ModuleType("agent_server.multi_agent.core.state")
 state_stub.RESET_STATE_TEMPLATE = {}
+state_stub.AgentState = dict
+state_stub.create_conversation_turn = lambda **kwargs: kwargs
 sys.modules.setdefault("agent_server.multi_agent.core.state", state_stub)
 
 langgraph_pkg = types.ModuleType("langgraph")
 sys.modules.setdefault("langgraph", langgraph_pkg)
 
+langgraph_config_stub = types.ModuleType("langgraph.config")
+langgraph_config_stub.get_stream_writer = lambda: (lambda *_args, **_kwargs: None)
+sys.modules.setdefault("langgraph.config", langgraph_config_stub)
+
 langgraph_types_stub = types.ModuleType("langgraph.types")
 langgraph_types_stub.Command = object
+langgraph_types_stub.interrupt = lambda value: value
 sys.modules.setdefault("langgraph.types", langgraph_types_stub)
 
 
@@ -138,6 +150,7 @@ class _FakeWorkflow:
 
 graph_stub = types.ModuleType("agent_server.multi_agent.core.graph")
 graph_stub.create_super_agent_hybrid = lambda: _FakeWorkflow([])
+graph_stub.get_space_context_table_name = lambda _config: "catalog.schema.source_table"
 sys.modules.setdefault("agent_server.multi_agent.core.graph", graph_stub)
 
 
@@ -154,6 +167,8 @@ class _FakeCheckpointSaver:
 
 databricks_langchain_stub = types.ModuleType("databricks_langchain")
 databricks_langchain_stub.CheckpointSaver = _FakeCheckpointSaver
+databricks_langchain_stub.ChatDatabricks = object
+databricks_langchain_stub.VectorSearchRetrieverTool = object
 sys.modules.setdefault("databricks_langchain", databricks_langchain_stub)
 
 

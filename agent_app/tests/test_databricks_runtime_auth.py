@@ -43,9 +43,9 @@ def test_get_vector_search_workspace_client_materializes_cli_bearer(monkeypatch)
 
     created_clients = []
 
-    def fake_workspace_client(*, host=None, token=None):
+    def fake_workspace_client(*, host=None, token=None, auth_type=None):
         client = SimpleNamespace(
-            config=SimpleNamespace(auth_type="pat", host=host, token=token)
+            config=SimpleNamespace(auth_type=auth_type or "pat", host=host, token=token)
         )
         created_clients.append(client)
         return client

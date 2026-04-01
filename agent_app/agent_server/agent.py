@@ -9,6 +9,7 @@ import atexit
 import contextvars
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -30,7 +31,7 @@ from mlflow.types.responses import (
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
 
 from agent_server.utils import get_session_id
-from agent_server.multi_agent.core.graph import create_super_agent_hybrid
+from agent_server.multi_agent.core.graph import create_super_agent_hybrid, get_space_context_table_name
 from agent_server.multi_agent.core.state import RESET_STATE_TEMPLATE
 
 logging.getLogger("mlflow.utils.autologging_utils").setLevel(logging.ERROR)
@@ -70,12 +71,16 @@ _workflow = create_super_agent_hybrid()
 LAKEBASE_INSTANCE_NAME = None
 EMBEDDING_ENDPOINT = None
 EMBEDDING_DIMS = None
+SPACE_CONTEXT_TABLE_NAME = None
+SQL_WAREHOUSE_ID = None
 try:
     from agent_server.multi_agent.core.config import get_config
     _cfg = get_config()
     LAKEBASE_INSTANCE_NAME = _cfg.lakebase.instance_name
     EMBEDDING_ENDPOINT = _cfg.lakebase.embedding_endpoint
     EMBEDDING_DIMS = _cfg.lakebase.embedding_dims
+    SPACE_CONTEXT_TABLE_NAME = get_space_context_table_name(_cfg)
+    SQL_WAREHOUSE_ID = _cfg.table_metadata.sql_warehouse_id
     logger.info(f"Using Lakebase instance: {LAKEBASE_INSTANCE_NAME}")
 except Exception as e:
     logger.warning(f"Failed to load config at import time: {e}")
@@ -86,6 +91,9 @@ _compiled_workflow_app = None
 _compiled_workflow_checkpointer = None
 _compiled_workflow_checkpointer_exit = None
 _compiled_workflow_lock = threading.Lock()
+_keep_warm_thread = None
+_keep_warm_lock = threading.Lock()
+_keep_warm_stop = threading.Event()
 _RECOVERABLE_CHECKPOINTER_ERROR_MARKERS = (
     "adminshutdown",
     "terminating connection due to administrator command",
@@ -167,43 +175,169 @@ atexit.register(_close_compiled_workflow_resources)
 def _get_compiled_workflow_app():
     """Compile the workflow once and reuse it across requests."""
     global _compiled_workflow_app, _compiled_workflow_checkpointer, _compiled_workflow_checkpointer_exit
-    if _compiled_workflow_app is not None:
-        return _compiled_workflow_app
-
-    with _compiled_workflow_lock:
+    with mlflow.start_span(
+        name="get_compiled_workflow_app",
+        span_type=SpanType.AGENT,
+    ) as span:
         if _compiled_workflow_app is not None:
+            span.set_outputs({"cache_hit": True})
             return _compiled_workflow_app
 
-        from databricks_langchain import CheckpointSaver
+        with _compiled_workflow_lock:
+            if _compiled_workflow_app is not None:
+                span.set_outputs({"cache_hit": True, "waited_for_lock": True})
+                return _compiled_workflow_app
 
-        logger.info("Compiling workflow app for reuse")
-        cm = CheckpointSaver(instance_name=LAKEBASE_INSTANCE_NAME)
-        checkpointer = cm
-        exit_fn = None
+            from databricks_langchain import CheckpointSaver
 
-        if hasattr(cm, "__enter__") and hasattr(cm, "__exit__"):
-            entered = cm.__enter__()
-            if entered is not None:
-                checkpointer = entered
-            exit_fn = cm.__exit__
+            logger.info("Compiling workflow app for reuse")
+            with mlflow.start_span(
+                name="workflow_checkpointer_init",
+                span_type=SpanType.TOOL,
+                attributes={"lakebase_instance_name": LAKEBASE_INSTANCE_NAME or ""},
+            ):
+                cm = CheckpointSaver(instance_name=LAKEBASE_INSTANCE_NAME)
+            checkpointer = cm
+            exit_fn = None
 
+            if hasattr(cm, "__enter__") and hasattr(cm, "__exit__"):
+                with mlflow.start_span(
+                    name="workflow_checkpointer_enter",
+                    span_type=SpanType.TOOL,
+                ):
+                    entered = cm.__enter__()
+                if entered is not None:
+                    checkpointer = entered
+                exit_fn = cm.__exit__
+
+            try:
+                with mlflow.start_span(
+                    name="workflow_compile",
+                    span_type=SpanType.AGENT,
+                ) as compile_span:
+                    compiled = _workflow.compile(checkpointer=checkpointer)
+                    compile_span.set_outputs({"compiled": True})
+            except Exception:
+                if exit_fn is not None:
+                    try:
+                        exit_fn(*sys.exc_info())
+                    except Exception as cleanup_exc:
+                        logger.warning(
+                            f"Failed to clean up workflow checkpointer after compile error: {cleanup_exc}"
+                        )
+                raise
+
+            _compiled_workflow_app = compiled
+            _compiled_workflow_checkpointer = checkpointer
+            _compiled_workflow_checkpointer_exit = exit_fn
+            logger.info("Workflow app compiled and cached")
+            span.set_outputs({"cache_hit": False, "compiled": True})
+            return _compiled_workflow_app
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_keep_warm_interval_seconds() -> int:
+    raw_value = os.getenv("AGENT_KEEP_WARM_INTERVAL_SECONDS", "0").strip() or "0"
+    try:
+        return int(raw_value)
+    except ValueError:
+        logger.warning(
+            "Invalid AGENT_KEEP_WARM_INTERVAL_SECONDS=%r; disabling keep-warm",
+            raw_value,
+        )
+        return 0
+
+
+def prewarm_agent_resources(
+    *,
+    include_space_context: Optional[bool] = None,
+    reason: str = "startup",
+) -> dict[str, bool]:
+    """Eagerly initialize workflow resources and optional clarification cache."""
+    if include_space_context is None:
+        include_space_context = _env_flag("AGENT_PREWARM_SPACE_CONTEXT", True)
+
+    results = {"compiled_workflow": False, "space_context": False}
+    with mlflow.start_span(
+        name="agent_prewarm",
+        span_type=SpanType.TOOL,
+        attributes={"reason": reason, "include_space_context": include_space_context},
+    ) as span:
+        _get_compiled_workflow_app()
+        results["compiled_workflow"] = True
+
+        if include_space_context and SPACE_CONTEXT_TABLE_NAME and SQL_WAREHOUSE_ID:
+            from agent_server.multi_agent.agents.clarification import load_space_context
+
+            load_space_context(
+                table_name=SPACE_CONTEXT_TABLE_NAME,
+                warehouse_id=SQL_WAREHOUSE_ID,
+            )
+            results["space_context"] = True
+
+        span.set_outputs(results)
+    return results
+
+
+def prewarm_agent_resources_from_env() -> Optional[dict[str, bool]]:
+    """Warm the workflow on startup when enabled."""
+    if not _env_flag("AGENT_PREWARM_ON_STARTUP", True):
+        logger.info("Startup prewarm disabled by AGENT_PREWARM_ON_STARTUP")
+        return None
+
+    logger.info("Prewarming agent resources on startup")
+    return prewarm_agent_resources(reason="startup")
+
+
+def _keep_warm_loop(interval_seconds: int, include_space_context: bool) -> None:
+    while not _keep_warm_stop.wait(interval_seconds):
         try:
-            compiled = _workflow.compile(checkpointer=checkpointer)
-        except Exception:
-            if exit_fn is not None:
-                try:
-                    exit_fn(*sys.exc_info())
-                except Exception as cleanup_exc:
-                    logger.warning(
-                        f"Failed to clean up workflow checkpointer after compile error: {cleanup_exc}"
-                    )
-            raise
+            prewarm_agent_resources(
+                include_space_context=include_space_context,
+                reason="periodic_keep_warm",
+            )
+        except Exception as exc:
+            logger.warning("Periodic keep-warm failed: %s", exc)
 
-        _compiled_workflow_app = compiled
-        _compiled_workflow_checkpointer = checkpointer
-        _compiled_workflow_checkpointer_exit = exit_fn
-        logger.info("Workflow app compiled and cached")
-        return _compiled_workflow_app
+
+def start_background_keep_warm() -> None:
+    """Refresh prewarmed resources periodically while the process stays alive."""
+    global _keep_warm_thread
+
+    interval_seconds = _get_keep_warm_interval_seconds()
+    if interval_seconds <= 0:
+        return
+
+    include_space_context = _env_flag("AGENT_PREWARM_SPACE_CONTEXT", True)
+    with _keep_warm_lock:
+        if _keep_warm_thread is not None and _keep_warm_thread.is_alive():
+            return
+        _keep_warm_stop.clear()
+        _keep_warm_thread = threading.Thread(
+            target=_keep_warm_loop,
+            args=(interval_seconds, include_space_context),
+            name="agent-keep-warm",
+            daemon=True,
+        )
+        _keep_warm_thread.start()
+        logger.info(
+            "Started periodic keep-warm thread (interval=%ss, include_space_context=%s)",
+            interval_seconds,
+            include_space_context,
+        )
+
+
+def _stop_keep_warm() -> None:
+    _keep_warm_stop.set()
+
+
+atexit.register(_stop_keep_warm)
 
 
 # ---------------------------------------------------------------------------
