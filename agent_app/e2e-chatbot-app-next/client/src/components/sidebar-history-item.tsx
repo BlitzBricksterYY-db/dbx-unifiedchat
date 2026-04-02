@@ -32,6 +32,7 @@ import type { ChatMessage } from '@chat-template/core';
 import {
   CHAT_ACTIVE_TURN_EVENT,
   type ChatActiveTurnDetail,
+  dispatchScrollToTurn,
 } from '@/lib/chat-turn-sync';
 
 function getTurnLabel(message: ChatMessage, index: number) {
@@ -212,7 +213,18 @@ const PureChatItem = ({
                   turnLinkRefs.current[message.id] = el;
                 }}
                 to={`/chat/${chat.id}?turn=${message.id}`}
-                onClick={() => setOpenMobile(false)}
+                onClick={() => {
+                  setOpenMobile(false);
+                  if (
+                    isActive &&
+                    searchParams.get('turn') === message.id
+                  ) {
+                    dispatchScrollToTurn({
+                      chatId: chat.id,
+                      turnId: message.id,
+                    });
+                  }
+                }}
                 className={`flex w-full rounded-md px-2 py-1 text-left text-xs transition-colors ${
                   highlightedTurnId === message.id
                     ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground'

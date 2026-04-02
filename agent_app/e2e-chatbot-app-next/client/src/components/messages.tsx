@@ -9,7 +9,11 @@ import { useDataStream } from './data-stream-provider';
 import { Conversation, ConversationContent } from './elements/conversation';
 import { ArrowDownIcon, ArrowUpIcon, ChevronsUpIcon, ChevronsDownIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { dispatchActiveTurnChange } from '@/lib/chat-turn-sync';
+import {
+  CHAT_SCROLL_TO_TURN_EVENT,
+  type ChatScrollToTurnDetail,
+  dispatchActiveTurnChange,
+} from '@/lib/chat-turn-sync';
 
 interface MessagesProps {
   chatId: string;
@@ -340,6 +344,19 @@ function PureMessages({
       window.removeEventListener('chat-scroll-to-head', handleScrollToHead);
     };
   }, [scrollToConversationHead]);
+
+  useEffect(() => {
+    const handleScrollToTurn = (event: Event) => {
+      const { detail } = event as CustomEvent<ChatScrollToTurnDetail>;
+      if (detail.chatId !== chatId) return;
+      scrollToTurn(detail.turnId);
+    };
+
+    window.addEventListener(CHAT_SCROLL_TO_TURN_EVENT, handleScrollToTurn);
+    return () => {
+      window.removeEventListener(CHAT_SCROLL_TO_TURN_EVENT, handleScrollToTurn);
+    };
+  }, [chatId, scrollToTurn]);
 
   // Controls should be visible when idle AND there's enough content to scroll
   const showTopBottom = canScroll && isScrollIdle;
