@@ -542,7 +542,7 @@ User Query: {current_query}
 Available Data Sources:
 {json.dumps(space_context, indent=2)}
 
-Provide a clear, informative markdown answer about what's available.
+Provide a clear, informative markdown answer to the user's query.
 Use ## headings, **bold** keywords, and bullet lists. Be professional and helpful.
 """
         writer = get_stream_writer()
