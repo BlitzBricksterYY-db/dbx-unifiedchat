@@ -247,7 +247,8 @@ class SQLSynthesisTableAgent:
                 "  * NEVER combine top-N aggregation with detail expansion in a single query.\n\n"
                 "## OUTPUT FORMAT:\n"
                 "- Return your response with:\n"
-                "1. Your explanations; If SQL cannot be generated, explain what metadata is missing\n"
+                "0. Your overall explanation.\n"
+                "1. Your detailed explanations for each query how you generated the SQL; If SQL cannot be generated, explain what metadata is missing\n"
                 "2. SQL queries formatted as follows:\n"
                 "   * For SINGLE-part questions: One ```sql code block with query ending in semicolon\n"
                 "   * For MULTI-part questions: Use SEPARATE ```sql code blocks (one per query)\n"
@@ -751,7 +752,8 @@ OUTPUT REQUIREMENTS:
   * Clear column aliases
   * Always use real column names from the data
 - Return your response with:
-  1. Your explanation (including which execution strategy you used)
+  0. Your overall explanation including which execution strategy you used
+  1. Your detailed explanations for each query how you generated the SQL; If a particular SQL cannot be generated, explain what metadata is missing\n"
   2. SQL queries formatted as follows:
      * For SINGLE-part questions: One ```sql code block with query ending in semicolon
      * For MULTI-part questions: Use SEPARATE ```sql code blocks (one per query)
