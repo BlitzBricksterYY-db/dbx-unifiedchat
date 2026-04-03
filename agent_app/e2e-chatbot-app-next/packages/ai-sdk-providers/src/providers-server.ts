@@ -75,6 +75,7 @@ export async function getWorkspaceHostname(): Promise<string> {
 
 // Environment variable to enable SSE logging
 const LOG_SSE_EVENTS = process.env.LOG_SSE_EVENTS === 'true';
+const IS_DEVELOPMENT = process.env.NODE_ENV !== 'production';
 
 const API_PROXY = process.env.API_PROXY;
 
@@ -228,8 +229,8 @@ export const databricksFetch: typeof fetch = async (input, init) => {
     }
   }
 
-  // Log the request being sent to Databricks
-  if (requestInit?.body) {
+  // Only log full outbound request bodies during local development.
+  if (IS_DEVELOPMENT && requestInit?.body) {
     try {
       const requestBody =
         typeof requestInit.body === 'string'
