@@ -51,8 +51,8 @@ def _enable_mlflow_langchain_autolog() -> None:
         # forces MLflow to process traces synchronously, which helps avoid
         # losing them in async execution.
         
-        # mlflow.langchain.autolog(run_tracer_inline=True)
-        mlflow.langchain.autolog(disable=True)
+        mlflow.langchain.autolog(run_tracer_inline=True)
+        # mlflow.langchain.autolog(disable=True)
     except Exception as exc:
         logger.warning("Skipping mlflow.langchain.autolog setup: %s", exc)
 
