@@ -30,6 +30,7 @@ from mlflow.types.responses import (
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
 
+from agent_server.mlflow_span_context import mlflow_span_if
 from agent_server.utils import get_session_id
 from agent_server.multi_agent.core.graph import create_super_agent_hybrid, get_space_context_table_name
 from agent_server.multi_agent.core.state import RESET_STATE_TEMPLATE
@@ -172,10 +173,11 @@ def _is_recoverable_checkpointer_error(exc: Exception) -> bool:
 atexit.register(_close_compiled_workflow_resources)
 
 
-def _get_compiled_workflow_app():
+def _get_compiled_workflow_app(*, record_trace: bool = True):
     """Compile the workflow once and reuse it across requests."""
     global _compiled_workflow_app, _compiled_workflow_checkpointer, _compiled_workflow_checkpointer_exit
-    with mlflow.start_span(
+    with mlflow_span_if(
+        record_trace,
         name="get_compiled_workflow_app",
         span_type=SpanType.AGENT,
     ) as span:
@@ -191,7 +193,8 @@ def _get_compiled_workflow_app():
             from databricks_langchain import CheckpointSaver
 
             logger.info("Compiling workflow app for reuse")
-            with mlflow.start_span(
+            with mlflow_span_if(
+                record_trace,
                 name="workflow_checkpointer_init",
                 span_type=SpanType.TOOL,
                 attributes={"lakebase_instance_name": LAKEBASE_INSTANCE_NAME or ""},
@@ -201,7 +204,8 @@ def _get_compiled_workflow_app():
             exit_fn = None
 
             if hasattr(cm, "__enter__") and hasattr(cm, "__exit__"):
-                with mlflow.start_span(
+                with mlflow_span_if(
+                    record_trace,
                     name="workflow_checkpointer_enter",
                     span_type=SpanType.TOOL,
                 ):
@@ -211,7 +215,8 @@ def _get_compiled_workflow_app():
                 exit_fn = cm.__exit__
 
             try:
-                with mlflow.start_span(
+                with mlflow_span_if(
+                    record_trace,
                     name="workflow_compile",
                     span_type=SpanType.AGENT,
                 ) as compile_span:
@@ -258,18 +263,20 @@ def prewarm_agent_resources(
     *,
     include_space_context: Optional[bool] = None,
     reason: str = "startup",
+    record_trace: bool = True,
 ) -> dict[str, bool]:
     """Eagerly initialize workflow resources and optional clarification cache."""
     if include_space_context is None:
         include_space_context = _env_flag("AGENT_PREWARM_SPACE_CONTEXT", True)
 
     results = {"compiled_workflow": False, "space_context": False}
-    with mlflow.start_span(
+    with mlflow_span_if(
+        record_trace,
         name="agent_prewarm",
         span_type=SpanType.TOOL,
         attributes={"reason": reason, "include_space_context": include_space_context},
     ) as span:
-        _get_compiled_workflow_app()
+        _get_compiled_workflow_app(record_trace=record_trace)
         results["compiled_workflow"] = True
 
         if include_space_context and SPACE_CONTEXT_TABLE_NAME and SQL_WAREHOUSE_ID:
@@ -278,6 +285,7 @@ def prewarm_agent_resources(
             load_space_context(
                 table_name=SPACE_CONTEXT_TABLE_NAME,
                 warehouse_id=SQL_WAREHOUSE_ID,
+                record_trace=record_trace,
             )
             results["space_context"] = True
 
@@ -301,6 +309,7 @@ def _keep_warm_loop(interval_seconds: int, include_space_context: bool) -> None:
             prewarm_agent_resources(
                 include_space_context=include_space_context,
                 reason="periodic_keep_warm",
+                record_trace=False,
             )
         except Exception as exc:
             logger.warning("Periodic keep-warm failed: %s", exc)

@@ -36,6 +36,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 import mlflow
 from mlflow.entities import SpanType
+
+from agent_server.mlflow_span_context import mlflow_span_if
 from typing_extensions import TypedDict
 
 from ..core.base_agent import BaseAgent
@@ -147,7 +149,9 @@ def _get_cached_space_context(table_name: str, now: datetime) -> tuple[Optional[
     return cached_data, age_seconds
 
 
-def _query_space_context_via_warehouse(table_name: str, warehouse_id: str) -> Dict[str, str]:
+def _query_space_context_via_warehouse(
+    table_name: str, warehouse_id: str, *, record_trace: bool = True
+) -> Dict[str, str]:
     from databricks import sql
     from databricks.sdk.core import Config
 
@@ -160,7 +164,8 @@ def _query_space_context_via_warehouse(table_name: str, warehouse_id: str) -> Di
         WHERE chunk_type = 'space_summary'
     """
 
-    with mlflow.start_span(
+    with mlflow_span_if(
+        record_trace,
         name="space_context_connect_sql_warehouse",
         span_type=SpanType.TOOL,
         attributes={"warehouse_id": warehouse_id},
@@ -180,7 +185,8 @@ def _query_space_context_via_warehouse(table_name: str, warehouse_id: str) -> Di
 
     with connection:
         with connection.cursor() as cursor:
-            with mlflow.start_span(
+            with mlflow_span_if(
+                record_trace,
                 name="space_context_execute_sql",
                 span_type=SpanType.TOOL,
                 attributes={"table_name": table_name},
@@ -188,7 +194,8 @@ def _query_space_context_via_warehouse(table_name: str, warehouse_id: str) -> Di
                 execute_span.set_inputs({"query": query.strip()})
                 cursor.execute(query)
 
-            with mlflow.start_span(
+            with mlflow_span_if(
+                record_trace,
                 name="space_context_fetch_rows",
                 span_type=SpanType.TOOL,
                 attributes={"table_name": table_name},
@@ -199,17 +206,19 @@ def _query_space_context_via_warehouse(table_name: str, warehouse_id: str) -> Di
     return {row[0]: row[1] for row in rows}
 
 
-def load_space_context(table_name: str, warehouse_id: str) -> dict:
+def load_space_context(table_name: str, warehouse_id: str, *, record_trace: bool = True) -> dict:
     """Load Genie space summaries through SQL Warehouse with TTL caching."""
     global _space_context_cache
     now = datetime.now()
 
-    with mlflow.start_span(
+    with mlflow_span_if(
+        record_trace,
         name="load_space_context",
         span_type=SpanType.TOOL,
         attributes={"table_name": table_name, "warehouse_id": warehouse_id},
     ) as span:
-        with mlflow.start_span(
+        with mlflow_span_if(
+            record_trace,
             name="space_context_cache_lookup",
             span_type=SpanType.TOOL,
             attributes={"table_name": table_name},
@@ -243,7 +252,9 @@ def load_space_context(table_name: str, warehouse_id: str) -> dict:
                 return cached_context
 
             print("[space_context] loading from SQL warehouse")
-            context = _query_space_context_via_warehouse(table_name, warehouse_id)
+            context = _query_space_context_via_warehouse(
+                table_name, warehouse_id, record_trace=record_trace
+            )
             loaded_at = datetime.now()
             _space_context_cache.update(
                 {"data": context, "timestamp": loaded_at, "table_name": table_name}
