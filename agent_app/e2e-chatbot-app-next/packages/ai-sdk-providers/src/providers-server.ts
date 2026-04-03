@@ -110,6 +110,70 @@ type ProxyRequestBody = Record<string, unknown> & {
   }>;
 };
 
+function extractContentPreview(content: unknown): string | null {
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return null;
+  }
+
+  const textParts = content
+    .map((part) => {
+      if (typeof part === 'string') {
+        return part;
+      }
+      if (!part || typeof part !== 'object') {
+        return null;
+      }
+      const record = part as Record<string, unknown>;
+      if (typeof record.text === 'string') {
+        return record.text;
+      }
+      if (typeof record.content === 'string') {
+        return record.content;
+      }
+      return null;
+    })
+    .filter((part): part is string => Boolean(part));
+
+  if (textParts.length === 0) {
+    return null;
+  }
+  return textParts.join(' ');
+}
+
+function summarizeRequestBody(body: unknown): {
+  messageCount: number | null;
+  lastUserMessagePreview: string | null;
+} {
+  if (!body || typeof body !== 'object') {
+    return {
+      messageCount: null,
+      lastUserMessagePreview: null,
+    };
+  }
+
+  const requestBody = body as ProxyRequestBody;
+  const messages = Array.isArray(requestBody.messages)
+    ? requestBody.messages
+    : Array.isArray(requestBody.input)
+      ? (requestBody.input as Array<{ role?: string; content?: unknown }>)
+      : [];
+
+  const lastUserMessage = [...messages]
+    .reverse()
+    .find((message) => message?.role === 'user');
+  const preview = extractContentPreview(lastUserMessage?.content);
+
+  return {
+    messageCount: messages.length,
+    lastUserMessagePreview: preview
+      ? preview.slice(0, 200) + (preview.length > 200 ? '...' : '')
+      : null,
+  };
+}
+
 function normalizeResponsesInputContent(content: unknown) {
   if (typeof content === 'string') {
     return [{ type: 'input_text', text: content }];
@@ -229,27 +293,39 @@ export const databricksFetch: typeof fetch = async (input, init) => {
     }
   }
 
-  // Only log full outbound request bodies during local development.
+  // Only log outbound request summaries during local development.
   if (IS_DEVELOPMENT && requestInit?.body) {
+    const bodyText =
+      typeof requestInit.body === 'string'
+        ? requestInit.body
+        : JSON.stringify(requestInit.body);
     try {
       const requestBody =
         typeof requestInit.body === 'string'
           ? JSON.parse(requestInit.body)
           : requestInit.body;
+      const requestSummary = summarizeRequestBody(requestBody);
       console.log(
         'Databricks request:',
         JSON.stringify({
           url,
           method: requestInit.method || 'POST',
-          body: requestBody,
+          bodySize: new TextEncoder().encode(bodyText).length,
+          messageCount: requestSummary.messageCount,
+          lastUserMessagePreview: requestSummary.lastUserMessagePreview,
         }),
       );
     } catch (_e) {
-      console.log('Databricks request (raw):', {
-        url,
-        method: requestInit.method || 'POST',
-        body: requestInit.body,
-      });
+      console.log(
+        'Databricks request:',
+        JSON.stringify({
+          url,
+          method: requestInit.method || 'POST',
+          bodySize: new TextEncoder().encode(bodyText).length,
+          messageCount: null,
+          lastUserMessagePreview: null,
+        }),
+      );
     }
   }
 
