@@ -1,0 +1,22 @@
+graph LR
+    SQLIn[SQL input<br/>raw SQL or markdown block] --> ExecAgent[SQL Execution Agent]
+    ExecAgent --> Extract[Extract executable SQL]
+    Extract --> Limit[Enforce trailing LIMIT<br/>max_rows safety]
+    Limit --> Auth[Load Databricks Config<br/>unified auth / passthrough]
+    Auth --> Warehouse[Execute on SQL Warehouse]
+    Warehouse --> Normalize[Normalize rows to JSON-safe values]
+    Normalize --> Format[Return dict / json / markdown]
+
+    Warehouse --> Error{Execution success?}
+    Error -->|Yes| Format
+    Error -->|No| Failure[Error type + hint + failed SQL]
+
+    classDef agentClass fill:#4A90E2,stroke:#2E5C8A,stroke-width:2px,color:#fff
+    classDef dataClass fill:#50C878,stroke:#2E7D4E,stroke-width:2px,color:#fff
+    classDef processClass fill:#F5A623,stroke:#C17D11,stroke-width:2px,color:#000
+    classDef decisionClass fill:#8E44AD,stroke:#6C3483,stroke-width:2px,color:#fff
+
+    class ExecAgent agentClass
+    class SQLIn,Format,Failure dataClass
+    class Extract,Limit,Auth,Warehouse,Normalize processClass
+    class Error decisionClass

@@ -1,0 +1,109 @@
+resources:
+  apps:
+    agent_migration:
+      name: "dbx-unifiedchat-app-${bundle.target}"
+      description: "Multi-agent Genie system on Databricks Apps"
+      source_code_path: ../
+      config:
+        command: ["uv", "run", "start-app", "--port", "9000"]
+        env:
+          - name: CHAT_PROXY_TIMEOUT_SECONDS
+            value: ${var.chat_proxy_timeout_seconds}
+          - name: CATALOG_NAME
+            value: ${var.catalog}
+          - name: SCHEMA_NAME
+            value: ${var.schema}
+          - name: DATA_CATALOG_NAME
+            value: ${var.data_catalog}
+          - name: DATA_SCHEMA_NAME
+            value: ${var.data_schema}
+          - name: UC_FUNCTION_NAMES
+            value: ${var.uc_function_names}
+          - name: LLM_ENDPOINT
+            value: ${var.llm_endpoint}
+          - name: LLM_ENDPOINT_CLARIFICATION
+            value: ${var.llm_endpoint_clarification}
+          - name: LLM_ENDPOINT_PLANNING
+            value: ${var.llm_endpoint_planning}
+          - name: LLM_ENDPOINT_SQL_SYNTHESIS_TABLE
+            value: ${var.llm_endpoint_sql_synthesis_table}
+          - name: LLM_ENDPOINT_SQL_SYNTHESIS_GENIE
+            value: ${var.llm_endpoint_sql_synthesis_genie}
+          - name: LLM_ENDPOINT_EXECUTION
+            value: ${var.llm_endpoint_execution}
+          - name: LLM_ENDPOINT_SUMMARIZE
+            value: ${var.llm_endpoint_summarize}
+          - name: LLM_ENDPOINT_DETECT_CODE_LOOKUP
+            value: ${var.llm_endpoint_detect_code_lookup}
+          - name: EMBEDDING_MODEL
+            value: ${var.embedding_model}
+          - name: VS_ENDPOINT_NAME
+            value: ${var.vs_endpoint_name}
+          - name: SAMPLE_SIZE
+            value: ${var.sample_size}
+          - name: MAX_UNIQUE_VALUES
+            value: ${var.max_unique_values}
+          - name: VOLUME_NAME
+            value: ${var.volume_name}
+          - name: ENRICHED_DOCS_TABLE
+            value: ${var.enriched_docs_table}
+          - name: SOURCE_TABLE
+            value: ${var.source_table}
+          - name: SQL_WAREHOUSE_ID
+            value: ${var.warehouse_id}
+          - name: GENIE_SPACE_IDS
+            value: ${var.genie_space_ids}
+          - name: LAKEBASE_INSTANCE_NAME
+            value: ${var.lakebase_instance_name}
+          - name: LAKEBASE_EMBEDDING_ENDPOINT
+            value: ${var.embedding_model}
+          - name: LAKEBASE_EMBEDDING_DIMS
+            value: ${var.lakebase_embedding_dims}
+          - name: MLFLOW_EXPERIMENT_ID
+            value_from: experiment
+          - name: MLFLOW_TRACKING_URI
+            value: ${var.mlflow_tracking_uri}
+          - name: MLFLOW_REGISTRY_URI
+            value: ${var.mlflow_registry_uri}
+          - name: AGENT_PREWARM_ON_STARTUP
+            value: ${var.agent_prewarm_on_startup}
+          - name: AGENT_PREWARM_SPACE_CONTEXT
+            value: ${var.agent_prewarm_space_context}
+          - name: AGENT_KEEP_WARM_INTERVAL_SECONDS
+            value: ${var.agent_keep_warm_interval_seconds}
+
+      resources:
+        - name: 'experiment'
+          experiment:
+            experiment_id: ${var.experiment_id}
+            permission: 'CAN_MANAGE'
+
+        # UC Volume for MLflow trace artifacts
+        - name: 'trace-volume'
+          uc_securable:
+            securable_type: 'VOLUME'
+            securable_full_name: ${var.catalog}.${var.schema}.${var.volume_name}
+            permission: 'WRITE_VOLUME'
+        
+
+        # Serving endpoints (LLM + embedding)
+        - name: 'serving-endpoint-sonnet'
+          serving_endpoint:
+            name: ${var.llm_endpoint}
+            permission: 'CAN_QUERY'
+        - name: 'serving-endpoint-haiku'
+          serving_endpoint:
+            name: ${var.llm_endpoint_clarification}
+            permission: 'CAN_QUERY'
+        - name: 'serving-endpoint-embedding'
+          serving_endpoint:
+            name: ${var.embedding_model}
+            permission: 'CAN_QUERY'
+
+        # SQL warehouse
+        - name: 'sql-warehouse'
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: 'CAN_USE'
+
+

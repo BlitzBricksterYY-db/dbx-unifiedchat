@@ -1,0 +1,20 @@
+resources:
+  schemas:
+    multi_agent_genie_schema:
+      name: ${var.schema}
+      catalog_name: ${var.catalog}
+      grants:
+        - principal: ${resources.apps.agent_migration.service_principal_client_id}
+          privileges:
+            - USE_SCHEMA
+            - SELECT
+            - EXECUTE
+      lifecycle:
+        prevent_destroy: true
+
+      # healthverity_claims_sample_patient_dataset_dev is a Delta Sharing catalog (read-only),
+      # schema grants must be applied manually by the catalog owner:
+      #   GRANT USE_SCHEMA ON SCHEMA healthverity_claims_sample_patient_dataset_dev.hv_claims_sample
+      #     TO `<sp-app-id>`;
+      #   GRANT SELECT ON SCHEMA healthverity_claims_sample_patient_dataset_dev.hv_claims_sample
+      #     TO `<sp-app-id>`;

@@ -139,14 +139,9 @@ class SQLSynthesisTableAgent:
         client = DatabricksFunctionClient()
         set_uc_function_client(client)
         
-        # Create UC Function Toolkit
-        uc_function_names = [
-            f"{catalog}.{schema}.get_space_summary",
-            f"{catalog}.{schema}.get_table_overview",
-            f"{catalog}.{schema}.get_column_detail",
-            f"{catalog}.{schema}.get_space_instructions",  # REQUIRED FINAL STEP before SQL synthesis
-            f"{catalog}.{schema}.get_space_details",  # Last resort only
-        ]
+        from ..core.config import get_config
+        config = get_config()
+        uc_function_names = config.unity_catalog.uc_function_names_fq
         
         self.uc_toolkit = UCFunctionToolkit(function_names=uc_function_names)
         self.tools = self.uc_toolkit.tools

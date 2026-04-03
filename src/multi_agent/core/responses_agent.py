@@ -27,10 +27,10 @@ logger = logging.getLogger(__name__)
 
 #########################################################
 """
-Load configuration from dev_config.yaml for testing.
+Load configuration via ModelConfig.
 
-This uses the same YAML configuration that deployment uses,
-but loads it for testing purposes.
+At serving time, reads from the YAML baked into the model artifact.
+In notebooks, reads from the AGENT_CONFIG_FILE env var (set by notebook before import).
 """
 #########################################################
 # Lazy load config if not set
@@ -325,7 +325,6 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
             # New clean streaming formatters
             "llm_streaming_start": lambda d: f"🤖 Streaming response from {d.get('agent', 'LLM')}...",
             "llm_token": lambda d: d.get('content', ''),  # Just the token content, no decoration
-            "intent_detected": lambda d: f"\n🎯 Intent: {d.get('intent_type', 'unknown')} (confidence: {d.get('confidence', 0):.0%})",
             "meta_question_detected": lambda d: f"\n💡 Meta-question detected",
             "clarification_requested": lambda d: f"\n❓ Clarification needed: {d.get('reason', 'unknown')}",
             "clarification_skipped": lambda d: f"\n⏭️ Clarification skipped: {d.get('reason', 'unknown')}",
@@ -498,8 +497,8 @@ Guidelines:
 - Return results with proper context and explanations"""),
                 HumanMessage(content=latest_query)
             ]
-            # NOTE: current_turn, intent_metadata, turn_history are NOT in RESET_STATE_TEMPLATE
-            # They are managed by unified_intent_context_clarification_node and persist via CheckpointSaver
+            # NOTE: current_turn, turn_history are NOT in RESET_STATE_TEMPLATE
+            # They are managed by the clarification subgraph and persist via CheckpointSaver
         }
         
         # Add user_id to state for long-term memory access

@@ -18,8 +18,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
 parts/
 sdist/
 var/
@@ -35,6 +33,9 @@ MANIFEST
 htmlcov/
 .tox/
 .hypothesis/
+**/test-results/**
+#**/tests/**
+**/playwright-report/**
 
 # IDEs
 .vscode/
@@ -83,3 +84,8 @@ logs/
 
 # assets for icons
 assets/
+
+#
+mlflow.db
+src/mlflow.db
+.langgraph_api/

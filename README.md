@@ -74,7 +74,7 @@ The system leverages:
 
 See [Architecture Documentation](docs/ARCHITECTURE.md) for detailed design.
 
----
+
 
 ## Presentation
 
@@ -84,6 +84,12 @@ See [Architecture Documentation](docs/ARCHITECTURE.md) for detailed design.
   <b>🚀 Click here to view the Interactive Presentation Slides</b>
 </a>
 
+
+
+## UI Illustration
+
+![UI Tutorial Annotated](docs/UI/UI_tutorial_annotated.png)
+
 ---
 
 ## Quick Start
@@ -91,101 +97,105 @@ See [Architecture Documentation](docs/ARCHITECTURE.md) for detailed design.
 ### Prerequisites
 
 * Python 3.10 or higher
+* Node.js 18 or higher
+* `uv`, `npm`, `jq`, and Databricks CLI
 * Databricks workspace with:
   * Genie spaces configured
-  * Vector Search index for metadata
-  * SQL Warehouse or Compute cluster
-* Databricks CLI configured
+  * SQL Warehouse configured
+  * Permissions to deploy Databricks Asset Bundles and Databricks Apps
 
 ### Installation
 
-Please see the [**Development Guide**](docs/DEVELOPMENT_GUIDE.md) for detailed instructions on the three supported workflows:
-1. **Local Development**: Fastest iteration for unit tests and logic changes.
-2. **Databricks Notebook Dev**: Integration testing with real services.
-3. **Production Deployment (CI/CD)**: Final deployment to Model Serving endpoints.
-
 ```bash
-# Quick clone
 git clone https://github.com/databricks-solutions/dbx-unifiedchat.git
 cd dbx-unifiedchat
-
-# See docs/DEVELOPMENT_GUIDE.md for next steps
 ```
 
-### Configuration
+### Recommended Workflow
 
-Set up your environment variables in `.env`:
+#### 1. Deploy metadata prerequisites from the root bundle
+
+Deploy the root-level Databricks Asset Bundle first, then run the ETL job defined in `resources/etl_pipeline.yml`. This is the prerequisite for both local testing and deployed app environments because it creates the metadata artifacts and vector index the agent relies on.
 
 ```bash
-DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
-DATABRICKS_TOKEN=your-token
-
-# Genie Configuration
-GENIE_SPACE_IDS=space_id_1,space_id_2
-
-# Vector Search Configuration
-VECTOR_SEARCH_ENDPOINT=your-endpoint
-VECTOR_SEARCH_INDEX=catalog.schema.index_name
-
-# SQL Configuration
-SQL_WAREHOUSE_ID=your-warehouse-id
+databricks bundle validate
+databricks bundle deploy
+databricks bundle run etl_pipeline
 ```
 
-### Run Locally
+Use `-t prod` for the production target when needed.
+
+#### 2. Deploy the app and agent from `agent_app`
+
+The active deployment path is now the Databricks App in `agent_app/`.
+
+Before running `agent_app/scripts/deploy.sh`, make sure you have:
+
+* Databricks CLI installed, authenticated, and able to run `databricks bundle deploy` / `databricks bundle run`
+* A Databricks CLI profile available via `--profile <profile>` or `DATABRICKS_CONFIG_PROFILE` in `agent_app/.env`
+* `uv` installed locally, because the deploy script uses `uv run` for Lakebase permission bootstrapping
+* Python 3.10+ with `PyYAML` available locally, because the script reads `agent_app/databricks.yml` via `import yaml`
+* Permission in the target workspace to deploy Databricks Apps / Asset Bundles and access the configured Lakebase, SQL warehouse, catalogs, and schemas
+
+`Node.js`, `npm`, and `jq` are used by the local development workflows, but are not required just to run `agent_app/scripts/deploy.sh`.
 
 ```bash
-# Test the agent with a sample query
-python -m src.multi_agent.main --query "Show me patient demographics by region"
+cd agent_app
+./scripts/deploy.sh --run
 ```
 
-### Deploy to Databricks
+Useful options:
 
-1. **Prepare your data** (First time only):
-   ```bash
-   cd etl/
-   python local_dev_etl.py --all --sample-size 10
-   ```
+* `./scripts/deploy.sh --target prod --run`
+* `./scripts/deploy.sh --profile <profile> --run`
+* `./scripts/deploy.sh --sync --run`
 
-2. **Test in Databricks notebook**:
-   * Open `notebooks/test_agent_databricks.py` in your Databricks workspace
-   * Run cells to test with real services
+#### 3. Local app development in `agent_app`
 
-3. **Deploy to Model Serving**:
-   * Open `notebooks/deploy_agent.py` in your Databricks workspace
-   * Follow deployment instructions to create a serving endpoint
+Use the bootstrap/build script once, then use hot reload for normal development.
 
-See [Deployment Guide](docs/DEPLOYMENT.md) for complete instructions.
+```bash
+cd agent_app
+
+# One-time local bootstrap/build
+./scripts/dev-local.sh
+
+# Iterative development with hot reload
+./scripts/dev-local-hot-reload.sh
+```
+
+Useful options:
+
+* `./scripts/dev-local.sh --profile <profile>`
+* `./scripts/dev-local-hot-reload.sh --profile <profile>`
+* `./scripts/dev-local-hot-reload.sh --skip-migrate`
+
+#### 4. Legacy model serving path
+
+The old Model Serving agent flow is deprecated. The related code still exists in the repo for now, but the supported deployment model is the Databricks App under `agent_app/`.
 
 ---
 
 ## Repository Structure
 
-```
+```text
 .
-├── etl/                      # ETL pipeline for metadata enrichment
-│   ├── local_dev_etl.py     # Local ETL testing script
-│   └── *.py                 # ETL notebooks for Databricks
-├── src/multi_agent/          # Core agent system
-│   ├── agents/              # Agent implementations
-│   ├── core/                # Graph, state, and configuration
-│   ├── tools/               # Agent tools and utilities
-│   └── main.py              # Entry point for local execution
-├── notebooks/                # Databricks notebooks
-│   ├── test_agent_databricks.py   # Testing notebook
-│   └── deploy_agent.py      # Deployment notebook
-├── tests/                    # Test suite
-│   ├── unit/                # Unit tests
-│   ├── integration/         # Integration tests
-│   └── e2e/                 # End-to-end tests
-├── docs/                     # Documentation
-│   ├── ARCHITECTURE.md      # System architecture
-│   ├── DEPLOYMENT.md        # Deployment guide
-│   ├── LOCAL_DEVELOPMENT.md # Local development guide
-│   └── CONFIGURATION.md     # Configuration reference
-├── config/                   # Configuration files
-├── dev_config.yaml          # Development configuration
-├── prod_config.yaml         # Production configuration
-└── pyproject.toml           # Python package configuration
+├── databricks.yml                  # Root DAB for shared metadata resources
+├── resources/
+│   └── etl_pipeline.yml            # Job that exports Genie metadata and builds the VS index
+├── etl/                            # ETL notebooks used by the root bundle job
+├── agent_app/                      # Active Databricks App + agent implementation
+│   ├── databricks.yml              # App DAB
+│   ├── agent_server/               # Multi-agent backend
+│   ├── e2e-chatbot-app-next/       # Frontend and app backend
+│   ├── scripts/
+│   │   ├── deploy.sh               # Deploy app bundle
+│   │   ├── dev-local.sh            # One-time local bootstrap/build
+│   │   └── dev-local-hot-reload.sh # Local hot-reload workflow
+│   └── tests/                      # App-specific unit tests
+├── tests/                          # Root integration and end-to-end tests
+├── docs/                           # Project documentation
+└── notebooks/                      # Legacy / notebook-based workflows
 ```
 
 ---
@@ -194,11 +204,10 @@ See [Deployment Guide](docs/DEPLOYMENT.md) for complete instructions.
 
 ### Getting Started
 
-* [**Development Guide**](docs/DEVELOPMENT_GUIDE.md) - Comprehensive guide for local, notebook, and CI/CD development workflows
-* [**Local Development Guide**](docs/LOCAL_DEVELOPMENT.md) - Set up your local development environment
-* [**ETL Pipeline Guide**](etl/README.md) - Prepare metadata for the agent system
-* [**Configuration Reference**](docs/CONFIGURATION.md) - Configure for different environments
-* [**Deployment Guide**](docs/DEPLOYMENT.md) - Deploy to Databricks Model Serving
+* [**Development Guide**](docs/DEVELOPMENT_GUIDE.md) - Project setup and workflow overview
+* [**ETL Guide**](docs/ETL_GUIDE.md) - Root bundle ETL and metadata indexing workflow
+* [**Local Development Guide**](docs/LOCAL_DEVELOPMENT.md) - Local environment notes
+* [**Configuration Reference**](docs/CONFIGURATION.md) - Configuration details across environments
 
 ### Reference
 
@@ -206,22 +215,20 @@ See [Deployment Guide](docs/DEPLOYMENT.md) for complete instructions.
 * [**API Reference**](docs/API.md) - Agent APIs and interfaces
 * [**Testing Guide**](tests/README.md) - Run tests and write new tests
 * [**Contributing**](CONTRIBUTING.md) - Contribution guidelines
+* `agent_app/scripts/deploy.sh` - Current app deployment entry point
+* `agent_app/scripts/dev-local.sh` - Current local bootstrap/build entry point
+* `agent_app/scripts/dev-local-hot-reload.sh` - Current hot-reload development entry point
 
 ---
 
 ## Testing
 
 ```bash
-# Run all tests
-pytest
+# Root integration / e2e tests
+pytest tests/
 
-# Run specific test suites
-pytest tests/unit/              # Fast unit tests
-pytest tests/integration/        # Integration tests with Databricks
-pytest tests/e2e/               # End-to-end system tests
-
-# Run with coverage
-pytest --cov=src.multi_agent tests/
+# Agent app unit tests
+pytest agent_app/tests/
 ```
 
 See [Testing Guide](tests/README.md) for detailed testing documentation.
@@ -230,49 +237,42 @@ See [Testing Guide](tests/README.md) for detailed testing documentation.
 
 ## Configuration
 
-This repository supports three configuration modes:
+This repository now centers on two active configuration layers plus one legacy path:
 
-| Configuration | Environment | Purpose |
-|--------------|-------------|---------|
-| `.env` + `config.py` | Local development | Fast iteration with local Python |
-| `dev_config.yaml` | Databricks notebooks | Testing with real Databricks services |
-| `prod_config.yaml` | Model Serving | Production deployment configuration |
+| Configuration | Scope | Purpose |
+|--------------|-------|---------|
+| `databricks.yml` | Repository root | Shared metadata resources and ETL pipeline deployment |
+| `agent_app/databricks.yml` | App bundle | Databricks App deployment and runtime settings |
+| `agent_app/.env` | Local app dev | Local script configuration for auth, database, and MLflow |
+| Legacy model serving config | Deprecated | Older serving-based flow still present in repo |
 
-All three configurations use the same agent code from `src/multi_agent/`.
-
-See [Configuration Guide](docs/CONFIGURATION.md) for details.
+See [Configuration Guide](docs/CONFIGURATION.md) for more detail.
 
 ---
 
 ## Examples
 
-### Query Examples
+### Metadata Setup
 
-```python
-from src.multi_agent.main import run_agent
-
-# Simple query
-result = run_agent("What are the top 10 customers by revenue?")
-
-# Cross-domain query
-result = run_agent("Show me patient outcomes correlated with treatment protocols")
-
-# Complex analytical query
-result = run_agent("Compare sales performance across regions for the last quarter")
+```bash
+# Deploy shared metadata resources and build the index
+databricks bundle deploy
+databricks bundle run etl_pipeline
 ```
 
-### Deployment Example
+### App Deployment
 
-```python
-# Deploy to Databricks Model Serving
-from databricks import agents
+```bash
+cd agent_app
+./scripts/deploy.sh --run
+```
 
-# Register agent as MLflow model
-agents.deploy(
-    model_name="dbx-unifiedchat-agent",
-    model_version=1,
-    endpoint_name="unified-chat-endpoint"
-)
+### Local Development
+
+```bash
+cd agent_app
+./scripts/dev-local.sh
+./scripts/dev-local-hot-reload.sh
 ```
 
 ---

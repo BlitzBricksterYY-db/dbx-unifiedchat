@@ -1,0 +1,5 @@
+resources:
+  database_instances:
+    app_state_db:
+      name: ${var.lakebase_instance_name}
+      capacity: ${var.lakebase_capacity}

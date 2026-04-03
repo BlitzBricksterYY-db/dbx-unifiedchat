@@ -1,0 +1,28 @@
+graph LR
+    Plan[Execution plan<br/>join_strategy = table_route] --> TableAgent[SQL Synthesis Table Agent]
+    TableAgent --> Check{Enough metadata?}
+
+    Check -->|No| Tools[UC function toolkit]
+    Tools --> Summary[get_space_summary]
+    Tools --> Overview[get_table_overview]
+    Tools --> Column[get_column_detail]
+    Tools --> Details[get_space_details<br/>last resort]
+    Summary --> Gathered[Relevant table metadata]
+    Overview --> Gathered
+    Column --> Gathered
+    Details --> Gathered
+
+    Check -->|Yes| Draft[Draft SQL]
+    Gathered --> Draft
+    Draft --> Reflect[Reflection + get_space_instructions]
+    Reflect --> Final[Final SQL blocks<br/>with explanation]
+
+    classDef agentClass fill:#4A90E2,stroke:#2E5C8A,stroke-width:2px,color:#fff
+    classDef dataClass fill:#50C878,stroke:#2E7D4E,stroke-width:2px,color:#fff
+    classDef processClass fill:#F5A623,stroke:#C17D11,stroke-width:2px,color:#000
+    classDef decisionClass fill:#8E44AD,stroke:#6C3483,stroke-width:2px,color:#fff
+
+    class TableAgent agentClass
+    class Plan,Gathered,Final dataClass
+    class Tools,Summary,Overview,Column,Details,Draft,Reflect processClass
+    class Check decisionClass

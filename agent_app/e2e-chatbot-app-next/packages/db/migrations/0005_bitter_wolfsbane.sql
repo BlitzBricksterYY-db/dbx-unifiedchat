@@ -1,0 +1,1 @@
+ALTER TABLE "ai_chatbot"."Chat" ADD COLUMN "countOnly" boolean DEFAULT false NOT NULL;
