@@ -45,7 +45,14 @@ logger = logging.getLogger(__name__)
 def _enable_mlflow_langchain_autolog() -> None:
     """Best-effort autolog setup that does not break unit-test imports."""
     try:
-        mlflow.langchain.autolog(run_tracer_inline=True)
+        # Uncomment this when you also want to include autologging.
+        # Many autologged spans will overlap with manual tracing, so you may
+        # want to disable autologging in that case. `run_tracer_inline=True`
+        # forces MLflow to process traces synchronously, which helps avoid
+        # losing them in async execution.
+        
+        # mlflow.langchain.autolog(run_tracer_inline=True)
+        mlflow.langchain.autolog(disable=True)
     except Exception as exc:
         logger.warning("Skipping mlflow.langchain.autolog setup: %s", exc)
 
