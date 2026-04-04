@@ -190,6 +190,7 @@ async function rechartViaPython({
 }): Promise<Record<string, unknown> | null> {
   const body: Record<string, unknown> = {
     columns,
+    rows,
     prompt,
     title,
     description,
@@ -199,8 +200,6 @@ async function rechartViaPython({
 
   if (dataCacheKey) {
     body.data_cache_key = dataCacheKey;
-  } else {
-    body.rows = rows;
   }
 
   const response = await fetch(url, {

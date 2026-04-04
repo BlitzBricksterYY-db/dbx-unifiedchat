@@ -41,6 +41,14 @@ type AskChartState = {
   error: string;
 };
 
+type ChartHistoryEntry = {
+  initial: ChartSpec;
+  past: ChartSpec[];
+  future: ChartSpec[];
+};
+
+type ChartHistoryState = Record<string, ChartHistoryEntry>;
+
 function loadSavedCharts(key: string | null, fallback: ChartSpec[]): ChartSpec[] {
   if (!key) return fallback;
   try {
@@ -53,16 +61,34 @@ function loadSavedCharts(key: string | null, fallback: ChartSpec[]): ChartSpec[]
   return fallback;
 }
 
+function getChartId(chart: ChartSpec, workspaceId: string, index = 0) {
+  return chart.meta?.chartId ?? `${workspaceId}-${index}`;
+}
+
+function buildInitialChartHistory(charts: ChartSpec[], workspaceId: string): ChartHistoryState {
+  return Object.fromEntries(
+    charts.map((chart, index) => [
+      getChartId(chart, workspaceId, index),
+      { initial: chart, past: [], future: [] },
+    ]),
+  );
+}
+
 export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProps) {
   const messageId = useMessageId();
   const storageKey = messageId
     ? `viz-ws-${messageId}-${workspace.workspaceId}`
     : null;
+  const initialCharts = useMemo(
+    () => loadSavedCharts(storageKey, workspace.charts),
+    [storageKey, workspace.charts],
+  );
 
   const [isExpanded, setIsExpanded] = useState(false);
   const [isTableVisible, setIsTableVisible] = useState(false);
-  const [charts, setCharts] = useState<ChartSpec[]>(
-    () => loadSavedCharts(storageKey, workspace.charts),
+  const [charts, setCharts] = useState<ChartSpec[]>(initialCharts);
+  const [chartHistory, setChartHistory] = useState<ChartHistoryState>(
+    () => buildInitialChartHistory(initialCharts, workspace.workspaceId),
   );
   const [builderOpen, setBuilderOpen] = useState(false);
   const [builderChartIndex, setBuilderChartIndex] = useState(0);
@@ -87,6 +113,121 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
     },
     [],
   );
+
+  const replaceChart = useCallback((chartIndex: number, nextChart: ChartSpec) => {
+    const currentChart = charts[chartIndex];
+    if (!currentChart) return;
+    const chartId = getChartId(currentChart, workspace.workspaceId, chartIndex);
+
+    persistCharts((existing) => existing.map((chart, index) => (
+      index === chartIndex ? nextChart : chart
+    )));
+    setChartHistory((existing) => {
+      const entry = existing[chartId] ?? { initial: currentChart, past: [], future: [] };
+      return {
+        ...existing,
+        [chartId]: {
+          ...entry,
+          past: [...entry.past, currentChart],
+          future: [],
+        },
+      };
+    });
+  }, [charts, persistCharts, workspace.workspaceId]);
+
+  const addChart = useCallback((nextChart: ChartSpec) => {
+    const chartId = getChartId(nextChart, workspace.workspaceId, charts.length);
+    persistCharts((existing) => [...existing, nextChart]);
+    setChartHistory((existing) => ({
+      ...existing,
+      [chartId]: {
+        initial: nextChart,
+        past: [],
+        future: [],
+      },
+    }));
+  }, [charts.length, persistCharts, workspace.workspaceId]);
+
+  const updateChartType = useCallback((chartIndex: number, nextType: string) => {
+    const currentChart = charts[chartIndex];
+    if (!currentChart || currentChart.config.chartType === nextType) return;
+    replaceChart(chartIndex, {
+      ...currentChart,
+      config: {
+        ...currentChart.config,
+        chartType: nextType as ChartSpec['config']['chartType'],
+      },
+      meta: {
+        ...currentChart.meta,
+        source: 'manual',
+        rationale: 'Switched chart type from toolbar controls.',
+      },
+    });
+  }, [charts, replaceChart]);
+
+  const undoChart = useCallback((chartIndex: number) => {
+    const currentChart = charts[chartIndex];
+    if (!currentChart) return;
+    const chartId = getChartId(currentChart, workspace.workspaceId, chartIndex);
+    const entry = chartHistory[chartId];
+    const previousChart = entry?.past.at(-1);
+    if (!entry || !previousChart) return;
+
+    persistCharts((existing) => existing.map((chart, index) => (
+      index === chartIndex ? previousChart : chart
+    )));
+    setChartHistory((existing) => ({
+      ...existing,
+      [chartId]: {
+        ...entry,
+        past: entry.past.slice(0, -1),
+        future: [currentChart, ...entry.future],
+      },
+    }));
+  }, [chartHistory, charts, persistCharts, workspace.workspaceId]);
+
+  const redoChart = useCallback((chartIndex: number) => {
+    const currentChart = charts[chartIndex];
+    if (!currentChart) return;
+    const chartId = getChartId(currentChart, workspace.workspaceId, chartIndex);
+    const entry = chartHistory[chartId];
+    const nextChart = entry?.future[0];
+    if (!entry || !nextChart) return;
+
+    persistCharts((existing) => existing.map((chart, index) => (
+      index === chartIndex ? nextChart : chart
+    )));
+    setChartHistory((existing) => ({
+      ...existing,
+      [chartId]: {
+        ...entry,
+        past: [...entry.past, currentChart],
+        future: entry.future.slice(1),
+      },
+    }));
+  }, [chartHistory, charts, persistCharts, workspace.workspaceId]);
+
+  const resetChart = useCallback((chartIndex: number) => {
+    const currentChart = charts[chartIndex];
+    if (!currentChart) return;
+    const chartId = getChartId(currentChart, workspace.workspaceId, chartIndex);
+    const entry = chartHistory[chartId];
+    if (!entry) return;
+    const sameAsInitial = JSON.stringify(currentChart) === JSON.stringify(entry.initial);
+    if (sameAsInitial) return;
+
+    persistCharts((existing) => existing.map((chart, index) => (
+      index === chartIndex ? entry.initial : chart
+    )));
+    setChartHistory((existing) => ({
+      ...existing,
+      [chartId]: {
+        ...entry,
+        past: [...entry.past, currentChart],
+        future: [],
+      },
+    }));
+  }, [chartHistory, charts, persistCharts, workspace.workspaceId]);
   useEffect(() => {
     if (!modified.current || !storageKey) return;
     try { localStorage.setItem(storageKey, JSON.stringify(charts)); } catch {}
@@ -130,12 +271,8 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
       'manual',
     );
 
-    persistCharts((existing) => {
-      if (builderState.mode === 'add') return [...existing, nextChart];
-      return existing.map((chart, index) => (
-        index === builderChartIndex ? nextChart : chart
-      ));
-    });
+    if (builderState.mode === 'add') addChart(nextChart);
+    else replaceChart(builderChartIndex, nextChart);
     setBuilderOpen(false);
   };
 
@@ -151,11 +288,19 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
         rationale: 'Duplicated from an existing chart in the visualization workspace.',
       },
     };
-    persistCharts((existing) => [...existing, duplicate]);
+    addChart(duplicate);
   };
 
   const removeChart = (chartIndex: number) => {
+    const currentChart = charts[chartIndex];
+    if (!currentChart) return;
+    const chartId = getChartId(currentChart, workspace.workspaceId, chartIndex);
     persistCharts((existing) => existing.filter((_, index) => index !== chartIndex));
+    setChartHistory((existing) => {
+      const nextHistory = { ...existing };
+      delete nextHistory[chartId];
+      return nextHistory;
+    });
   };
 
   const openAskChart = (chartIndex: number, mode: 'replace' | 'add') => {
@@ -224,12 +369,18 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
         );
       }
 
-      persistCharts((existing) => {
-        if (askChart.mode === 'add') return [...existing, nextChart];
-        return existing.map((chart, index) => (
-          index === askChart.chartIndex ? nextChart : chart
-        ));
-      });
+      if (askChart.mode === 'replace') {
+        nextChart = {
+          ...nextChart,
+          meta: {
+            ...nextChart.meta,
+            chartId: targetChart.meta?.chartId,
+          },
+        };
+        replaceChart(askChart.chartIndex, nextChart);
+      } else {
+        addChart(nextChart);
+      }
       setAskChart((current) => ({ ...current, open: false, isSubmitting: false }));
     } catch (error) {
       setAskChart((current) => ({
@@ -307,6 +458,12 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
                   spec={chart}
                   onOpenCustomizer={() => openBuilder(index, 'replace')}
                   onOpenPrompt={() => openAskChart(index, 'replace')}
+                  onChangeChartType={(nextType) => updateChartType(index, nextType)}
+                  onUndo={() => undoChart(index)}
+                  onRedo={() => redoChart(index)}
+                  onReset={() => resetChart(index)}
+                  canUndo={(chartHistory[getChartId(chart, workspace.workspaceId, index)]?.past.length ?? 0) > 0}
+                  canRedo={(chartHistory[getChartId(chart, workspace.workspaceId, index)]?.future.length ?? 0) > 0}
                   onDuplicate={() => duplicateChart(index)}
                   onRemove={() => removeChart(index)}
                   canRemove={charts.length > 1}
@@ -332,6 +489,15 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
             >
               <Plus className="h-4 w-4" />
               Add another chart
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => openAskChart(charts.length, 'add')}
+            >
+              <WandSparkles className="h-4 w-4" />
+              Ask chart
             </Button>
             <Button
               type="button"

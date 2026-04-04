@@ -26,6 +26,8 @@ import {
   Settings2,
   Copy,
   Trash2,
+  Undo2,
+  Redo2,
 } from 'lucide-react';
 import { SVGRenderer } from 'echarts/renderers';
 import { LegacyGridContainLabel } from 'echarts/features';
@@ -70,6 +72,12 @@ type InteractiveChartProps = {
   spec: ChartSpec;
   onOpenPrompt?: () => void;
   onOpenCustomizer?: () => void;
+  onChangeChartType?: (chartType: string) => void;
+  onUndo?: () => void;
+  onRedo?: () => void;
+  onReset?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
   onDuplicate?: () => void;
   onRemove?: () => void;
   canRemove?: boolean;
@@ -79,24 +87,25 @@ export function InteractiveChart({
   spec,
   onOpenPrompt,
   onOpenCustomizer,
+  onChangeChartType,
+  onUndo,
+  onRedo,
+  onReset,
+  canUndo = false,
+  canRedo = false,
   onDuplicate,
   onRemove,
   canRemove = false,
 }: InteractiveChartProps) {
   const availableChartTypes = useMemo(() => getSelectableChartTypes(spec), [spec]);
-  const [chartType, setChartType] = useState<string>(spec.config.chartType ?? 'bar');
   const chartRef = useRef<any>(null);
-
+  const chartType = spec.config.chartType ?? 'bar';
   const option = useMemo(() => buildOption(spec, chartType), [spec, chartType]);
 
-  useEffect(() => {
-    setChartType(spec.config.chartType ?? 'bar');
-  }, [spec]);
-
   const handleReset = useCallback(() => {
-    setChartType(spec.config.chartType ?? 'bar');
+    onReset?.();
     chartRef.current?.getEchartsInstance()?.dispatchAction({ type: 'restore' });
-  }, [spec.config.chartType]);
+  }, [onReset]);
 
   const handleDownloadCsv = useCallback(() => {
     const data = spec.downloadData ?? spec.chartData;
@@ -151,7 +160,7 @@ export function InteractiveChart({
           <button
             key={t}
             type="button"
-            onClick={() => setChartType(t)}
+            onClick={() => onChangeChartType?.(t)}
             className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
               chartType === t
                 ? 'bg-blue-600 text-white'
@@ -161,6 +170,28 @@ export function InteractiveChart({
             {t.replace(/([A-Z])/g, ' $1').replace(/^./, (char) => char.toUpperCase())}
           </button>
         ))}
+        <button
+          type="button"
+          onClick={onUndo}
+          disabled={!canUndo}
+          className="rounded px-2.5 py-1 text-xs font-medium text-zinc-500 hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:text-zinc-200"
+        >
+          <span className="inline-flex items-center gap-1">
+            <Undo2 className="h-3.5 w-3.5" />
+            Revert
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={onRedo}
+          disabled={!canRedo}
+          className="rounded px-2.5 py-1 text-xs font-medium text-zinc-500 hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:text-zinc-200"
+        >
+          <span className="inline-flex items-center gap-1">
+            <Redo2 className="h-3.5 w-3.5" />
+            Redo
+          </span>
+        </button>
         <button
           type="button"
           onClick={handleReset}

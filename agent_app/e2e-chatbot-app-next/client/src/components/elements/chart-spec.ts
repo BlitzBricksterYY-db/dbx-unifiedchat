@@ -723,6 +723,8 @@ function buildCartesianOption(spec: ChartSpec, chartType: string): EChartsOption
     ? buildGroupedSeries(spec, chartType, xValues)
     : buildUngroupedSeries(spec, chartType, xValues);
   const hasSecondaryAxis = groupedSeries.some((series) => series.yAxisIndex === 1);
+  const primarySeries = spec.config.series.find((series) => (series.axis ?? 'primary') !== 'secondary');
+  const secondarySeries = spec.config.series.find((series) => series.axis === 'secondary');
   const primaryFormat = spec.config.series.find((series) => (series.axis ?? 'primary') !== 'secondary')?.format;
   const secondaryFormat = spec.config.series.find((series) => series.axis === 'secondary')?.format;
   const isPercentScale =
@@ -743,13 +745,28 @@ function buildCartesianOption(spec: ChartSpec, chartType: string): EChartsOption
     xAxis: {
       type: 'category',
       data: xValues,
+      name: chartType === 'dualAxis' ? prettifyLabel(xField) : undefined,
+      nameLocation: chartType === 'dualAxis' ? 'middle' : undefined,
+      nameGap: chartType === 'dualAxis' ? 44 : undefined,
+      nameTextStyle: chartType === 'dualAxis' ? axisNameTextStyle() : undefined,
       axisLabel: {
+        color: '#a1a1aa',
         rotate: spec.config.style?.xAxisLabelRotation ?? (xValues.length > 8 ? 30 : 0),
         interval: 0,
       },
+      axisLine: chartType === 'dualAxis' ? axisLineStyle() : undefined,
+      axisTick: chartType === 'dualAxis' ? axisTickStyle() : undefined,
       splitLine: { show: false },
     },
-    yAxis: buildYAxes(primaryFormat, secondaryFormat, isPercentScale, hasSecondaryAxis, spec.config.style?.showGridLines ?? true),
+    yAxis: buildYAxes(
+      primaryFormat,
+      secondaryFormat,
+      isPercentScale,
+      hasSecondaryAxis,
+      spec.config.style?.showGridLines ?? true,
+      chartType === 'dualAxis' ? primarySeries?.name ?? prettifyLabel(primarySeries?.field ?? '') : undefined,
+      chartType === 'dualAxis' ? secondarySeries?.name ?? prettifyLabel(secondarySeries?.field ?? '') : undefined,
+    ),
     dataZoom: spec.chartData.length > 15 ? [{ type: 'slider', bottom: 28 }] : undefined,
     toolbox: spec.config.toolbox ? { feature: { saveAsImage: {}, restore: {}, dataView: { readOnly: true } } } : undefined,
     series: groupedSeries as any,
@@ -817,12 +834,21 @@ function buildYAxes(
   isPercentScale: boolean,
   hasSecondaryAxis: boolean,
   showGridLines: boolean,
+  primaryName?: string,
+  secondaryName?: string,
 ) {
   const axes: EChartsOption['yAxis'] = [
     {
       type: 'value',
       max: isPercentScale ? 100 : undefined,
+      name: primaryName,
+      nameLocation: 'middle',
+      nameGap: 56,
+      nameRotate: 90,
+      nameTextStyle: primaryName ? axisNameTextStyle() : undefined,
       axisLabel: axisLabelFormatter(isPercentScale ? 'percent' : primaryFormat),
+      axisLine: primaryName ? axisLineStyle() : undefined,
+      axisTick: primaryName ? axisTickStyle() : undefined,
       splitLine: { show: showGridLines },
     },
   ];
@@ -830,7 +856,14 @@ function buildYAxes(
     axes.push({
       type: 'value',
       max: secondaryFormat === 'percent' ? 100 : undefined,
+      name: secondaryName,
+      nameLocation: 'middle',
+      nameGap: 56,
+      nameRotate: -90,
+      nameTextStyle: secondaryName ? axisNameTextStyle() : undefined,
       axisLabel: axisLabelFormatter(secondaryFormat),
+      axisLine: secondaryName ? axisLineStyle() : undefined,
+      axisTick: secondaryName ? axisTickStyle() : undefined,
       splitLine: { show: false },
     });
   }
@@ -872,9 +905,25 @@ function inferTooltipFormat(spec: ChartSpec, value: number) {
 }
 
 function axisLabelFormatter(format: ChartSpec['config']['series'][number]['format']) {
-  if (format === 'currency') return { formatter: (value: number) => fmtCurrencyAxis(value) };
-  if (format === 'percent') return { formatter: (value: number) => `${Number(value).toFixed(0)}%` };
-  return undefined;
+  if (format === 'currency') {
+    return { color: '#a1a1aa', formatter: (value: number) => fmtCurrencyAxis(value) };
+  }
+  if (format === 'percent') {
+    return { color: '#a1a1aa', formatter: (value: number) => `${Number(value).toFixed(0)}%` };
+  }
+  return { color: '#a1a1aa' };
+}
+
+function axisLineStyle() {
+  return { lineStyle: { color: '#71717a', width: 1 } };
+}
+
+function axisTickStyle() {
+  return { show: true, lineStyle: { color: '#71717a' } };
+}
+
+function axisNameTextStyle() {
+  return { color: '#d4d4d8', fontWeight: 500 };
 }
 
 export function formatValue(value: number, format?: ChartSpec['config']['series'][number]['format']) {
