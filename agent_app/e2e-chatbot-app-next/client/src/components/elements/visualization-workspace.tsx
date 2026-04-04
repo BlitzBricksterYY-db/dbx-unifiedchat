@@ -317,6 +317,21 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
     );
   };
 
+  const askAboutChartSelection = useCallback((chartIndex: number, prompt: string) => {
+    setAskChart((current) => ({
+      ...current,
+      open: true,
+      chartIndex,
+      mode: 'replace',
+      prompt,
+      isSubmitting: false,
+      error: '',
+    }));
+    requestAnimationFrame(() =>
+      askPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }),
+    );
+  }, []);
+
   const submitAskChart = async () => {
     if (!askChart.prompt.trim()) {
       setAskChart((current) => ({ ...current, error: 'Describe the chart you want.' }));
@@ -458,6 +473,7 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
                   spec={chart}
                   onOpenCustomizer={() => openBuilder(index, 'replace')}
                   onOpenPrompt={() => openAskChart(index, 'replace')}
+                  onAskAboutSelection={(prompt) => askAboutChartSelection(index, prompt)}
                   onChangeChartType={(nextType) => updateChartType(index, nextType)}
                   onUndo={() => undoChart(index)}
                   onRedo={() => redoChart(index)}

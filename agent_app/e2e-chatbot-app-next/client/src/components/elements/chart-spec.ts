@@ -930,6 +930,7 @@ function formatCartesianTooltip(spec: ChartSpec, rawParams: unknown) {
     const seriesLabel = match?.[2] ?? metricLabel;
     const format = spec.config.series.find((series) => series.name === metricLabel)?.format ?? inferTooltipFormat(spec, Number(item.value ?? item.data ?? 0));
     const value = tooltipNumber(item.value ?? item.data);
+    if (Math.abs(value) < 1e-9) continue;
     const existing = groups.get(metricLabel) ?? [];
     existing.push({
       label: seriesLabel,
@@ -953,7 +954,7 @@ function formatCartesianTooltip(spec: ChartSpec, rawParams: unknown) {
     }
   }
 
-  return lines.join('');
+  return lines.length > 1 ? lines.join('') : `<strong>${axisLabel}</strong>`;
 }
 
 function tooltipNumber(value: unknown) {
