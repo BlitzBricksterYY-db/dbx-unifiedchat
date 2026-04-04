@@ -18,12 +18,13 @@ router = APIRouter(prefix="/api")
 
 class RechartRequest(BaseModel):
     columns: List[str]
-    rows: List[Dict[str, Any]]
+    rows: List[Dict[str, Any]] = Field(default_factory=list)
     prompt: str = Field(..., min_length=1)
     title: str = ""
     description: str = ""
     row_grain_hint: str = ""
     mode: str = "replace"
+    data_cache_key: Optional[str] = None
 
 
 class RechartResponse(BaseModel):
@@ -56,10 +57,38 @@ async def rechart(request: RechartRequest) -> RechartResponse:
             mode=request.mode,
         )
 
+    columns = request.columns
+    rows = request.rows
+
+    if request.data_cache_key:
+        from agent_server.result_cache import get as cache_get
+
+        cached = cache_get(request.data_cache_key)
+        if cached is not None:
+            columns, rows = cached
+            logger.info(
+                "Rechart using cached data (%d rows) for key %.8s…",
+                len(rows),
+                request.data_cache_key,
+            )
+        else:
+            logger.info(
+                "Cache miss for key %.8s…, falling back to request rows (%d)",
+                request.data_cache_key,
+                len(rows),
+            )
+
+    if not rows:
+        return RechartResponse(
+            success=False,
+            error="No data rows provided and cache key not found.",
+            mode=request.mode,
+        )
+
     try:
         payload = chart_gen.generate_chart(
-            columns=request.columns,
-            data=request.rows,
+            columns=columns,
+            data=rows,
             original_query=request.prompt,
             result_context={
                 "label": request.title or None,

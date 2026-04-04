@@ -159,14 +159,14 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
   };
 
   const openAskChart = (chartIndex: number, mode: 'replace' | 'add') => {
-    setAskChart({
+    setAskChart((current) => ({
+      ...current,
       open: true,
       chartIndex,
       mode,
-      prompt: '',
       isSubmitting: false,
       error: '',
-    });
+    }));
     requestAnimationFrame(() =>
       askPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }),
     );
@@ -230,7 +230,7 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
           index === askChart.chartIndex ? nextChart : chart
         ));
       });
-      setAskChart((current) => ({ ...current, open: false, prompt: '', isSubmitting: false }));
+      setAskChart((current) => ({ ...current, open: false, isSubmitting: false }));
     } catch (error) {
       setAskChart((current) => ({
         ...current,

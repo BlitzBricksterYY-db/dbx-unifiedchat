@@ -22,6 +22,8 @@ const chartTypeValues = [
   'heatmap',
   'boxplot',
   'dualAxis',
+  'rankingSlope',
+  'deltaComparison',
 ] as const;
 
 const chartWorkspaceRequestSchema = z.object({
@@ -45,9 +47,11 @@ const chartWorkspaceRequestSchema = z.object({
     sourceMeta: z
       .object({
         previewLimited: z.boolean().optional(),
-        rowGrainHint: z.string().optional(),
+        rowGrainHint: z.string().optional().nullable(),
+        dataCacheKey: z.string().optional().nullable(),
       })
-      .optional(),
+      .optional()
+      .nullable(),
   }),
   existingChart: z.object({
     config: z.object({
@@ -80,6 +84,7 @@ const AGENT_RECHART_URL = (() => {
 chartWorkspaceRouter.post('/rechart', requireAuth, async (req: Request, res: Response) => {
   const parsed = chartWorkspaceRequestSchema.safeParse(req.body);
   if (!parsed.success) {
+    console.warn('[chart-workspaces] Invalid rechart request', parsed.error.flatten());
     return res.status(400).json({
       error: 'Invalid chart workspace request',
       issues: parsed.error.flatten(),
@@ -98,6 +103,7 @@ chartWorkspaceRouter.post('/rechart', requireAuth, async (req: Request, res: Res
         title: existingChart.config.title ?? workspace.title,
         description: existingChart.config.description ?? '',
         rowGrainHint: workspace.sourceMeta?.rowGrainHint ?? '',
+        dataCacheKey: workspace.sourceMeta?.dataCacheKey ?? '',
         mode,
       });
 
@@ -169,6 +175,7 @@ async function rechartViaPython({
   title,
   description,
   rowGrainHint,
+  dataCacheKey,
   mode,
 }: {
   url: string;
@@ -178,20 +185,28 @@ async function rechartViaPython({
   title: string;
   description: string;
   rowGrainHint: string;
+  dataCacheKey: string;
   mode: string;
 }): Promise<Record<string, unknown> | null> {
+  const body: Record<string, unknown> = {
+    columns,
+    prompt,
+    title,
+    description,
+    row_grain_hint: rowGrainHint,
+    mode,
+  };
+
+  if (dataCacheKey) {
+    body.data_cache_key = dataCacheKey;
+  } else {
+    body.rows = rows;
+  }
+
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      columns,
-      rows,
-      prompt,
-      title,
-      description,
-      row_grain_hint: rowGrainHint,
-      mode,
-    }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(30_000),
   });
 

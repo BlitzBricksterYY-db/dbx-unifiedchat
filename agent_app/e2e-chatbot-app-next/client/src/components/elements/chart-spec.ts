@@ -160,6 +160,7 @@ export const chartWorkspaceSchema = z.object({
       rowGrainHint: z.string().optional().nullable(),
       previewLimited: z.boolean().optional(),
       totalRows: z.number().optional(),
+      dataCacheKey: z.string().optional().nullable(),
     })
     .optional()
     .nullable(),

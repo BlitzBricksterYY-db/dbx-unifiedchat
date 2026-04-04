@@ -201,16 +201,21 @@ def _build_visualization_workspace_payload(
     entry: Dict[str, Any],
     chart_payload: Dict[str, Any],
     preview_rows: List[Dict[str, Any]],
+    full_rows: List[Dict[str, Any]],
     source_row_count: int,
     total_entries: int,
 ) -> Dict[str, Any]:
     from .summarize_agent import ResultSummarizeAgent
+    from agent_server.result_cache import put as cache_put
 
     idx = entry["index"]
     label = entry.get("label") or f"Query {idx + 1}"
     result_item = entry["result"]
     columns = result_item.get("columns", [])
     workspace_id = f"query-{idx + 1}"
+
+    data_cache_key = cache_put(columns, full_rows)
+
     table_payload = {
         "columns": columns,
         "rows": preview_rows,
@@ -254,6 +259,7 @@ def _build_visualization_workspace_payload(
             "rowGrainHint": entry.get("row_grain_hint"),
             "previewLimited": source_row_count > len(preview_rows),
             "totalRows": source_row_count,
+            "dataCacheKey": data_cache_key,
         },
     }
 
@@ -692,6 +698,7 @@ def summarize_node(state: AgentState) -> dict:
                 entry=entry,
                 chart_payload=payload,
                 preview_rows=preview_rows,
+                full_rows=data,
                 source_row_count=source_row_count,
                 total_entries=len(artifact_entries),
             )
