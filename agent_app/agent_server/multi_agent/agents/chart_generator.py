@@ -325,18 +325,31 @@ class ChartGenerator:
 
         label = result_context.get("label") or ""
         sql_explanation = result_context.get("sql_explanation") or ""
+        sql_query = result_context.get("sql_query") or ""
+        sql_summary = self._summarize_sql(sql_query)
         row_grain_hint = result_context.get("row_grain_hint") or ""
+        context_lines = [
+            f"User query: {original_query}",
+            f"Result label: {label}",
+        ]
+        if sql_summary:
+            context_lines.append(f"SQL summary: {sql_summary}")
+        if sql_explanation:
+            context_lines.append(f"Result explanation: {sql_explanation}")
+        if row_grain_hint:
+            context_lines.append(f"Row grain hint: {row_grain_hint}")
+        context_lines.extend(
+            [
+                f"Columns: {columns}",
+                f"Total rows: {len(data)}",
+                f"Sample data ({len(sample)} rows):",
+                sample_json,
+            ]
+        )
 
         return f"""You are a data-visualization expert who creates visually diverse, insightful charts. Given a query result, choose the BEST chart type for the data shape — not the most common one.
 
-User query: {original_query}
-Result label: {label}
-Result explanation: {sql_explanation}
-Row grain hint: {row_grain_hint}
-Columns: {columns}
-Total rows: {len(data)}
-Sample data ({len(sample)} rows):
-{sample_json}
+{chr(10).join(context_lines)}
 
 You may ONLY choose options from this capability model:
 - chart types: {", ".join(SUPPORTED_CHART_TYPES)}
@@ -419,6 +432,68 @@ Rules:
 - Do NOT invent fields or chart options outside the capability model
 - businessInsight must describe what the chart shows in business terms, not how the chart was built
 """
+
+    def _summarize_sql(self, sql_query: Any) -> str:
+        sql = str(sql_query or "").strip()
+        if not sql or sql.startswith("--"):
+            return ""
+
+        normalized = re.sub(r"\s+", " ", sql).strip().rstrip(";")
+        lowered = normalized.lower()
+
+        def _clause(name: str) -> str:
+            match = re.search(
+                rf"\b{name}\b\s+(.*?)(?=\bfrom\b|\bwhere\b|\bgroup by\b|\bhaving\b|\border by\b|\blimit\b|$)",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+            return match.group(1).strip() if match else ""
+
+        def _compact(text: str, limit: int = 72) -> str:
+            text = re.sub(r"\s+", " ", text).strip()
+            if len(text) <= limit:
+                return text
+            return text[: limit - 3].rstrip() + "..."
+
+        bits: List[str] = []
+        select_clause = _clause("select")
+        if "distinct" in lowered:
+            bits.append("uses DISTINCT")
+
+        if select_clause:
+            aggregates = re.findall(
+                r"\b(count|sum|avg|min|max|median|percentile(?:_approx)?|stddev(?:_pop|_samp)?)\s*\((.*?)\)",
+                select_clause,
+                flags=re.IGNORECASE,
+            )
+            if aggregates:
+                metric_bits = [f"{fn.lower()}({_compact(arg, 28)})" for fn, arg in aggregates[:3]]
+                suffix = " +" if len(aggregates) > 3 else ""
+                bits.append(f"aggregates {', '.join(metric_bits)}{suffix}")
+
+        join_count = len(re.findall(r"\bjoin\b", lowered))
+        if join_count:
+            bits.append(f"{join_count} join{'s' if join_count != 1 else ''}")
+
+        if re.search(r"\bover\s*\(", lowered):
+            bits.append("uses window functions")
+
+        if re.search(r"\bwhere\b", lowered):
+            bits.append("has filters")
+
+        group_clause = _clause("group by")
+        if group_clause:
+            bits.append(f"grouped by {_compact(group_clause)}")
+
+        order_clause = _clause("order by")
+        if order_clause:
+            bits.append(f"ordered by {_compact(order_clause)}")
+
+        limit_match = re.search(r"\blimit\b\s+(\d+)", lowered)
+        if limit_match:
+            bits.append(f"limit {limit_match.group(1)}")
+
+        return "; ".join(bits[:5])[:260]
 
     # ------------------------------------------------------------------
     # Stage 2: Python validation + assembly
@@ -1571,9 +1646,7 @@ Rules:
             confidence -= 0.05
         if any("Downgraded" in note or "Filled missing" in note for note in notes):
             confidence -= 0.12
-        description_bits = [result_context.get("sql_explanation") or ""]
-        if result_context.get("row_grain_hint"):
-            description_bits.append(result_context["row_grain_hint"])
+        description_bits = [result_context.get("row_grain_hint") or ""]
         return {
             "source": "auto",
             "rationale": " • ".join(bit for bit in rationale_bits if bit) or "Automatically generated chart.",

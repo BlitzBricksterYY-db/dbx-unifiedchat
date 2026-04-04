@@ -136,14 +136,12 @@ function buildHeaderNote(
 ): string | null {
   const source = readMetaString(spec, 'source');
   const rationale = readMetaString(spec, 'rationale');
-  const description = readMetaString(spec, 'description');
   const previewLimited = readMetaBoolean(spec, 'previewLimited');
 
   const rawNotes = [
     ...(source === 'manual' ? [] : splitNoteParts(rationale)),
     ...(previewLimited ? ['Preview-limited view; full results available in CSV.'] : []),
     ...(fallbackApplied && !hasNormalizationNotes ? ['Best-effort chart fallback applied.'] : []),
-    ...(source !== 'manual' ? splitNoteParts(description) : []),
   ];
 
   const detailedRowGrainNotePresent = hasDetailedRowGrainNote(rawNotes);
@@ -256,6 +254,7 @@ export function InteractiveChart({
     () => (headerNoteFull ? truncateText(headerNoteFull.replace(/\s+/g, ' '), 140) : null),
     [headerNoteFull],
   );
+  const source = useMemo(() => readMetaString(spec, 'source'), [spec]);
   const businessInsightFull = useMemo(
     () => readMetaString(spec, 'businessInsight'),
     [spec],
@@ -272,6 +271,10 @@ export function InteractiveChart({
     const sourceRows = spec.downloadData ?? spec.chartData;
     return activeFilter ? sourceRows.filter((row) => matchesSelection(row, spec, activeFilter)) : sourceRows;
   }, [activeFilter, spec]);
+  const visibleDescription = useMemo(
+    () => (businessInsightPreview ? businessInsightPreview : source === 'manual' ? spec.config.description : undefined),
+    [businessInsightPreview, source, spec.config.description],
+  );
   const displaySpec = useMemo(() => ({
     ...spec,
     chartData: filteredChartData,
@@ -279,13 +282,13 @@ export function InteractiveChart({
     totalRows: activeFilter ? filteredDownloadData.length : spec.totalRows,
     config: {
       ...spec.config,
-      description: businessInsightPreview ?? spec.config.description ?? undefined,
+      description: visibleDescription,
       style: {
         ...spec.config.style,
-        showDescription: Boolean(businessInsightPreview ?? spec.config.description),
+        showDescription: Boolean(visibleDescription),
       },
     },
-  }), [activeFilter, businessInsightPreview, filteredChartData, filteredDownloadData, spec]);
+  }), [activeFilter, filteredChartData, filteredDownloadData, spec, visibleDescription]);
   const option = useMemo(() => buildOption(displaySpec, chartType), [chartType, displaySpec]);
   const fallbackPreview = useMemo(
     () => truncateText(normalizationNotes.join(' • '), 180),

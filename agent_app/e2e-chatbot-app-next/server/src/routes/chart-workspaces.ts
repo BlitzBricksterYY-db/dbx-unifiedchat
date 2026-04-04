@@ -33,6 +33,7 @@ const chartWorkspaceRequestSchema = z.object({
     table: z.object({
       columns: z.array(z.string()),
       rows: z.array(z.record(z.string(), z.unknown())),
+      sql: z.string().optional(),
     }),
     fields: z
       .array(
@@ -102,6 +103,7 @@ chartWorkspaceRouter.post('/rechart', requireAuth, async (req: Request, res: Res
         prompt: request,
         title: existingChart.config.title ?? workspace.title,
         description: existingChart.config.description ?? '',
+        sqlQuery: workspace.table.sql ?? '',
         rowGrainHint: workspace.sourceMeta?.rowGrainHint ?? '',
         dataCacheKey: workspace.sourceMeta?.dataCacheKey ?? '',
         mode,
@@ -174,6 +176,7 @@ async function rechartViaPython({
   prompt,
   title,
   description,
+  sqlQuery,
   rowGrainHint,
   dataCacheKey,
   mode,
@@ -184,6 +187,7 @@ async function rechartViaPython({
   prompt: string;
   title: string;
   description: string;
+  sqlQuery: string;
   rowGrainHint: string;
   dataCacheKey: string;
   mode: string;
@@ -194,6 +198,7 @@ async function rechartViaPython({
     prompt,
     title,
     description,
+    sql_query: sqlQuery,
     row_grain_hint: rowGrainHint,
     mode,
   };

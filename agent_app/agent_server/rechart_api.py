@@ -22,6 +22,7 @@ class RechartRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     title: str = ""
     description: str = ""
+    sql_query: str = ""
     row_grain_hint: str = ""
     mode: str = "replace"
     data_cache_key: Optional[str] = None
@@ -92,6 +93,7 @@ async def rechart(request: RechartRequest) -> RechartResponse:
             original_query=request.prompt,
             result_context={
                 "label": request.title or None,
+                "sql_query": request.sql_query or None,
                 "sql_explanation": request.description or None,
                 "row_grain_hint": request.row_grain_hint or None,
             },

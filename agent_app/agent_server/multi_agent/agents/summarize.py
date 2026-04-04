@@ -646,6 +646,7 @@ def summarize_node(state: AgentState) -> dict:
                         original_query,
                         {
                             "label": entry.get("label"),
+                            "sql_query": entry.get("sql"),
                             "sql_explanation": entry.get("sql_explanation"),
                             "row_grain_hint": entry.get("row_grain_hint"),
                         },
