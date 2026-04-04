@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BarChart3,
   ChevronDown,
@@ -17,6 +17,7 @@ import { Sheet, SheetContent, SheetTitle } from '@/components/ui/sheet';
 
 import { PaginatedTable } from './paginated-table';
 import { InteractiveChart } from './interactive-chart';
+import { useMessageId } from './message-context';
 import {
   createBuilderStateFromChart,
   getWorkspaceFields,
@@ -40,10 +41,29 @@ type AskChartState = {
   error: string;
 };
 
+function loadSavedCharts(key: string | null, fallback: ChartSpec[]): ChartSpec[] {
+  if (!key) return fallback;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch { /* ignore corrupt data */ }
+  return fallback;
+}
+
 export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProps) {
+  const messageId = useMessageId();
+  const storageKey = messageId
+    ? `viz-ws-${messageId}-${workspace.workspaceId}`
+    : null;
+
   const [isExpanded, setIsExpanded] = useState(false);
   const [isTableVisible, setIsTableVisible] = useState(false);
-  const [charts, setCharts] = useState<ChartSpec[]>(workspace.charts);
+  const [charts, setCharts] = useState<ChartSpec[]>(
+    () => loadSavedCharts(storageKey, workspace.charts),
+  );
   const [builderOpen, setBuilderOpen] = useState(false);
   const [builderChartIndex, setBuilderChartIndex] = useState(0);
   const [builderState, setBuilderState] = useState<ChartBuilderState>(
@@ -57,6 +77,20 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
     isSubmitting: false,
     error: '',
   });
+  const askPanelRef = useRef<HTMLDivElement>(null);
+
+  const modified = useRef(false);
+  const persistCharts = useCallback(
+    (updater: ChartSpec[] | ((prev: ChartSpec[]) => ChartSpec[])) => {
+      modified.current = true;
+      setCharts(updater);
+    },
+    [],
+  );
+  useEffect(() => {
+    if (!modified.current || !storageKey) return;
+    try { localStorage.setItem(storageKey, JSON.stringify(charts)); } catch {}
+  }, [charts, storageKey]);
 
   const hydratedWorkspace = useMemo(
     () => ({
@@ -96,7 +130,7 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
       'manual',
     );
 
-    setCharts((existing) => {
+    persistCharts((existing) => {
       if (builderState.mode === 'add') return [...existing, nextChart];
       return existing.map((chart, index) => (
         index === builderChartIndex ? nextChart : chart
@@ -117,11 +151,11 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
         rationale: 'Duplicated from an existing chart in the visualization workspace.',
       },
     };
-    setCharts((existing) => [...existing, duplicate]);
+    persistCharts((existing) => [...existing, duplicate]);
   };
 
   const removeChart = (chartIndex: number) => {
-    setCharts((existing) => existing.filter((_, index) => index !== chartIndex));
+    persistCharts((existing) => existing.filter((_, index) => index !== chartIndex));
   };
 
   const openAskChart = (chartIndex: number, mode: 'replace' | 'add') => {
@@ -133,6 +167,9 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
       isSubmitting: false,
       error: '',
     });
+    requestAnimationFrame(() =>
+      askPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }),
+    );
   };
 
   const submitAskChart = async () => {
@@ -180,7 +217,7 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
         'natural-language',
       );
 
-      setCharts((existing) => {
+      persistCharts((existing) => {
         if (askChart.mode === 'add') return [...existing, nextChart];
         return existing.map((chart, index) => (
           index === askChart.chartIndex ? nextChart : chart
@@ -201,7 +238,7 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
       <button
         type="button"
         onClick={() => setIsExpanded((current) => !current)}
-        className="flex w-full items-center gap-3 px-4 py-3 text-left"
+        className="flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900"
       >
         <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-50 text-blue-600 dark:bg-blue-950 dark:text-blue-300">
           <BarChart3 className="h-5 w-5" />
@@ -235,7 +272,7 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
             size="sm"
             onClick={(event) => {
               event.stopPropagation();
-              openAskChart(0, 'add');
+              openAskChart(charts.length, 'add');
               setIsExpanded(true);
             }}
           >
@@ -248,75 +285,35 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
 
       {isExpanded && (
         <div className="border-t border-zinc-200 px-4 py-4 dark:border-zinc-800">
-          {workspace.description && (
-            <p className="mb-4 text-sm text-zinc-600 dark:text-zinc-300">
-              {workspace.description}
-            </p>
-          )}
-
-          {askChart.open && (
-            <div className="mb-4 rounded-lg border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-900">
-              <div className="mb-2 flex items-center justify-between">
-                <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                  Natural-language chart request
-                </div>
-                <select
-                  value={askChart.mode}
-                  onChange={(event) =>
-                    setAskChart((current) => ({
-                      ...current,
-                      mode: event.target.value as 'replace' | 'add',
-                    }))
-                  }
-                  className="rounded-md border border-zinc-200 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-950"
-                >
-                  <option value="replace">Replace chart</option>
-                  <option value="add">Add chart</option>
-                </select>
-              </div>
-              <Textarea
-                value={askChart.prompt}
-                onChange={(event) =>
-                  setAskChart((current) => ({ ...current, prompt: event.target.value, error: '' }))
-                }
-                placeholder="Example: Make this a monthly line chart with service_month on X, paid_amount on Y, and color by benefit_type."
-              />
-              {askChart.error && (
-                <p className="mt-2 text-xs text-red-600 dark:text-red-400">{askChart.error}</p>
-              )}
-              <div className="mt-3 flex items-center gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={submitAskChart}
-                  disabled={askChart.isSubmitting}
-                >
-                  {askChart.isSubmitting ? 'Creating chart...' : 'Generate chart'}
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setAskChart((current) => ({ ...current, open: false, error: '' }))}
-                >
-                  Cancel
-                </Button>
-              </div>
-            </div>
-          )}
-
           <div className="space-y-4">
             {charts.map((chart, index) => (
-              <InteractiveChart
-                key={chart.meta?.chartId ?? `${workspace.workspaceId}-${index}`}
-                spec={chart}
-                onOpenCustomizer={() => openBuilder(index, 'replace')}
-                onOpenPrompt={() => openAskChart(index, 'replace')}
-                onDuplicate={() => duplicateChart(index)}
-                onRemove={() => removeChart(index)}
-                canRemove={charts.length > 1}
-              />
+              <div key={chart.meta?.chartId ?? `${workspace.workspaceId}-${index}`}>
+                {askChart.open && askChart.chartIndex === index && (
+                  <AskChartPanel
+                    ref={askPanelRef}
+                    askChart={askChart}
+                    setAskChart={setAskChart}
+                    onSubmit={submitAskChart}
+                  />
+                )}
+                <InteractiveChart
+                  spec={chart}
+                  onOpenCustomizer={() => openBuilder(index, 'replace')}
+                  onOpenPrompt={() => openAskChart(index, 'replace')}
+                  onDuplicate={() => duplicateChart(index)}
+                  onRemove={() => removeChart(index)}
+                  canRemove={charts.length > 1}
+                />
+              </div>
             ))}
+            {askChart.open && askChart.chartIndex >= charts.length && (
+              <AskChartPanel
+                ref={askPanelRef}
+                askChart={askChart}
+                setAskChart={setAskChart}
+                onSubmit={submitAskChart}
+              />
+            )}
           </div>
 
           <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -362,6 +359,71 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
 }
 
 export default VisualizationWorkspace;
+
+import { forwardRef } from 'react';
+
+const AskChartPanel = forwardRef<
+  HTMLDivElement,
+  {
+    askChart: AskChartState;
+    setAskChart: React.Dispatch<React.SetStateAction<AskChartState>>;
+    onSubmit: () => void;
+  }
+>(function AskChartPanel({ askChart, setAskChart, onSubmit }, ref) {
+  return (
+    <div
+      ref={ref}
+      className="mb-4 rounded-lg border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-900"
+    >
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+          Natural-language chart request
+        </div>
+        <select
+          value={askChart.mode}
+          onChange={(event) =>
+            setAskChart((current) => ({
+              ...current,
+              mode: event.target.value as 'replace' | 'add',
+            }))
+          }
+          className="rounded-md border border-zinc-200 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-950"
+        >
+          <option value="replace">Replace chart</option>
+          <option value="add">Add chart</option>
+        </select>
+      </div>
+      <Textarea
+        value={askChart.prompt}
+        onChange={(event) =>
+          setAskChart((current) => ({ ...current, prompt: event.target.value, error: '' }))
+        }
+        placeholder="Example: Make this a monthly line chart with service_month on X, paid_amount on Y, and color by benefit_type."
+      />
+      {askChart.error && (
+        <p className="mt-2 text-xs text-red-600 dark:text-red-400">{askChart.error}</p>
+      )}
+      <div className="mt-3 flex items-center gap-2">
+        <Button
+          type="button"
+          size="sm"
+          onClick={onSubmit}
+          disabled={askChart.isSubmitting}
+        >
+          {askChart.isSubmitting ? 'Creating chart...' : 'Generate chart'}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => setAskChart((current) => ({ ...current, open: false, error: '' }))}
+        >
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+});
 
 function ChartBuilderSheet({
   open,

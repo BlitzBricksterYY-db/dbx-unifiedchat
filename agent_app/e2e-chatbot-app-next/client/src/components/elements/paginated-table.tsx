@@ -202,13 +202,13 @@ export function PaginatedTable(
   const totalPages = Math.max(1, Math.ceil(totalRows / PAGE_SIZE));
 
   const [page, setPage] = useState(0);
-  const [isExpanded, setIsExpanded] = useState(parsed.mode !== 'data');
+  const [isExpanded, setIsExpanded] = useState(true);
   const [isSqlVisible, setIsSqlVisible] = useState(false);
   const [sqlCopied, setSqlCopied] = useState(false);
 
   useEffect(() => {
     setPage(0);
-    setIsExpanded(parsed.mode !== 'data');
+    setIsExpanded(true);
     setIsSqlVisible(false);
     setSqlCopied(false);
   }, [parsed.mode, parsed.filename, parsed.title, totalRows]);
@@ -282,6 +282,13 @@ export function PaginatedTable(
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={handleToggleExpanded}
+            className="rounded-md border border-transparent px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-zinc-200 hover:bg-white dark:text-zinc-300 dark:hover:border-zinc-700 dark:hover:bg-zinc-900"
+          >
+            {isExpanded ? 'Collapse' : 'Expand'}
+          </button>
           {parsed.sql ? (
             <button
               type="button"
@@ -298,13 +305,6 @@ export function PaginatedTable(
             className="rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             Download CSV
-          </button>
-          <button
-            type="button"
-            onClick={handleToggleExpanded}
-            className="rounded-md border border-transparent px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-zinc-200 hover:bg-white dark:text-zinc-300 dark:hover:border-zinc-700 dark:hover:bg-zinc-900"
-          >
-            {isExpanded ? 'Collapse' : 'Expand'}
           </button>
         </div>
       </div>

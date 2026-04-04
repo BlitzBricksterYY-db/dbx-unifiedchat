@@ -237,11 +237,9 @@ def _build_visualization_workspace_payload(
     )
     chart_payload.setdefault("config", {})
     chart_payload["config"]["title"] = label
-    chart_payload["config"]["description"] = (
-        entry.get("sql_explanation")
-        or entry.get("row_grain_hint")
-        or chart_payload["config"].get("description")
-    )
+    chart_payload["config"]["description"] = None
+    chart_payload["config"].setdefault("style", {})
+    chart_payload["config"]["style"]["showDescription"] = False
     return {
         "workspaceId": workspace_id,
         "title": label,
@@ -708,6 +706,7 @@ def summarize_node(state: AgentState) -> dict:
         chart_pool.shutdown(wait=False)
 
     # --- 3. SQL download / explanation / plan (collapsible, streamed as delta) ---
+    from .summarize_agent import ResultSummarizeAgent
     plan = state.get("plan")
 
     has_accordion = False
@@ -727,7 +726,6 @@ def summarize_node(state: AgentState) -> dict:
 
     # --- 3b. SQL Explanation (collapsible, streamed as delta) ---
     if any(entry.get("sql_explanation") or entry.get("skip_reason") for entry in artifact_entries):
-        from .summarize_agent import ResultSummarizeAgent
         explanation_block = ResultSummarizeAgent.format_sql_explanation(
             artifact_entries=artifact_entries,
         )
@@ -736,7 +734,6 @@ def summarize_node(state: AgentState) -> dict:
 
     # --- 3c. Plan Executed (collapsible, streamed as delta) ---
     if plan:
-        from .summarize_agent import ResultSummarizeAgent
         plan_block = ResultSummarizeAgent.format_plan_executed(plan)
         summary += plan_block
         writer({"type": "text_delta", "content": plan_block})

@@ -473,7 +473,7 @@ test.describe('Interactive Charts', () => {
           },
         },
       ],
-    })}\n\`\`\`\n`;
+    })}\n\`\`\`\n\n<div class="accordion-group">\n\n<details name="sql-accordion"><summary>SQL Explanation</summary>\n\n<div class="accordion-content">\n\nExcellent! I successfully retrieved SQL fragments from all three Genie spaces in parallel.\n\n</div>\n</details>\n\n</div>\n`;
 
     await page.route('**/api/chat*', async (route) => {
       if (route.request().method() !== 'POST') {
@@ -551,6 +551,7 @@ test.describe('Interactive Charts', () => {
         body: JSON.stringify({
           mode: 'replace',
           overrides: {
+            title: 'Paid amount by benefit type',
             chartType: 'bar',
             xAxisField: 'benefit_type',
             yAxisField: 'paid_amount',
@@ -575,9 +576,8 @@ test.describe('Interactive Charts', () => {
     await page.getByPlaceholder(/Make this a monthly line chart/i).fill('Make this a bar chart by benefit_type');
     await page.getByRole('button', { name: 'Generate chart' }).click();
 
-    await expect(
-      page.locator('p').filter({ hasText: /Bar chart by benefit type/i }).first(),
-    ).toBeVisible();
+    await expect(page.getByText('Paid amount by benefit type').first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Show details' })).toBeVisible();
   });
 });
 

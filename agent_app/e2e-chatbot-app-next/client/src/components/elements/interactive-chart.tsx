@@ -117,19 +117,6 @@ export function InteractiveChart({
           <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
             {spec.config.title || 'Chart'}
           </div>
-          {spec.config.description && (
-            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-              {spec.config.description}
-            </p>
-          )}
-          {(spec.meta?.rationale || spec.meta?.confidence != null) && (
-            <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
-              {spec.meta?.rationale}
-              {spec.meta?.confidence != null
-                ? ` ${spec.meta?.rationale ? '•' : ''} Confidence ${Math.round(spec.meta.confidence * 100)}%`
-                : ''}
-            </p>
-          )}
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {onOpenPrompt && (

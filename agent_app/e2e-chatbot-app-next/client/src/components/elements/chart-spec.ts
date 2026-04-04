@@ -903,9 +903,14 @@ function resolvePalette(spec: ChartSpec): string[] | undefined {
 
 function buildTitleConfig(spec: ChartSpec) {
   if (spec.config.style?.showTitle === false) return { show: false };
+  const text = spec.config.title?.trim();
+  const subtext = spec.config.style?.showDescription === false
+    ? undefined
+    : spec.config.description?.trim() || undefined;
+  if (!text && !subtext) return { show: false };
   return {
-    text: spec.config.title,
-    subtext: spec.config.style?.showDescription === false ? undefined : spec.config.description ?? '',
+    text,
+    subtext,
     left: 'center',
     textStyle: { fontSize: 14 },
     subtextStyle: { fontSize: 11, color: '#6b7280' },
@@ -913,7 +918,12 @@ function buildTitleConfig(spec: ChartSpec) {
 }
 
 function titleTop(spec: ChartSpec) {
-  return spec.config.style?.showTitle === false ? '8%' : '16%';
+  if (spec.config.style?.showTitle === false) return '8%';
+  const hasText = Boolean(spec.config.title?.trim());
+  const hasSubtext = spec.config.style?.showDescription === false
+    ? false
+    : Boolean(spec.config.description?.trim());
+  return hasText || hasSubtext ? '16%' : '8%';
 }
 
 function uniqueStrings(values: string[]) {

@@ -356,7 +356,6 @@ def test_build_visualization_workspace_payload_groups_table_and_chart():
     assert workspace["charts"][0]["meta"]["sourceTableId"] == "query-1"
     assert workspace["sourceMeta"]["sqlExplanation"] == "Aggregated paid amount by month."
 
-
 def test_chart_generator_frequency_rewrites_to_count_series():
     llm = StubLlm(
         """
