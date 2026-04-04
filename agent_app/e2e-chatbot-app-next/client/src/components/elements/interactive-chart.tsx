@@ -68,6 +68,50 @@ function toCsv(data: Record<string, unknown>[]): string {
   return rows.join('\n');
 }
 
+function truncateText(value: string, maxLength = 120): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function readMetaString(spec: ChartSpec, key: string): string | null {
+  const value = spec.meta && typeof spec.meta === 'object'
+    ? (spec.meta as Record<string, unknown>)[key]
+    : undefined;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function readMetaBoolean(spec: ChartSpec, key: string): boolean {
+  const value = spec.meta && typeof spec.meta === 'object'
+    ? (spec.meta as Record<string, unknown>)[key]
+    : undefined;
+  return value === true;
+}
+
+function readMetaStringArray(spec: ChartSpec, key: string): string[] {
+  const value = spec.meta && typeof spec.meta === 'object'
+    ? (spec.meta as Record<string, unknown>)[key]
+    : undefined;
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+}
+
+function buildHeaderNote(spec: ChartSpec, fallbackApplied: boolean): string | null {
+  const source = readMetaString(spec, 'source');
+  const rationale = readMetaString(spec, 'rationale');
+  const description = readMetaString(spec, 'description');
+  const previewLimited = readMetaBoolean(spec, 'previewLimited');
+
+  const notes = [
+    source === 'manual' ? null : rationale,
+    previewLimited ? 'Preview-limited view; full results available in CSV.' : null,
+    fallbackApplied ? 'Best-effort chart fallback applied.' : null,
+    source !== 'manual' && description ? description : null,
+  ].filter((note): note is string => Boolean(note));
+
+  if (notes.length === 0) return null;
+  return notes.join(' ');
+}
+
 type InteractiveChartProps = {
   spec: ChartSpec;
   onOpenPrompt?: () => void;
@@ -100,7 +144,46 @@ export function InteractiveChart({
   const availableChartTypes = useMemo(() => getSelectableChartTypes(spec), [spec]);
   const chartRef = useRef<any>(null);
   const chartType = spec.config.chartType ?? 'bar';
-  const option = useMemo(() => buildOption(spec, chartType), [spec, chartType]);
+  const normalizationNotes = useMemo(
+    () => readMetaStringArray(spec, 'normalizationNotes'),
+    [spec],
+  );
+  const fallbackApplied = useMemo(
+    () => readMetaBoolean(spec, 'fallbackApplied'),
+    [spec],
+  );
+  const headerNoteFull = useMemo(
+    () => buildHeaderNote(spec, fallbackApplied),
+    [fallbackApplied, spec],
+  );
+  const headerNotePreview = useMemo(
+    () => (headerNoteFull ? truncateText(headerNoteFull.replace(/\s+/g, ' '), 140) : null),
+    [headerNoteFull],
+  );
+  const businessInsightFull = useMemo(
+    () => readMetaString(spec, 'businessInsight'),
+    [spec],
+  );
+  const businessInsightPreview = useMemo(
+    () => (businessInsightFull ? truncateText(businessInsightFull.replace(/\s+/g, ' '), 140) : null),
+    [businessInsightFull],
+  );
+  const displaySpec = useMemo(() => ({
+    ...spec,
+    config: {
+      ...spec.config,
+      description: businessInsightPreview ?? spec.config.description ?? undefined,
+      style: {
+        ...spec.config.style,
+        showDescription: Boolean(businessInsightPreview ?? spec.config.description),
+      },
+    },
+  }), [businessInsightPreview, spec]);
+  const option = useMemo(() => buildOption(displaySpec, chartType), [chartType, displaySpec]);
+  const fallbackPreview = useMemo(
+    () => truncateText(normalizationNotes.join(' • '), 180),
+    [normalizationNotes],
+  );
 
   const handleReset = useCallback(() => {
     onReset?.();
@@ -126,6 +209,14 @@ export function InteractiveChart({
           <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
             {spec.config.title || 'Chart'}
           </div>
+          {headerNotePreview && (
+            <p
+              className="mt-1 truncate text-xs text-zinc-500 dark:text-zinc-400"
+              title={headerNoteFull ?? undefined}
+            >
+              {headerNotePreview}
+            </p>
+          )}
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {onOpenPrompt && (
@@ -208,14 +299,31 @@ export function InteractiveChart({
         </button>
       </div>
 
-      <ReactEChartsCore
-        ref={chartRef}
-        echarts={echarts}
-        option={option}
-        style={{ height: 400, width: '100%' }}
-        opts={{ renderer: 'svg' }}
-        notMerge
-      />
+      {fallbackApplied && normalizationNotes.length > 0 && (
+        <div
+          className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200"
+          title={normalizationNotes.join('\n')}
+        >
+          Best-effort chart fallback applied: {fallbackPreview}
+        </div>
+      )}
+
+      <div className="relative">
+        {businessInsightFull && (
+          <div
+            className="absolute left-1/2 top-10 z-10 h-5 w-[72%] -translate-x-1/2"
+            title={businessInsightFull}
+          />
+        )}
+        <ReactEChartsCore
+          ref={chartRef}
+          echarts={echarts}
+          option={option}
+          style={{ height: 400, width: '100%' }}
+          opts={{ renderer: 'svg' }}
+          notMerge
+        />
+      </div>
 
       {spec.aggregated && spec.aggregationNote && (
         <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">

@@ -727,10 +727,11 @@ function buildCartesianOption(spec: ChartSpec, chartType: string): EChartsOption
   const secondarySeries = spec.config.series.find((series) => series.axis === 'secondary');
   const primaryFormat = spec.config.series.find((series) => (series.axis ?? 'primary') !== 'secondary')?.format;
   const secondaryFormat = spec.config.series.find((series) => series.axis === 'secondary')?.format;
-  const isPercentScale =
+  const primaryIsPercent =
     spec.config.layout === 'normalized' ||
-    spec.config.series.some((series) => series.format === 'percent') ||
-    spec.config.chartType === 'normalizedStackedBar';
+    spec.config.chartType === 'normalizedStackedBar' ||
+    primaryFormat === 'percent';
+  const secondaryIsPercent = secondaryFormat === 'percent';
 
   return {
     color: resolvePalette(spec),
@@ -738,7 +739,7 @@ function buildCartesianOption(spec: ChartSpec, chartType: string): EChartsOption
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: chartType.includes('line') || chartType.includes('area') ? 'line' : 'shadow' },
-      valueFormatter: (value) => formatValue(Number(value), inferTooltipFormat(spec, Number(value))),
+      formatter: (params) => formatCartesianTooltip(spec, params),
     },
     legend: { bottom: 0, type: 'scroll', show: spec.config.style?.showLegend ?? true },
     grid: { left: '4%', right: hasSecondaryAxis ? '8%' : '4%', bottom: '18%', top: titleTop(spec), containLabel: true },
@@ -761,7 +762,8 @@ function buildCartesianOption(spec: ChartSpec, chartType: string): EChartsOption
     yAxis: buildYAxes(
       primaryFormat,
       secondaryFormat,
-      isPercentScale,
+      primaryIsPercent,
+      secondaryIsPercent,
       hasSecondaryAxis,
       spec.config.style?.showGridLines ?? true,
       chartType === 'dualAxis' ? primarySeries?.name ?? prettifyLabel(primarySeries?.field ?? '') : undefined,
@@ -831,7 +833,8 @@ function buildUngroupedSeries(spec: ChartSpec, chartType: string, xValues: strin
 function buildYAxes(
   primaryFormat: ChartSpec['config']['series'][number]['format'],
   secondaryFormat: ChartSpec['config']['series'][number]['format'],
-  isPercentScale: boolean,
+  primaryIsPercent: boolean,
+  secondaryIsPercent: boolean,
   hasSecondaryAxis: boolean,
   showGridLines: boolean,
   primaryName?: string,
@@ -840,13 +843,13 @@ function buildYAxes(
   const axes: EChartsOption['yAxis'] = [
     {
       type: 'value',
-      max: isPercentScale ? 100 : undefined,
+      max: primaryIsPercent ? 100 : undefined,
       name: primaryName,
       nameLocation: 'middle',
       nameGap: 56,
       nameRotate: 90,
       nameTextStyle: primaryName ? axisNameTextStyle() : undefined,
-      axisLabel: axisLabelFormatter(isPercentScale ? 'percent' : primaryFormat),
+      axisLabel: axisLabelFormatter(primaryIsPercent ? 'percent' : primaryFormat),
       axisLine: primaryName ? axisLineStyle() : undefined,
       axisTick: primaryName ? axisTickStyle() : undefined,
       splitLine: { show: showGridLines },
@@ -855,7 +858,7 @@ function buildYAxes(
   if (hasSecondaryAxis) {
     axes.push({
       type: 'value',
-      max: secondaryFormat === 'percent' ? 100 : undefined,
+      max: secondaryIsPercent ? 100 : undefined,
       name: secondaryName,
       nameLocation: 'middle',
       nameGap: 56,
@@ -902,6 +905,60 @@ function inferTooltipFormat(spec: ChartSpec, value: number) {
   if (spec.config.layout === 'normalized' || spec.config.chartType === 'normalizedStackedBar') return 'percent';
   const matched = spec.config.series.find((series) => series.axis !== 'secondary')?.format;
   return matched ?? (Math.abs(value) <= 1 && value !== 0 ? 'percent' : 'number');
+}
+
+function formatCartesianTooltip(spec: ChartSpec, rawParams: unknown) {
+  const params = Array.isArray(rawParams) ? rawParams : [rawParams];
+  const validParams = params.filter((item): item is {
+    seriesName?: string;
+    marker?: string;
+    axisValueLabel?: string;
+    name?: string;
+    value?: unknown;
+    data?: unknown;
+  } => Boolean(item && typeof item === 'object'));
+
+  if (validParams.length === 0) return '';
+
+  const axisLabel = String(validParams[0].axisValueLabel ?? validParams[0].name ?? '');
+  const groups = new Map<string, Array<{ label: string; value: number; marker: string; format?: ChartSpec['config']['series'][number]['format'] }>>();
+
+  for (const item of validParams) {
+    const seriesName = String(item.seriesName ?? '');
+    const match = /^(.*) \((.*)\)$/.exec(seriesName);
+    const metricLabel = match?.[1] ?? seriesName;
+    const seriesLabel = match?.[2] ?? metricLabel;
+    const format = spec.config.series.find((series) => series.name === metricLabel)?.format ?? inferTooltipFormat(spec, Number(item.value ?? item.data ?? 0));
+    const value = tooltipNumber(item.value ?? item.data);
+    const existing = groups.get(metricLabel) ?? [];
+    existing.push({
+      label: seriesLabel,
+      value,
+      marker: String(item.marker ?? ''),
+      format,
+    });
+    groups.set(metricLabel, existing);
+  }
+
+  const lines = [`<strong>${axisLabel}</strong>`];
+  for (const [metricLabel, entries] of groups.entries()) {
+    const sorted = entries.sort((left, right) => Math.abs(right.value) - Math.abs(left.value));
+    const displayed = sorted.slice(0, 6);
+    lines.push(`<br/><span style="opacity:.8">${metricLabel}</span>`);
+    for (const entry of displayed) {
+      lines.push(`<br/>${entry.marker}${entry.label}: ${formatValue(entry.value, entry.format)}`);
+    }
+    if (sorted.length > displayed.length) {
+      lines.push(`<br/>... and ${sorted.length - displayed.length} more`);
+    }
+  }
+
+  return lines.join('');
+}
+
+function tooltipNumber(value: unknown) {
+  if (Array.isArray(value)) return Number(value[value.length - 1] ?? 0);
+  return Number(value ?? 0);
 }
 
 function axisLabelFormatter(format: ChartSpec['config']['series'][number]['format']) {

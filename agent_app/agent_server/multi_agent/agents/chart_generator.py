@@ -133,72 +133,150 @@ class ChartGenerator:
 
         try:
             llm_intent = self._get_llm_config(columns, data, original_query, result_context)
-            if llm_intent is None or not llm_intent.get("plottable", False):
-                return None
+            heuristic_intent = self._build_heuristic_intent(columns, data, original_query, result_context)
+            attempts: List[Tuple[str, Dict[str, Any], List[str]]] = []
 
-            resolved_config, normalization_notes = self._resolve_intent_spec(
-                columns,
-                data,
-                llm_intent,
-                result_context,
-            )
-            if resolved_config is None:
-                return None
+            if llm_intent and llm_intent.get("plottable", False):
+                attempts.append(("llm", llm_intent, []))
+            if heuristic_intent and heuristic_intent.get("plottable", False):
+                heuristic_notes: List[str] = []
+                if llm_intent is None:
+                    heuristic_notes.append("Used best-effort heuristic chart selection because the model did not return a valid intent")
+                elif not llm_intent.get("plottable", False):
+                    heuristic_notes.append("Used best-effort heuristic chart selection because the model marked the result as not plottable")
+                else:
+                    heuristic_notes.append("Used best-effort heuristic chart selection because the original chart intent could not be validated or materialized")
+                attempts.append(("heuristic", heuristic_intent, heuristic_notes))
 
-            chart_data, aggregated, agg_note = self._assemble_data(
-                columns,
-                data,
-                resolved_config,
-                result_context,
-            )
-            if not chart_data:
-                return None
+            for intent_source, intent, seed_notes in attempts:
+                resolved_config, normalization_notes = self._resolve_intent_spec(
+                    columns,
+                    data,
+                    intent,
+                    result_context,
+                )
+                if resolved_config is None:
+                    continue
 
-            notes = [note for note in [agg_note, *normalization_notes] if note]
-            chart_meta = self._build_chart_meta(columns, data, resolved_config, result_context, notes)
-            payload = {
-                "config": {
-                    "chartType": resolved_config.get("chartType", "bar"),
-                    "title": resolved_config.get("title", ""),
-                    "description": chart_meta.get("description"),
-                    "xAxisField": resolved_config.get("xAxisField"),
-                    "groupByField": resolved_config.get("groupByField"),
-                    "yAxisField": resolved_config.get("yAxisField"),
-                    "zAxisField": resolved_config.get("zAxisField"),
-                    "series": resolved_config.get("series", []),
-                    "layout": resolved_config.get("layout"),
-                    "toolbox": True,
-                    "supportedChartTypes": resolved_config.get("supportedChartTypes", ["bar"]),
-                    "referenceLines": resolved_config.get("referenceLines", []),
-                    "compareLabels": (
-                        resolved_config.get("compareLabels")
-                        or (resolved_config.get("transform") or {}).get("compareLabels")
-                    ),
-                    "transform": resolved_config.get("transform"),
-                    "style": {
-                        "palette": "default",
-                        "showLegend": True,
-                        "showLabels": False,
-                        "showGridLines": True,
-                        "showTitle": True,
-                        "showDescription": True,
-                        "smoothLines": True,
+                chart_data, aggregated, agg_note = self._assemble_data(
+                    columns,
+                    data,
+                    resolved_config,
+                    result_context,
+                )
+                if not chart_data:
+                    continue
+
+                notes = [note for note in [*seed_notes, agg_note, *normalization_notes] if note]
+                chart_meta = self._build_chart_meta(columns, data, resolved_config, result_context, notes)
+                chart_meta["businessInsight"] = self._resolve_business_insight(
+                    intent=intent,
+                    resolved_config=resolved_config,
+                    chart_data=chart_data,
+                )
+                chart_meta["intentSource"] = intent_source
+                payload = {
+                    "config": {
+                        "chartType": resolved_config.get("chartType", "bar"),
+                        "title": resolved_config.get("title", ""),
+                        "description": chart_meta.get("description"),
+                        "xAxisField": resolved_config.get("xAxisField"),
+                        "groupByField": resolved_config.get("groupByField"),
+                        "yAxisField": resolved_config.get("yAxisField"),
+                        "zAxisField": resolved_config.get("zAxisField"),
+                        "series": resolved_config.get("series", []),
+                        "layout": resolved_config.get("layout"),
+                        "toolbox": True,
+                        "supportedChartTypes": resolved_config.get("supportedChartTypes", ["bar"]),
+                        "referenceLines": resolved_config.get("referenceLines", []),
+                        "compareLabels": (
+                            resolved_config.get("compareLabels")
+                            or (resolved_config.get("transform") or {}).get("compareLabels")
+                        ),
+                        "transform": resolved_config.get("transform"),
+                        "style": {
+                            "palette": "default",
+                            "showLegend": True,
+                            "showLabels": False,
+                            "showGridLines": True,
+                            "showTitle": True,
+                            "showDescription": True,
+                            "smoothLines": True,
+                        },
                     },
-                },
-                "chartData": chart_data,
-                "downloadData": data[:MAX_DOWNLOAD_ROWS],
-                "totalRows": len(data),
-                "aggregated": aggregated,
-                "aggregationNote": " | ".join(notes) if notes else None,
-                "meta": chart_meta,
-            }
+                    "chartData": chart_data,
+                    "downloadData": data[:MAX_DOWNLOAD_ROWS],
+                    "totalRows": len(data),
+                    "aggregated": aggregated,
+                    "aggregationNote": " | ".join(notes) if notes else None,
+                    "meta": chart_meta,
+                }
 
-            payload = self._size_guard(payload)
-            return payload
+                payload = self._size_guard(payload)
+                return payload
+
+            return None
 
         except Exception as e:
             logger.warning(f"ChartGenerator error: {e}")
             return None
+
+    def _resolve_business_insight(
+        self,
+        intent: Dict[str, Any],
+        resolved_config: Dict[str, Any],
+        chart_data: List[Dict[str, Any]],
+    ) -> Optional[str]:
+        insight = intent.get("businessInsight")
+        if isinstance(insight, str) and insight.strip():
+            return insight.strip()[:180]
+
+        if not chart_data:
+            return None
+
+        chart_type = resolved_config.get("chartType", "bar")
+        x_field = resolved_config.get("xAxisField") or "category"
+        series = resolved_config.get("series") or []
+        primary_field = series[0]["field"] if series else None
+        primary_name = series[0].get("name") if series else None
+
+        if chart_type in {"bar", "line", "area", "stackedBar", "normalizedStackedBar", "stackedArea", "dualAxis"} and primary_field:
+            ranked = [
+                row for row in chart_data
+                if isinstance(row, dict) and row.get(x_field) not in (None, "")
+            ]
+            if ranked:
+                top_row = max(ranked, key=lambda row: _numeric(row.get(primary_field, 0)))
+                label = str(top_row.get(x_field, ""))
+                value = _format_number(_numeric(top_row.get(primary_field, 0)))
+                metric = primary_name or primary_field.replace("_", " ")
+                return f"{label} leads on {metric} at {value}."
+
+        if chart_type == "deltaComparison":
+            ranked = [row for row in chart_data if isinstance(row, dict)]
+            if ranked:
+                top_row = max(ranked, key=lambda row: abs(_numeric(row.get("delta", 0))))
+                label = str(top_row.get(x_field, ""))
+                delta = _numeric(top_row.get("delta", 0))
+                direction = "increase" if delta >= 0 else "decline"
+                return f"{label} shows the largest {direction} at {_format_number(abs(delta))}."
+
+        if chart_type == "rankingSlope":
+            ranked = [row for row in chart_data if isinstance(row, dict)]
+            if ranked:
+                top_row = min(ranked, key=lambda row: _numeric(row.get("endRank", 999999)))
+                label = str(top_row.get(x_field, ""))
+                return f"{label} finishes with the strongest ending rank."
+
+        if chart_type == "boxplot":
+            ranked = [row for row in chart_data if isinstance(row, dict)]
+            if ranked:
+                top_row = max(ranked, key=lambda row: _numeric(row.get("median", 0)))
+                label_key = x_field if x_field in top_row else "label"
+                label = str(top_row.get(label_key, "Overall"))
+                return f"{label} has the highest median distribution."
+
+        return None
 
     # ------------------------------------------------------------------
     # Stage 1: LLM config
@@ -287,6 +365,7 @@ Return ONLY valid JSON (no markdown, no explanation):
   "plottable": true,
   "chartType": "<choose the best type from the guide above>",
   "title": "short descriptive chart title",
+  "businessInsight": "one concise business interpretation grounded in the actual chart data, max 140 chars",
   "xAxisField": "category_or_time_field",
   "groupByField": "optional_group_field_or_period_field",
   "layout": "grouped"|"stacked"|"normalized"|null,
@@ -338,6 +417,7 @@ Rules:
 - If row grain indicates repeated detail rows (diagnosis, procedure, coverage, code-level rows),
   do NOT choose a configuration that would sum repeated patient-level totals across those rows
 - Do NOT invent fields or chart options outside the capability model
+- businessInsight must describe what the chart shows in business terms, not how the chart was built
 """
 
     # ------------------------------------------------------------------
@@ -404,6 +484,13 @@ Rules:
         else:
             x_field = x_field or self._pick_default_x_field(columns, kinds)
 
+        if chart_type == "scatter" and not x_field:
+            numeric_candidates = self._rank_numeric_fields_for_series(columns, kinds, data)
+            primary_field = series[0]["field"] if series else None
+            x_field = next((field for field in numeric_candidates if field != primary_field), None)
+            if x_field:
+                notes.append(f"Filled missing scatter x-axis with numeric field '{x_field}'")
+
         if chart_type == "dualAxis" and len(series) < 2:
             chart_type = "bar"
             notes.append("Downgraded dualAxis to bar because fewer than two valid series remained")
@@ -424,8 +511,29 @@ Rules:
             return None, notes
 
         if not x_field and chart_type not in {"boxplot", "dualAxis"}:
-            notes.append("Skipped chart because no suitable x-axis field was available")
-            return None, notes
+            if series:
+                field = series[0]["field"]
+                transform = {
+                    "type": "boxplot",
+                    "field": field,
+                    "groupField": None,
+                    "syntheticSeries": [
+                        {
+                            "field": field,
+                            "name": series[0].get("name") or field.replace("_", " ").title(),
+                            "format": series[0].get("format") or self._infer_format(field),
+                            "chartType": None,
+                            "axis": "primary",
+                        }
+                    ],
+                }
+                chart_type = "boxplot"
+                layout = None
+                group_field = None
+                notes.append("Downgraded to boxplot because no suitable x-axis field was available")
+            else:
+                notes.append("Skipped chart because no suitable x-axis field was available")
+                return None, notes
 
         if not self._is_chart_type_supported(chart_type, layout):
             notes.append(f"Downgraded unsupported chart combination to bar")
@@ -1471,6 +1579,13 @@ Rules:
             "rationale": " • ".join(bit for bit in rationale_bits if bit) or "Automatically generated chart.",
             "confidence": max(0.35, min(confidence, 0.99)),
             "description": " • ".join(bit for bit in description_bits if bit) or None,
+            "normalizationNotes": notes,
+            "fallbackApplied": any(
+                "best-effort" in note.lower()
+                or "downgraded" in note.lower()
+                or "filled missing" in note.lower()
+                for note in notes
+            ),
             "candidateFields": {
                 "dimensions": self._rank_dimension_fields(columns, self._infer_field_kinds(columns, data), data)[:5],
                 "measures": self._rank_numeric_fields_for_series(columns, self._infer_field_kinds(columns, data), data)[:5],
@@ -1729,6 +1844,14 @@ def _clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         coerced = default
     return max(minimum, min(coerced, maximum))
+
+
+def _format_number(value: float) -> str:
+    if not math.isfinite(value):
+        return "0"
+    if abs(value) >= 100 or math.isclose(value, round(value)):
+        return f"{value:,.0f}"
+    return f"{value:,.1f}"
 
 
 def _sort_value(value: Any) -> Any:
