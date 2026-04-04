@@ -66,6 +66,23 @@ _DEDUPED_METRIC_TOKENS = (
     "year_of_birth",
     "enrollment_period_count",
 )
+_ID_FIELD_TOKENS = (
+    "_id",
+    " id",
+    "uuid",
+    "identifier",
+    "member_id",
+    "patient_id",
+    "claim_id",
+    "encounter_id",
+)
+_LOW_VALUE_NUMERIC_TOKENS = (
+    "rank",
+    "index",
+    "sequence",
+    "zip",
+    "postal",
+)
 
 CHART_CAPABILITY_MODEL: Dict[str, Dict[str, Any]] = {
     "bar": {"layouts": {"grouped", "stacked", "normalized"}},
@@ -138,13 +155,16 @@ class ChartGenerator:
                 return None
 
             notes = [note for note in [agg_note, *normalization_notes] if note]
+            chart_meta = self._build_chart_meta(columns, data, resolved_config, result_context, notes)
             payload = {
                 "config": {
                     "chartType": resolved_config.get("chartType", "bar"),
                     "title": resolved_config.get("title", ""),
+                    "description": chart_meta.get("description"),
                     "xAxisField": resolved_config.get("xAxisField"),
                     "groupByField": resolved_config.get("groupByField"),
                     "yAxisField": resolved_config.get("yAxisField"),
+                    "zAxisField": resolved_config.get("zAxisField"),
                     "series": resolved_config.get("series", []),
                     "layout": resolved_config.get("layout"),
                     "toolbox": True,
@@ -155,12 +175,22 @@ class ChartGenerator:
                         or (resolved_config.get("transform") or {}).get("compareLabels")
                     ),
                     "transform": resolved_config.get("transform"),
+                    "style": {
+                        "palette": "default",
+                        "showLegend": True,
+                        "showLabels": False,
+                        "showGridLines": True,
+                        "showTitle": True,
+                        "showDescription": True,
+                        "smoothLines": True,
+                    },
                 },
                 "chartData": chart_data,
                 "downloadData": data[:MAX_DOWNLOAD_ROWS],
                 "totalRows": len(data),
                 "aggregated": aggregated,
                 "aggregationNote": " | ".join(notes) if notes else None,
+                "meta": chart_meta,
             }
 
             payload = self._size_guard(payload)
@@ -181,6 +211,8 @@ class ChartGenerator:
         original_query: str,
         result_context: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
+        if self.llm is None:
+            return self._build_heuristic_intent(columns, data, original_query, result_context)
         prompt = self._build_prompt(columns, data, original_query, result_context)
         try:
             content = ""
@@ -199,7 +231,7 @@ class ChartGenerator:
             return json.loads(content)
         except Exception as e:
             logger.warning(f"ChartGenerator LLM parse error: {e}")
-            return None
+            return self._build_heuristic_intent(columns, data, original_query, result_context)
 
     def _build_prompt(
         self,
@@ -433,7 +465,7 @@ Rules:
         notes: List[str],
     ) -> List[Dict[str, Any]]:
         kinds = self._infer_field_kinds(columns, data)
-        numeric_fields = [field for field, kind in kinds.items() if kind == "numeric"]
+        numeric_fields = self._rank_numeric_fields_for_series(columns, kinds, data)
         series_list = raw_series if isinstance(raw_series, list) else []
         normalized: List[Dict[str, Any]] = []
 
@@ -655,17 +687,19 @@ Rules:
         if chart_type:
             return chart_type
 
+        if x_field and kinds.get(x_field) == "date":
+            if group_field:
+                return "stackedArea"
+            return "line"
         if group_field and len(series) >= 1:
             return "stackedBar"
-        if x_field and kinds.get(x_field) == "date":
-            return "line"
 
         num_numeric = sum(1 for k in kinds.values() if k == "numeric")
-        num_categorical = sum(1 for k in kinds.values() if k == "categorical")
+        num_categorical = sum(1 for k in kinds.values() if k == "text")
 
         if num_numeric >= 2 and x_field and kinds.get(x_field) == "numeric":
             return "scatter"
-        if num_categorical <= 6 and num_categorical >= 2 and len(series) == 1:
+        if num_categorical <= 6 and num_categorical >= 1 and len(series) == 1:
             return "pie"
         if len(series) >= 2:
             return "dualAxis"
@@ -775,6 +809,9 @@ Rules:
             return normalized_data[:MAX_CHART_POINTS], True, "Converted grouped values to percent-of-total composition"
 
         if len(working) > MAX_CHART_POINTS:
+            compacted, note = self._auto_compact_rows(working, config, result_context)
+            if compacted:
+                return compacted[:MAX_CHART_POINTS], True, note
             note = f"Showing first {MAX_CHART_POINTS} of {len(working)} rows"
             return working[:MAX_CHART_POINTS], True, note
 
@@ -1231,6 +1268,263 @@ Rules:
             else:
                 kinds[column] = "text"
         return kinds
+
+    def _rank_numeric_fields_for_series(
+        self,
+        columns: Sequence[str],
+        kinds: Dict[str, str],
+        data: List[Dict[str, Any]],
+    ) -> List[str]:
+        scored: List[Tuple[float, str]] = []
+        sample = data[: min(len(data), 50)]
+        for column in columns:
+            if kinds.get(column) != "numeric":
+                continue
+            lowered = column.lower()
+            if any(token in lowered for token in _ID_FIELD_TOKENS):
+                continue
+            score = 0.0
+            if any(token in lowered for token in ("amount", "cost", "paid", "charge", "price", "revenue", "sales", "count", "total", "avg", "average", "percent", "ratio", "share", "rate")):
+                score += 5.0
+            if any(token in lowered for token in _LOW_VALUE_NUMERIC_TOKENS):
+                score -= 2.0
+            values = [row.get(column) for row in sample if row.get(column) is not None]
+            unique_ratio = (len({str(value) for value in values}) / len(values)) if values else 0.0
+            if unique_ratio > 0.95 and not any(token in lowered for token in ("age", "year", "month", "day", "week", "quarter", "bucket", "bin")):
+                score -= 3.0
+            if values:
+                score += min(len(values), 10) / 10.0
+            scored.append((score, column))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [column for _, column in scored]
+
+    def _rank_dimension_fields(
+        self,
+        columns: Sequence[str],
+        kinds: Dict[str, str],
+        data: List[Dict[str, Any]],
+        exclude: Optional[str] = None,
+    ) -> List[str]:
+        scored: List[Tuple[float, str]] = []
+        sample = data[: min(len(data), 50)]
+        for column in columns:
+            if column == exclude or kinds.get(column) not in {"text", "date"}:
+                continue
+            lowered = column.lower()
+            values = [row.get(column) for row in sample if row.get(column) not in (None, "")]
+            unique_count = len({str(value) for value in values})
+            unique_ratio = (unique_count / len(values)) if values else 0.0
+            score = 0.0
+            if kinds.get(column) == "date":
+                score += 6.0
+            if any(token in lowered for token in ("date", "time", "month", "year", "week", "quarter", "day", "period")):
+                score += 5.0
+            if any(token in lowered for token in ("name", "type", "category", "status", "segment", "region", "state", "gender", "provider", "plan", "benefit")):
+                score += 3.0
+            if any(token in lowered for token in _ID_FIELD_TOKENS):
+                score -= 4.0
+            if unique_ratio > 0.9:
+                score -= 3.0
+            elif unique_count <= 12:
+                score += 2.5
+            elif unique_count <= 24:
+                score += 1.0
+            scored.append((score, column))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [column for _, column in scored]
+
+    def _build_heuristic_intent(
+        self,
+        columns: List[str],
+        data: List[Dict[str, Any]],
+        original_query: str,
+        result_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        kinds = self._infer_field_kinds(columns, data)
+        numeric_fields = self._rank_numeric_fields_for_series(columns, kinds, data)
+        dimension_fields = self._rank_dimension_fields(columns, kinds, data)
+        if not numeric_fields:
+            return {"plottable": False}
+
+        x_field = dimension_fields[0] if dimension_fields else None
+        group_field = dimension_fields[1] if len(dimension_fields) > 1 else None
+        primary_metric = numeric_fields[0]
+        secondary_metric = numeric_fields[1] if len(numeric_fields) > 1 else None
+        chart_type = "bar"
+        layout = None
+        transform: Optional[Dict[str, Any]] = None
+        query_lower = (original_query or "").lower()
+
+        if x_field and kinds.get(x_field) == "date":
+            chart_type = "stackedArea" if group_field else "line"
+            layout = "stacked" if group_field else None
+            bucket = "month"
+            if any(token in query_lower for token in ("year", "yearly", "annual")):
+                bucket = "year"
+            elif any(token in query_lower for token in ("quarter", "quarterly")):
+                bucket = "quarter"
+            elif any(token in query_lower for token in ("week", "weekly")):
+                bucket = "week"
+            transform = {
+                "type": "timeBucket",
+                "field": x_field,
+                "bucket": bucket,
+                "metric": primary_metric,
+                "function": "sum",
+            }
+        elif (
+            (len(numeric_fields) >= 2 and any(token in query_lower for token in ("correlation", "relationship", "vs", "versus", "compare")))
+            or (len(numeric_fields) >= 2 and not x_field)
+        ):
+            chart_type = "scatter" if not x_field or kinds.get(x_field) == "numeric" else "dualAxis"
+        elif group_field:
+            chart_type = "stackedBar"
+            layout = "stacked"
+            if len(data) > 12:
+                transform = {
+                    "type": "topN",
+                    "metric": primary_metric,
+                    "n": 10,
+                    "otherLabel": "Other",
+                }
+        elif x_field:
+            unique_count = len({str(row.get(x_field, "")) for row in data if row.get(x_field) not in (None, "")})
+            if unique_count <= 6 and any(token in query_lower for token in ("share", "mix", "composition", "breakdown", "percent")):
+                chart_type = "pie"
+            else:
+                chart_type = "bar"
+                if unique_count > 12:
+                    transform = {
+                        "type": "topN",
+                        "metric": primary_metric,
+                        "n": 10,
+                        "otherLabel": "Other",
+                    }
+
+        series = [
+            {
+                "field": primary_metric,
+                "name": primary_metric.replace("_", " ").title(),
+                "format": self._infer_format(primary_metric),
+                "chartType": "bar" if chart_type == "dualAxis" else None,
+                "axis": "primary",
+            }
+        ]
+        if chart_type == "dualAxis" and secondary_metric:
+            series.append(
+                {
+                    "field": secondary_metric,
+                    "name": secondary_metric.replace("_", " ").title(),
+                    "format": self._infer_format(secondary_metric),
+                    "chartType": "line",
+                    "axis": "secondary",
+                }
+            )
+
+        label = result_context.get("label") or "Chart"
+        title = label if label else f"{chart_type.title()} chart"
+        return {
+            "plottable": True,
+            "chartType": chart_type,
+            "title": title,
+            "xAxisField": x_field,
+            "groupByField": group_field if chart_type not in {"scatter", "pie", "dualAxis"} else None,
+            "layout": layout,
+            "series": series,
+            "sortBy": {"field": primary_metric, "order": "desc"} if chart_type in {"bar", "stackedBar"} else None,
+            "transform": transform,
+            "referenceLines": [],
+        }
+
+    def _build_chart_meta(
+        self,
+        columns: List[str],
+        data: List[Dict[str, Any]],
+        resolved_config: Dict[str, Any],
+        result_context: Dict[str, Any],
+        notes: List[str],
+    ) -> Dict[str, Any]:
+        chart_type = resolved_config.get("chartType", "bar")
+        x_field = resolved_config.get("xAxisField")
+        group_field = resolved_config.get("groupByField")
+        series = resolved_config.get("series") or []
+        primary_series = series[0]["field"] if series else None
+        rationale_bits = []
+        if x_field and primary_series:
+            rationale_bits.append(
+                f"{chart_type} selected for {primary_series.replace('_', ' ')} by {x_field.replace('_', ' ')}"
+            )
+        if group_field:
+            rationale_bits.append(f"with breakdown by {group_field.replace('_', ' ')}")
+        if result_context.get("row_grain_hint"):
+            rationale_bits.append("row-grain guardrails applied")
+        confidence = 0.86
+        if resolved_config.get("transform"):
+            confidence -= 0.05
+        if any("Downgraded" in note or "Filled missing" in note for note in notes):
+            confidence -= 0.12
+        description_bits = [result_context.get("sql_explanation") or ""]
+        if result_context.get("row_grain_hint"):
+            description_bits.append(result_context["row_grain_hint"])
+        return {
+            "source": "auto",
+            "rationale": " • ".join(bit for bit in rationale_bits if bit) or "Automatically generated chart.",
+            "confidence": max(0.35, min(confidence, 0.99)),
+            "description": " • ".join(bit for bit in description_bits if bit) or None,
+            "candidateFields": {
+                "dimensions": self._rank_dimension_fields(columns, self._infer_field_kinds(columns, data), data)[:5],
+                "measures": self._rank_numeric_fields_for_series(columns, self._infer_field_kinds(columns, data), data)[:5],
+            },
+        }
+
+    def _auto_compact_rows(
+        self,
+        rows: List[Dict[str, Any]],
+        config: Dict[str, Any],
+        result_context: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        x_field = config.get("xAxisField")
+        group_field = config.get("groupByField")
+        series = config.get("series") or []
+        metric = series[0]["field"] if series else ""
+        if not x_field:
+            return [], ""
+
+        sample_rows = rows[: min(len(rows), 50)]
+        kinds = self._infer_field_kinds(list(sample_rows[0].keys()) if sample_rows else [], sample_rows)
+
+        if kinds.get(x_field) == "date":
+            transform = {"field": x_field, "metric": metric, "function": "sum", "bucket": "month"}
+            compacted, note = self._agg_time_bucket(rows, config, transform, result_context)
+            return compacted, note
+
+        if group_field:
+            compacted, note = self._agg_top_n(
+                data=rows,
+                x_field=x_field,
+                metric=metric,
+                series=series,
+                n=min(10, MAX_CHART_POINTS),
+                other_label="Other",
+                result_context=result_context,
+                group_field=group_field,
+            )
+            return compacted, note
+
+        if metric:
+            compacted, note = self._agg_top_n(
+                data=rows,
+                x_field=x_field,
+                metric=metric,
+                series=series,
+                n=min(10, MAX_CHART_POINTS),
+                other_label="Other",
+                result_context=result_context,
+            )
+            return compacted, note
+
+        compacted, note = self._agg_frequency(rows, x_field, min(10, MAX_CHART_POINTS), x_field)
+        return compacted, note
 
     def _coerce_field(self, candidate: Any, columns: Sequence[str]) -> Optional[str]:
         return candidate if isinstance(candidate, str) and candidate in columns else None

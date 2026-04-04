@@ -18,6 +18,7 @@ import { sessionRouter } from './routes/session';
 import { messagesRouter } from './routes/messages';
 import { configRouter } from './routes/config';
 import { feedbackRouter } from './routes/feedback';
+import { chartWorkspaceRouter } from './routes/chart-workspaces';
 import { ChatSDKError } from '@chat-template/core/errors';
 
 // ESM-compatible __dirname
@@ -26,12 +27,11 @@ const __dirname = dirname(__filename);
 
 const app: Express = express();
 const isDevelopment = process.env.NODE_ENV !== 'production';
-// Either let PORT be set by env or use 3001 for development and 3000 for production
-// The CHAT_APP_PORT can be used to override the port for the chat app.
+// In development, default the API server to 3001 so the Vite client can stay on 3000.
+// The CHAT_APP_PORT can still override this for Playwright or custom local setups.
 const PORT =
   process.env.CHAT_APP_PORT ||
-  process.env.PORT ||
-  (isDevelopment ? 3001 : 3000);
+  (isDevelopment ? 3001 : process.env.PORT || 3000);
 
 // CORS configuration
 app.use(
@@ -57,6 +57,7 @@ app.use('/api/session', sessionRouter);
 app.use('/api/messages', messagesRouter);
 app.use('/api/config', configRouter);
 app.use('/api/feedback', feedbackRouter);
+app.use('/api/chart-workspaces', chartWorkspaceRouter);
 
 // Agent backend proxy (optional)
 // If API_PROXY is set, proxy /invocations requests to the agent backend

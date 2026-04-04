@@ -9,6 +9,7 @@ This is the final node that all workflow paths go through.
 The node is optimized to use minimal state extraction to reduce token usage.
 """
 
+from datetime import date, datetime
 from typing import Dict, Any, List
 from langgraph.config import get_stream_writer
 from langchain_core.messages import AIMessage, SystemMessage
@@ -121,6 +122,142 @@ def _build_artifact_entries(state: AgentState) -> List[Dict[str, Any]]:
             }
         )
     return entries
+
+
+def _is_numeric_like(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        float(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_date_like(value: Any) -> bool:
+    if isinstance(value, (date, datetime)):
+        return True
+    if not isinstance(value, str):
+        return False
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return True
+    except ValueError:
+        return False
+
+
+def _infer_workspace_fields(columns: List[str], rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    sample = rows[:50]
+    fields: List[Dict[str, Any]] = []
+    for column in columns:
+        values = [row.get(column) for row in sample if row.get(column) is not None]
+        lowered = column.lower()
+        unique_count = len({str(value) for value in values})
+        unique_ratio = (unique_count / len(values)) if values else 0.0
+        if values and all(_is_numeric_like(value) for value in values):
+            kind = "numeric"
+        elif values and all(_is_date_like(value) for value in values):
+            kind = "date"
+        else:
+            kind = "text"
+
+        if kind == "date":
+            role = "time"
+        elif any(token in lowered for token in ("_id", " id", "uuid", "identifier", "member_id", "patient_id", "claim_id")):
+            role = "id"
+        elif kind == "numeric" and any(token in lowered for token in ("amount", "cost", "paid", "charge", "revenue", "sales", "spend", "allowed")):
+            role = "currency"
+        elif kind == "numeric" and any(token in lowered for token in ("percent", "pct", "ratio", "share", "rate")):
+            role = "percent"
+        elif kind == "numeric":
+            role = "measure"
+        elif kind == "text":
+            role = "dimension"
+        else:
+            role = "unknown"
+
+        if role == "currency":
+            fmt = "currency"
+        elif role == "percent":
+            fmt = "percent"
+        else:
+            fmt = "number"
+
+        fields.append(
+            {
+                "name": column,
+                "label": column.replace("_", " ").title(),
+                "kind": kind,
+                "role": role,
+                "format": fmt,
+                "uniqueCount": unique_count,
+                "uniqueRatio": round(unique_ratio, 4),
+            }
+        )
+    return fields
+
+
+def _build_visualization_workspace_payload(
+    entry: Dict[str, Any],
+    chart_payload: Dict[str, Any],
+    preview_rows: List[Dict[str, Any]],
+    source_row_count: int,
+    total_entries: int,
+) -> Dict[str, Any]:
+    from .summarize_agent import ResultSummarizeAgent
+
+    idx = entry["index"]
+    label = entry.get("label") or f"Query {idx + 1}"
+    result_item = entry["result"]
+    columns = result_item.get("columns", [])
+    workspace_id = f"query-{idx + 1}"
+    table_payload = {
+        "columns": columns,
+        "rows": preview_rows,
+        "totalRows": source_row_count,
+        "previewRowCount": len(preview_rows),
+        "isPreview": source_row_count > len(preview_rows),
+        "filename": f"results_{idx + 1}.csv" if total_entries > 1 else "results.csv",
+        "title": label,
+        "sql": ResultSummarizeAgent.resolve_sql_download_text(entry),
+        "sqlFilename": ResultSummarizeAgent.get_sql_download_filename(
+            entry,
+            total_entries=total_entries,
+        ),
+    }
+    chart_payload.setdefault("meta", {})
+    chart_payload["meta"].update(
+        {
+            "chartId": f"{workspace_id}-chart-1",
+            "sourceTableId": workspace_id,
+            "source": chart_payload.get("meta", {}).get("source") or "auto",
+            "previewLimited": source_row_count > len(preview_rows),
+            "sourceRowCount": source_row_count,
+        }
+    )
+    chart_payload.setdefault("config", {})
+    chart_payload["config"]["title"] = label
+    chart_payload["config"]["description"] = (
+        entry.get("sql_explanation")
+        or entry.get("row_grain_hint")
+        or chart_payload["config"].get("description")
+    )
+    return {
+        "workspaceId": workspace_id,
+        "title": label,
+        "description": entry.get("sql_explanation") or "",
+        "table": table_payload,
+        "charts": [chart_payload],
+        "fields": _infer_workspace_fields(columns, preview_rows),
+        "sourceMeta": {
+            "queryIndex": idx + 1,
+            "label": label,
+            "sqlExplanation": entry.get("sql_explanation"),
+            "rowGrainHint": entry.get("row_grain_hint"),
+            "previewLimited": source_row_count > len(preview_rows),
+            "totalRows": source_row_count,
+        },
+    }
 
 
 def get_cached_summarize_agent():
@@ -530,33 +667,7 @@ def summarize_node(state: AgentState) -> dict:
     else:
         summary = summarize_agent(context, writer=writer)
 
-    # --- 2. Collect chart generation result (already running in background) ---
-    for entry in artifact_entries:
-        idx = entry["index"]
-        future_entry = chart_futures.get(idx)
-        if not future_entry:
-            continue
-        future_meta, future = future_entry
-        try:
-            payload = future.result(timeout=30)
-            if payload:
-                label = future_meta.get("label")
-                if label:
-                    payload.setdefault("config", {})
-                    payload["config"]["title"] = label
-                chart_json = _json.dumps(payload, default=str)
-                chart_block = f"\n\n```echarts-chart\n{chart_json}\n```\n"
-                summary += chart_block
-                writer({"type": "text_delta", "content": chart_block})
-                print(f"✓ Chart block inserted for result {idx} ({len(chart_json)} bytes)")
-        except Exception as e:
-            print(f"⚠ Chart generation failed for result {idx}: {e}")
-    if chart_pool:
-        chart_pool.shutdown(wait=False)
-
-    # --- 3. Downloadable paginated tables (rendered after charts) ---
-    import base64
-    from .summarize_agent import ResultSummarizeAgent
+    # --- 2. Collect chart generation result and emit a visualization workspace per table ---
     for entry in artifact_entries:
         idx = entry["index"]
         result_item = entry["result"]
@@ -567,33 +678,34 @@ def summarize_node(state: AgentState) -> dict:
         if not columns or not data:
             continue
 
-        preview_rows = data[:MAX_PREVIEW_ROWS]
-        preview_row_count = len(preview_rows)
-        source_row_count = result_item.get("row_count") or len(data)
-        table_payload = {
-            "columns": columns,
-            "rows": preview_rows,
-            "totalRows": preview_row_count,
-            "previewRowCount": preview_row_count,
-            "isPreview": source_row_count > preview_row_count,
-            "filename": f"results_{idx + 1}.csv" if len(execution_results) > 1 else "results.csv",
-            "title": entry.get("label"),
-            "sql": ResultSummarizeAgent.resolve_sql_download_text(entry),
-            "sqlFilename": ResultSummarizeAgent.get_sql_download_filename(
-                entry,
+        future_entry = chart_futures.get(idx)
+        if not future_entry:
+            continue
+        _future_meta, future = future_entry
+
+        try:
+            payload = future.result(timeout=30)
+            if not payload:
+                continue
+
+            preview_rows = data[:MAX_PREVIEW_ROWS]
+            source_row_count = result_item.get("row_count") or len(data)
+            workspace_payload = _build_visualization_workspace_payload(
+                entry=entry,
+                chart_payload=payload,
+                preview_rows=preview_rows,
+                source_row_count=source_row_count,
                 total_entries=len(artifact_entries),
-            ),
-        }
-        table_json = _json.dumps(table_payload, default=str)
-        table_b64 = base64.b64encode(table_json.encode()).decode()
-        table_filename = table_payload["filename"]
-        table_block = (
-            f"\n\n```table-download:{table_filename}:{table_b64}\n"
-            f"{table_json}\n"
-            "```\n"
-        )
-        summary += table_block
-        writer({"type": "text_delta", "content": table_block})
+            )
+            workspace_json = _json.dumps(workspace_payload, default=str)
+            workspace_block = f"\n\n```viz-workspace\n{workspace_json}\n```\n"
+            summary += workspace_block
+            writer({"type": "text_delta", "content": workspace_block})
+            print(f"✓ Visualization workspace inserted for result {idx} ({len(workspace_json)} bytes)")
+        except Exception as e:
+            print(f"⚠ Chart generation failed for result {idx}: {e}")
+    if chart_pool:
+        chart_pool.shutdown(wait=False)
 
     # --- 3. SQL download / explanation / plan (collapsible, streamed as delta) ---
     plan = state.get("plan")

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import _ReactEChartsCore from 'echarts-for-react/lib/core';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const ReactEChartsCore: typeof _ReactEChartsCore = ((_ReactEChartsCore as any).default ?? _ReactEChartsCore) as typeof _ReactEChartsCore;
@@ -21,10 +21,17 @@ import {
   TooltipComponent,
   VisualMapComponent,
 } from 'echarts/components';
+import {
+  Sparkles,
+  Settings2,
+  Copy,
+  Trash2,
+} from 'lucide-react';
 import { SVGRenderer } from 'echarts/renderers';
 import { LegacyGridContainLabel } from 'echarts/features';
 
 import { buildOption, getSelectableChartTypes, type ChartSpec } from './chart-spec';
+import { Button } from '@/components/ui/button';
 
 echarts.use([
   BarChart,
@@ -59,12 +66,32 @@ function toCsv(data: Record<string, unknown>[]): string {
   return rows.join('\n');
 }
 
-export function InteractiveChart({ spec }: { spec: ChartSpec }) {
+type InteractiveChartProps = {
+  spec: ChartSpec;
+  onOpenPrompt?: () => void;
+  onOpenCustomizer?: () => void;
+  onDuplicate?: () => void;
+  onRemove?: () => void;
+  canRemove?: boolean;
+};
+
+export function InteractiveChart({
+  spec,
+  onOpenPrompt,
+  onOpenCustomizer,
+  onDuplicate,
+  onRemove,
+  canRemove = false,
+}: InteractiveChartProps) {
   const availableChartTypes = useMemo(() => getSelectableChartTypes(spec), [spec]);
   const [chartType, setChartType] = useState<string>(spec.config.chartType ?? 'bar');
   const chartRef = useRef<any>(null);
 
   const option = useMemo(() => buildOption(spec, chartType), [spec, chartType]);
+
+  useEffect(() => {
+    setChartType(spec.config.chartType ?? 'bar');
+  }, [spec]);
 
   const handleReset = useCallback(() => {
     setChartType(spec.config.chartType ?? 'bar');
@@ -85,6 +112,53 @@ export function InteractiveChart({ spec }: { spec: ChartSpec }) {
 
   return (
     <div className="my-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900">
+      <div className="mb-3 flex flex-wrap items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+            {spec.config.title || 'Chart'}
+          </div>
+          {spec.config.description && (
+            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+              {spec.config.description}
+            </p>
+          )}
+          {(spec.meta?.rationale || spec.meta?.confidence != null) && (
+            <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+              {spec.meta?.rationale}
+              {spec.meta?.confidence != null
+                ? ` ${spec.meta?.rationale ? '•' : ''} Confidence ${Math.round(spec.meta.confidence * 100)}%`
+                : ''}
+            </p>
+          )}
+        </div>
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {onOpenPrompt && (
+            <Button type="button" variant="outline" size="sm" onClick={onOpenPrompt}>
+              <Sparkles className="h-4 w-4" />
+              Ask
+            </Button>
+          )}
+          {onOpenCustomizer && (
+            <Button type="button" variant="outline" size="sm" onClick={onOpenCustomizer}>
+              <Settings2 className="h-4 w-4" />
+              Customize
+            </Button>
+          )}
+          {onDuplicate && (
+            <Button type="button" variant="ghost" size="sm" onClick={onDuplicate}>
+              <Copy className="h-4 w-4" />
+              Duplicate
+            </Button>
+          )}
+          {onRemove && canRemove && (
+            <Button type="button" variant="ghost" size="sm" onClick={onRemove}>
+              <Trash2 className="h-4 w-4" />
+              Remove
+            </Button>
+          )}
+        </div>
+      </div>
+
       <div className="mb-2 flex flex-wrap items-center gap-2">
         {availableChartTypes.map((t) => (
           <button

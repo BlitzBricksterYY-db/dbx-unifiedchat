@@ -51,7 +51,10 @@ from agent_server.multi_agent.agents.chart_generator import (
     SUPPORTED_TRANSFORMS,
 )
 from agent_server.multi_agent.agents.sql_execution import _append_remaining_skipped_artifacts
-from agent_server.multi_agent.agents.summarize import _build_artifact_entries
+from agent_server.multi_agent.agents.summarize import (
+    _build_artifact_entries,
+    _build_visualization_workspace_payload,
+)
 from agent_server.multi_agent.agents.summarize_agent import ResultSummarizeAgent
 from agent_server.multi_agent.tools.web_search import detect_code_columns
 
@@ -284,6 +287,74 @@ def test_chart_generator_prompt_lists_supported_capabilities():
         assert chart_type in prompt
     for transform_type in SUPPORTED_TRANSFORMS:
         assert transform_type in prompt
+
+
+def test_chart_generator_without_llm_prefers_time_series_rollup():
+    generator = ChartGenerator(llm=None)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["service_date", "paid_amount", "benefit_type"],
+        data=[
+            {"service_date": "2024-01-01", "paid_amount": 10, "benefit_type": "Medical"},
+            {"service_date": "2024-01-15", "paid_amount": 15, "benefit_type": "Rx"},
+            {"service_date": "2024-02-01", "paid_amount": 25, "benefit_type": "Medical"},
+        ],
+        original_query="Show monthly spend trends",
+        result_context={"label": "Monthly spend"},
+    )
+
+    assert payload is not None
+    assert payload["config"]["chartType"] in {"line", "stackedArea"}
+    assert payload["config"]["transform"]["type"] == "timeBucket"
+    assert payload["meta"]["source"] == "auto"
+    assert payload["meta"]["confidence"] is not None
+
+
+def test_build_visualization_workspace_payload_groups_table_and_chart():
+    entry = {
+        "index": 0,
+        "label": "Monthly spend",
+        "sql_explanation": "Aggregated paid amount by month.",
+        "row_grain_hint": "Rows are claim-level detail.",
+        "result": {
+            "success": True,
+            "columns": ["service_month", "paid_amount"],
+            "result": [
+                {"service_month": "2024-01", "paid_amount": 100},
+                {"service_month": "2024-02", "paid_amount": 150},
+            ],
+        },
+    }
+    chart_payload = {
+        "config": {
+            "chartType": "line",
+            "title": "Monthly spend",
+            "xAxisField": "service_month",
+            "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+        },
+        "chartData": [
+            {"service_month": "2024-01", "paid_amount": 100},
+            {"service_month": "2024-02", "paid_amount": 150},
+        ],
+        "downloadData": [
+            {"service_month": "2024-01", "paid_amount": 100},
+            {"service_month": "2024-02", "paid_amount": 150},
+        ],
+        "meta": {"source": "auto"},
+    }
+
+    workspace = _build_visualization_workspace_payload(
+        entry=entry,
+        chart_payload=chart_payload,
+        preview_rows=entry["result"]["result"],
+        source_row_count=2,
+        total_entries=1,
+    )
+
+    assert workspace["workspaceId"] == "query-1"
+    assert workspace["table"]["title"] == "Monthly spend"
+    assert workspace["charts"][0]["meta"]["sourceTableId"] == "query-1"
+    assert workspace["sourceMeta"]["sqlExplanation"] == "Aggregated paid amount by month."
 
 
 def test_chart_generator_frequency_rewrites_to_count_series():

@@ -22,6 +22,12 @@ function buildChartStream(spec: Record<string, unknown>) {
   ]);
 }
 
+function buildWorkspaceStream(workspace: Record<string, unknown>) {
+  return buildUiMessageStream([
+    `Here is a workspace.\n\n\`\`\`viz-workspace\n${JSON.stringify(workspace)}\n\`\`\`\n`,
+  ]);
+}
+
 test.describe('Chat', () => {
   test('should send a message and receive a streaming response', async ({
     adaContext,
@@ -69,47 +75,104 @@ test.describe('Interactive Charts', () => {
   }) => {
     const { page } = adaContext;
     const chatPage = new ChatPage(page);
+    const assistantContent = `Here is a chart.\n\n\`\`\`echarts-chart\n${JSON.stringify({
+      config: {
+        chartType: 'dualAxis',
+        title: 'Monthly spend and claims',
+        xAxisField: 'service_month',
+        series: [
+          {
+            field: 'claim_count',
+            name: 'Claim Count',
+            format: 'number',
+            chartType: 'bar',
+            axis: 'primary',
+          },
+          {
+            field: 'paid_amount',
+            name: 'Paid Amount',
+            format: 'currency',
+            chartType: 'line',
+            axis: 'secondary',
+          },
+        ],
+        supportedChartTypes: ['dualAxis', 'bar', 'line'],
+        toolbox: true,
+      },
+      chartData: [
+        { service_month: '2024-01', claim_count: 10, paid_amount: 1200 },
+        { service_month: '2024-02', claim_count: 15, paid_amount: 1800 },
+      ],
+      downloadData: [
+        { service_month: '2024-01', claim_count: 10, paid_amount: 1200 },
+        { service_month: '2024-02', claim_count: 15, paid_amount: 1800 },
+      ],
+      totalRows: 2,
+      aggregated: false,
+      aggregationNote: null,
+    })}\n\`\`\`\n`;
 
-    await page.route('**/api/chat*', async (route) => {
+    await page.route('**/api/chat', async (route) => {
       await route.fulfill({
         status: 200,
         contentType: 'text/event-stream',
-        body: buildChartStream({
-          config: {
-            chartType: 'dualAxis',
-            title: 'Monthly spend and claims',
-            xAxisField: 'service_month',
-            series: [
-              {
-                field: 'claim_count',
-                name: 'Claim Count',
-                format: 'number',
-                chartType: 'bar',
-                axis: 'primary',
-              },
-              {
-                field: 'paid_amount',
-                name: 'Paid Amount',
-                format: 'currency',
-                chartType: 'line',
-                axis: 'secondary',
-              },
-            ],
-            supportedChartTypes: ['dualAxis', 'bar', 'line'],
-            toolbox: true,
-          },
-          chartData: [
-            { service_month: '2024-01', claim_count: 10, paid_amount: 1200 },
-            { service_month: '2024-02', claim_count: 15, paid_amount: 1800 },
-          ],
-          downloadData: [
-            { service_month: '2024-01', claim_count: 10, paid_amount: 1200 },
-            { service_month: '2024-02', claim_count: 15, paid_amount: 1800 },
-          ],
-          totalRows: 2,
-          aggregated: false,
-          aggregationNote: null,
+        body: buildUiMessageStream([assistantContent]),
+      });
+    });
+
+    await page.route('**/api/chat/*', async (route) => {
+      const chatId = route.request().url().split('/').pop() ?? crypto.randomUUID();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: chatId,
+          createdAt: new Date().toISOString(),
+          title: 'Monthly spend and claims',
+          userId: 'ada-id',
+          visibility: 'private',
+          executionMode: 'parallel',
+          synthesisRoute: 'auto',
+          clarificationSensitivity: 'medium',
+          countOnly: false,
+          lastContext: null,
         }),
+      });
+    });
+
+    await page.route('**/api/messages/*', async (route) => {
+      const chatId = route.request().url().split('/').pop() ?? crypto.randomUUID();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          {
+            id: crypto.randomUUID(),
+            chatId,
+            role: 'user',
+            parts: [{ type: 'text', text: 'Show monthly spend and claims' }],
+            attachments: [],
+            createdAt: new Date().toISOString(),
+            traceId: null,
+          },
+          {
+            id: crypto.randomUUID(),
+            chatId,
+            role: 'assistant',
+            parts: [{ type: 'text', text: assistantContent }],
+            attachments: [],
+            createdAt: new Date().toISOString(),
+            traceId: 'tr-chart-test',
+          },
+        ]),
+      });
+    });
+
+    await page.route('**/api/feedback/chat/*', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({}),
       });
     });
 
@@ -147,6 +210,174 @@ test.describe('Interactive Charts', () => {
     await expect(page.getByRole('button', { name: 'Download CSV' })).toHaveCount(0);
     const { content } = await chatPage.getRecentAssistantMessage();
     await expect(content).toContainText('"chartType":"bar"');
+  });
+
+  test('should render a visualization workspace with ask/customize actions', async ({
+    adaContext,
+  }) => {
+    const { page } = adaContext;
+    const chatPage = new ChatPage(page);
+    const assistantContent = `Here is a workspace.\n\n\`\`\`viz-workspace\n${JSON.stringify({
+      workspaceId: 'query-1',
+      title: 'Monthly spend',
+      description: 'Per-table visualization workspace',
+      table: {
+        columns: ['service_month', 'paid_amount', 'benefit_type'],
+        rows: [
+          { service_month: '2024-01', paid_amount: 1200, benefit_type: 'Medical' },
+          { service_month: '2024-02', paid_amount: 1800, benefit_type: 'Rx' },
+        ],
+        totalRows: 2,
+        previewRowCount: 2,
+        isPreview: false,
+        filename: 'results.csv',
+        title: 'Monthly spend',
+      },
+      fields: [
+        { name: 'service_month', label: 'Service Month', kind: 'date', role: 'time', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+        { name: 'paid_amount', label: 'Paid Amount', kind: 'numeric', role: 'currency', format: 'currency', uniqueCount: 2, uniqueRatio: 1 },
+        { name: 'benefit_type', label: 'Benefit Type', kind: 'text', role: 'dimension', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+      ],
+      charts: [
+        {
+          config: {
+            chartType: 'line',
+            title: 'Monthly spend',
+            description: 'Trend over time',
+            xAxisField: 'service_month',
+            series: [
+              {
+                field: 'paid_amount',
+                name: 'Paid Amount',
+                format: 'currency',
+                chartType: 'line',
+                axis: 'primary',
+              },
+            ],
+            supportedChartTypes: ['line', 'bar', 'area'],
+            toolbox: true,
+            style: { palette: 'default', showLegend: true, showLabels: false, showGridLines: true, showTitle: true, showDescription: true, smoothLines: true },
+          },
+          chartData: [
+            { service_month: '2024-01', paid_amount: 1200 },
+            { service_month: '2024-02', paid_amount: 1800 },
+          ],
+          downloadData: [
+            { service_month: '2024-01', paid_amount: 1200 },
+            { service_month: '2024-02', paid_amount: 1800 },
+          ],
+          totalRows: 2,
+          aggregated: false,
+          aggregationNote: null,
+          meta: {
+            chartId: 'query-1-chart-1',
+            sourceTableId: 'query-1',
+            source: 'auto',
+            rationale: 'line selected for paid amount by service month',
+            confidence: 0.92,
+          },
+        },
+      ],
+    })}\n\`\`\`\n`;
+
+    await page.route('**/api/chat', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: buildUiMessageStream([assistantContent]),
+      });
+    });
+
+    await page.route('**/api/chat/*', async (route) => {
+      const chatId = route.request().url().split('/').pop() ?? crypto.randomUUID();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: chatId,
+          createdAt: new Date().toISOString(),
+          title: 'Monthly spend',
+          userId: 'ada-id',
+          visibility: 'private',
+          executionMode: 'parallel',
+          synthesisRoute: 'auto',
+          clarificationSensitivity: 'medium',
+          countOnly: false,
+          lastContext: null,
+        }),
+      });
+    });
+
+    await page.route('**/api/messages/*', async (route) => {
+      const chatId = route.request().url().split('/').pop() ?? crypto.randomUUID();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          {
+            id: crypto.randomUUID(),
+            chatId,
+            role: 'user',
+            parts: [{ type: 'text', text: 'Show monthly spend workspace' }],
+            attachments: [],
+            createdAt: new Date().toISOString(),
+            traceId: null,
+          },
+          {
+            id: crypto.randomUUID(),
+            chatId,
+            role: 'assistant',
+            parts: [{ type: 'text', text: assistantContent }],
+            attachments: [],
+            createdAt: new Date().toISOString(),
+            traceId: 'tr-chart-test',
+          },
+        ]),
+      });
+    });
+
+    await page.route('**/api/feedback/chat/*', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({}),
+      });
+    });
+
+    await page.route('**/api/chart-workspaces/rechart', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          mode: 'replace',
+          overrides: {
+            chartType: 'bar',
+            xAxisField: 'benefit_type',
+            yAxisField: 'paid_amount',
+            groupByField: '',
+            timeBucket: 'none',
+            description: 'Bar chart by benefit type',
+          },
+        }),
+      });
+    });
+
+    await chatPage.createNewChat();
+    await chatPage.sendUserMessage('Show monthly spend workspace');
+    await chatPage.isGenerationComplete();
+
+    await page.getByRole('button', { name: /Monthly spend/ }).click();
+    await expect(page.getByRole('button', { name: 'Ask', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Customize', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Add another chart' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Ask', exact: true }).click();
+    await page.getByPlaceholder(/Make this a monthly line chart/i).fill('Make this a bar chart by benefit_type');
+    await page.getByRole('button', { name: 'Generate chart' }).click();
+
+    await expect(
+      page.locator('p').filter({ hasText: /Bar chart by benefit type/i }).first(),
+    ).toBeVisible();
   });
 });
 
