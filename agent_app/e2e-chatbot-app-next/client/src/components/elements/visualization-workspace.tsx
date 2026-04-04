@@ -201,21 +201,28 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
       }
 
       const payload = await response.json();
-      const nextBuilderState = {
-        ...createBuilderStateFromChart(targetChart, hydratedWorkspace, askChart.mode),
-        ...(payload.overrides ?? {}),
-        mode: askChart.mode,
-      } as ChartBuilderState;
-      const validation = validateBuilderState(nextBuilderState, hydratedWorkspace);
-      if (!validation.valid) {
-        throw new Error(validation.issues[0] ?? 'The requested chart combination is not valid.');
+
+      let nextChart: ChartSpec;
+
+      if (payload.chart) {
+        nextChart = payload.chart as ChartSpec;
+      } else {
+        const nextBuilderState = {
+          ...createBuilderStateFromChart(targetChart, hydratedWorkspace, askChart.mode),
+          ...(payload.overrides ?? {}),
+          mode: askChart.mode,
+        } as ChartBuilderState;
+        const validation = validateBuilderState(nextBuilderState, hydratedWorkspace);
+        if (!validation.valid) {
+          throw new Error(validation.issues[0] ?? 'The requested chart combination is not valid.');
+        }
+        nextChart = materializeChartSpecFromBuilder(
+          hydratedWorkspace,
+          nextBuilderState,
+          targetChart,
+          'natural-language',
+        );
       }
-      const nextChart = materializeChartSpecFromBuilder(
-        hydratedWorkspace,
-        nextBuilderState,
-        targetChart,
-        'natural-language',
-      );
 
       persistCharts((existing) => {
         if (askChart.mode === 'add') return [...existing, nextChart];

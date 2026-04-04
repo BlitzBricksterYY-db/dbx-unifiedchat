@@ -45,6 +45,7 @@ const chartWorkspaceRequestSchema = z.object({
     sourceMeta: z
       .object({
         previewLimited: z.boolean().optional(),
+        rowGrainHint: z.string().optional(),
       })
       .optional(),
   }),
@@ -67,6 +68,15 @@ const chartWorkspaceRequestSchema = z.object({
 
 chartWorkspaceRouter.use(authMiddleware);
 
+const AGENT_RECHART_URL = (() => {
+  const proxy = process.env.API_PROXY;
+  if (proxy) {
+    const base = proxy.replace(/\/invocations\/?$/, '');
+    return `${base}/api/rechart`;
+  }
+  return null;
+})();
+
 chartWorkspaceRouter.post('/rechart', requireAuth, async (req: Request, res: Response) => {
   const parsed = chartWorkspaceRequestSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -77,6 +87,32 @@ chartWorkspaceRouter.post('/rechart', requireAuth, async (req: Request, res: Res
   }
 
   const { workspace, existingChart, request, mode } = parsed.data;
+
+  if (AGENT_RECHART_URL) {
+    try {
+      const chartSpec = await rechartViaPython({
+        url: AGENT_RECHART_URL,
+        columns: workspace.table.columns,
+        rows: workspace.table.rows,
+        prompt: request,
+        title: existingChart.config.title ?? workspace.title,
+        description: existingChart.config.description ?? '',
+        rowGrainHint: workspace.sourceMeta?.rowGrainHint ?? '',
+        mode,
+      });
+
+      if (chartSpec) {
+        return res.json({
+          mode,
+          chart: chartSpec,
+          source: 'python-chart-generator',
+        });
+      }
+    } catch (error) {
+      console.warn('[chart-workspaces] Python ChartGenerator failed, falling back to regex:', error);
+    }
+  }
+
   const fields = inferFields(
     workspace.table.columns,
     workspace.table.rows,
@@ -121,10 +157,61 @@ chartWorkspaceRouter.post('/rechart', requireAuth, async (req: Request, res: Res
   return res.json({
     mode,
     overrides,
-    rationale: 'Interpreted the natural-language chart request into structured chart controls.',
-    previewLimited: workspace.sourceMeta?.previewLimited ?? false,
+    source: 'regex-fallback',
   });
 });
+
+async function rechartViaPython({
+  url,
+  columns,
+  rows,
+  prompt,
+  title,
+  description,
+  rowGrainHint,
+  mode,
+}: {
+  url: string;
+  columns: string[];
+  rows: Array<Record<string, unknown>>;
+  prompt: string;
+  title: string;
+  description: string;
+  rowGrainHint: string;
+  mode: string;
+}): Promise<Record<string, unknown> | null> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      columns,
+      rows,
+      prompt,
+      title,
+      description,
+      row_grain_hint: rowGrainHint,
+      mode,
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Python rechart returned ${response.status}: ${response.statusText}`);
+  }
+
+  const result = (await response.json()) as {
+    success: boolean;
+    chart?: Record<string, unknown>;
+    error?: string;
+  };
+
+  if (!result.success || !result.chart) {
+    console.warn('[chart-workspaces] Python ChartGenerator declined:', result.error);
+    return null;
+  }
+
+  return result.chart;
+}
 
 type FieldInfo = {
   name: string;

@@ -20,9 +20,9 @@ from langchain_core.runnables import Runnable
 
 logger = logging.getLogger(__name__)
 
-MAX_CHART_POINTS = 30
-MAX_DOWNLOAD_ROWS = 200
-MAX_JSON_BYTES = 50_000
+MAX_CHART_POINTS = 80
+MAX_DOWNLOAD_ROWS = 1000
+MAX_JSON_BYTES = 200_000
 SAMPLE_ROWS_FOR_LLM = 50
 MAX_REFERENCE_LINES = 3
 
