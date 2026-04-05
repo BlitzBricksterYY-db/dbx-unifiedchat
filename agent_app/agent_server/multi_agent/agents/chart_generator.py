@@ -172,128 +172,13 @@ def _strip_sql_comments(sql: str) -> str:
     return "".join(out)
 
 
-def _is_identifier_char(ch: str) -> bool:
-    return ch.isalnum() or ch == "_"
+def _load_sqlglot() -> Tuple[type[Exception], Any, Any]:
+    try:
+        from sqlglot import ParseError, exp, parse_one  # pyright: ignore[reportMissingImports]
 
-
-def _keyword_matches(sql: str, start: int, keyword: str) -> bool:
-    end = start + len(keyword)
-    if sql[start:end].lower() != keyword:
-        return False
-    before = sql[start - 1] if start > 0 else ""
-    after = sql[end] if end < len(sql) else ""
-    return not _is_identifier_char(before) and not _is_identifier_char(after)
-
-
-def _scan_top_level_keyword_positions(sql: str, keywords: Sequence[str]) -> Dict[str, List[int]]:
-    """Locate top-level SQL keywords, ignoring nested subqueries and quoted text."""
-    positions: Dict[str, List[int]] = {keyword: [] for keyword in keywords}
-    i = 0
-    depth = 0
-    in_single = False
-    in_double = False
-    in_backtick = False
-    ordered_keywords = sorted(keywords, key=len, reverse=True)
-
-    while i < len(sql):
-        ch = sql[i]
-        nxt = sql[i + 1] if i + 1 < len(sql) else ""
-
-        if in_single:
-            if ch == "'" and nxt == "'":
-                i += 2
-                continue
-            if ch == "'":
-                in_single = False
-            i += 1
-            continue
-
-        if in_double:
-            if ch == '"':
-                in_double = False
-            i += 1
-            continue
-
-        if in_backtick:
-            if ch == "`":
-                in_backtick = False
-            i += 1
-            continue
-
-        if ch == "'":
-            in_single = True
-            i += 1
-            continue
-        if ch == '"':
-            in_double = True
-            i += 1
-            continue
-        if ch == "`":
-            in_backtick = True
-            i += 1
-            continue
-
-        if ch == "(":
-            depth += 1
-            i += 1
-            continue
-        if ch == ")":
-            depth = max(0, depth - 1)
-            i += 1
-            continue
-
-        if depth == 0:
-            matched = False
-            for keyword in ordered_keywords:
-                if _keyword_matches(sql, i, keyword):
-                    positions[keyword].append(i)
-                    i += len(keyword)
-                    matched = True
-                    break
-            if matched:
-                continue
-
-        i += 1
-
-    return positions
-
-
-def _extract_outer_query(sql: str) -> str:
-    """Return the outermost/final SELECT statement from a SQL string."""
-    cleaned = _strip_sql_comments(sql).strip().rstrip(";")
-    if not cleaned:
-        return ""
-
-    positions = _scan_top_level_keyword_positions(cleaned, ["select"])
-    top_level_selects = positions.get("select", [])
-    if not top_level_selects:
-        return cleaned
-    return cleaned[top_level_selects[-1] :].strip()
-
-
-def _top_level_clause_map(sql: str) -> Dict[str, str]:
-    """Extract top-level clause bodies for the outer query."""
-    clause_order = ["select", "from", "where", "group by", "having", "order by", "limit"]
-    positions = _scan_top_level_keyword_positions(sql, clause_order)
-    starts = {
-        clause: clause_positions[0]
-        for clause, clause_positions in positions.items()
-        if clause_positions
-    }
-    if not starts:
-        return {}
-
-    ordered = sorted(starts.items(), key=lambda item: item[1])
-    clause_map: Dict[str, str] = {}
-    for idx, (clause, start) in enumerate(ordered):
-        body_start = start + len(clause)
-        body_end = ordered[idx + 1][1] if idx + 1 < len(ordered) else len(sql)
-        clause_map[clause] = sql[body_start:body_end].strip()
-    return clause_map
-
-
-def _count_top_level_keyword(sql: str, keyword: str) -> int:
-    return len(_scan_top_level_keyword_positions(sql, [keyword]).get(keyword, []))
+        return ParseError, exp, parse_one
+    except ImportError:  # pragma: no cover - dependency is installed in normal environments
+        return ValueError, None, None
 
 
 class ChartGenerator:
@@ -624,59 +509,198 @@ Rules:
         sql = str(sql_query or "").strip()
         if not sql:
             return ""
+        parse_error, exp_module, parse_one_fn = _load_sqlglot()
+        if parse_one_fn and exp_module is not None:
+            try:
+                expression = parse_one_fn(sql)
+                summary = self._summarize_sql_expression(expression, exp_module)
+                if summary:
+                    return summary
+            except (parse_error, ValueError, TypeError) as exc:
+                logger.debug("sqlglot failed to summarize chart SQL: %s", exc)
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                logger.warning("Unexpected sqlglot error during chart SQL summary: %s", exc)
 
-        outer_query = _extract_outer_query(sql)
-        normalized = re.sub(r"\s+", " ", outer_query).strip().rstrip(";")
-        if not normalized:
-            return ""
-        lowered = normalized.lower()
-        clauses = _top_level_clause_map(normalized)
+        return self._fallback_sql_summary(sql)
 
-        def _compact(text: str, limit: int = 72) -> str:
-            text = re.sub(r"\s+", " ", text).strip()
-            if len(text) <= limit:
-                return text
-            return text[: limit - 3].rstrip() + "..."
+    def _summarize_sql_expression(self, expression: Any, exp_module: Any) -> str:
+        if isinstance(expression, exp_module.SetOperation):
+            return self._summarize_set_operation(expression, exp_module)
+        if isinstance(expression, exp_module.Select):
+            return self._summarize_select_expression(expression, exp_module)
+        select = expression.find(exp_module.Select)
+        if select:
+            return self._summarize_select_expression(select, exp_module)
+        return ""
 
+    def _summarize_select_expression(self, expression: Any, exp_module: Any) -> str:
         bits: List[str] = []
-        select_clause = clauses.get("select", "")
-        if re.search(r"^\s*distinct\b", select_clause, flags=re.IGNORECASE):
+        with_clause = expression.args.get("with_")
+        if with_clause and getattr(with_clause, "expressions", None):
+            cte_count = len(with_clause.expressions)
+            bits.append(f"{cte_count} CTE{'s' if cte_count != 1 else ''}")
+
+        if expression.args.get("distinct"):
             bits.append("uses DISTINCT")
 
-        if select_clause:
-            aggregates = re.findall(
-                r"\b(count|sum|avg|min|max|median|percentile(?:_approx)?|stddev(?:_pop|_samp)?)\s*\((.*?)\)",
-                select_clause,
-                flags=re.IGNORECASE,
-            )
-            if aggregates:
-                metric_bits = [f"{fn.lower()}({_compact(arg, 28)})" for fn, arg in aggregates[:3]]
-                suffix = " +" if len(aggregates) > 3 else ""
-                bits.append(f"aggregates {', '.join(metric_bits)}{suffix}")
+        aggregate_names = [self._compact_sql(agg.sql(), 28) for agg in expression.find_all(exp_module.AggFunc)]
+        if aggregate_names:
+            suffix = " +" if len(aggregate_names) > 3 else ""
+            bits.append(f"aggregates {', '.join(aggregate_names[:3])}{suffix}")
 
-        join_count = _count_top_level_keyword(normalized, "join")
+        join_count = len(expression.args.get("joins") or [])
         if join_count:
             bits.append(f"{join_count} join{'s' if join_count != 1 else ''}")
 
+        if expression.args.get("where"):
+            bits.append("has filters")
+        if expression.find(exp_module.Window):
+            bits.append("uses window functions")
+
+        group_clause = expression.args.get("group")
+        if group_clause and getattr(group_clause, "expressions", None):
+            group_fields = ", ".join(self._compact_sql(group.sql(), 24) for group in group_clause.expressions[:3])
+            suffix = " +" if len(group_clause.expressions) > 3 else ""
+            bits.append(f"grouped by {group_fields}{suffix}")
+
+        order_clause = expression.args.get("order")
+        if order_clause and getattr(order_clause, "expressions", None):
+            order_fields = ", ".join(self._compact_sql(item.sql(), 28) for item in order_clause.expressions[:2])
+            suffix = " +" if len(order_clause.expressions) > 2 else ""
+            bits.append(f"ordered by {order_fields}{suffix}")
+
+        limit_clause = expression.args.get("limit")
+        if limit_clause is not None:
+            limit_value = getattr(limit_clause, "expression", None)
+            if limit_value is not None:
+                bits.append(f"limit {limit_value.sql()}")
+
+        return "; ".join(bits[:5])[:260]
+
+    def _summarize_set_operation(self, expression: Any, exp_module: Any) -> str:
+        bits: List[str] = []
+        branches = self._flatten_set_operation_branches(expression, exp_module)
+        operation_label = self._set_operation_label(expression, exp_module)
+        bits.append(f"combines {len(branches)} SELECT branches via {operation_label}")
+
+        with_clause = expression.args.get("with_")
+        if with_clause and getattr(with_clause, "expressions", None):
+            cte_count = len(with_clause.expressions)
+            bits.append(f"{cte_count} CTE{'s' if cte_count != 1 else ''}")
+
+        if expression.find(exp_module.Window):
+            bits.append("uses window functions")
+
+        order_clause = expression.args.get("order")
+        if order_clause and getattr(order_clause, "expressions", None):
+            order_fields = ", ".join(self._compact_sql(item.sql(), 28) for item in order_clause.expressions[:2])
+            suffix = " +" if len(order_clause.expressions) > 2 else ""
+            bits.append(f"ordered by {order_fields}{suffix}")
+
+        limit_clause = expression.args.get("limit")
+        if limit_clause is not None:
+            limit_value = getattr(limit_clause, "expression", None)
+            if limit_value is not None:
+                bits.append(f"limit {limit_value.sql()}")
+
+        aggregate_names: List[str] = []
+        for branch in branches:
+            for agg in branch.find_all(exp_module.AggFunc):
+                agg_sql = self._compact_sql(agg.sql(), 28)
+                if agg_sql not in aggregate_names:
+                    aggregate_names.append(agg_sql)
+                if len(aggregate_names) >= 3:
+                    break
+            if len(aggregate_names) >= 3:
+                break
+        if aggregate_names:
+            bits.append(f"branch aggregates {', '.join(aggregate_names)}")
+
+        return "; ".join(bits[:5])[:260]
+
+    def _flatten_set_operation_branches(self, expression: Any, exp_module: Any) -> List[Any]:
+        if not isinstance(expression, exp_module.SetOperation):
+            return []
+
+        branches: List[Any] = []
+        for child in (expression.this, expression.expression):
+            if isinstance(child, type(expression)):
+                branches.extend(self._flatten_set_operation_branches(child, exp_module))
+            elif isinstance(child, exp_module.Select):
+                branches.append(child)
+            else:
+                select = child.find(exp_module.Select) if child else None
+                if select:
+                    branches.append(select)
+        return branches
+
+    def _set_operation_label(self, expression: Any, exp_module: Any) -> str:
+        if isinstance(expression, exp_module.Union):
+            return "UNION" if expression.args.get("distinct") else "UNION ALL"
+        if isinstance(expression, exp_module.Intersect):
+            return "INTERSECT"
+        if isinstance(expression, exp_module.Except):
+            return "EXCEPT"
+        return expression.key.upper() if getattr(expression, "key", None) else "set operation"
+
+    def _fallback_sql_summary(self, sql_query: str) -> str:
+        normalized = re.sub(r"\s+", " ", _strip_sql_comments(sql_query)).strip().rstrip(";")
+        if not normalized:
+            return ""
+        lowered = normalized.lower()
+        bits: List[str] = []
+
+        if re.search(r"\bunion all\b", lowered):
+            bits.append("combines result sets via UNION ALL")
+        elif re.search(r"\bunion\b", lowered):
+            bits.append("combines result sets via UNION")
+        elif re.search(r"\bintersect\b", lowered):
+            bits.append("combines result sets via INTERSECT")
+        elif re.search(r"\bexcept\b", lowered):
+            bits.append("combines result sets via EXCEPT")
+
+        if re.search(r"\bwith\b", lowered):
+            bits.append("uses CTEs")
+        if re.search(r"\bselect\s+distinct\b", lowered):
+            bits.append("uses DISTINCT")
+
+        aggregates = re.findall(
+            r"\b(count|sum|avg|min|max|median|percentile(?:_approx)?|stddev(?:_pop|_samp)?)\s*\((.*?)\)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if aggregates:
+            metric_bits = [f"{fn.lower()}({self._compact_sql(arg, 28)})" for fn, arg in aggregates[:3]]
+            suffix = " +" if len(aggregates) > 3 else ""
+            bits.append(f"aggregates {', '.join(metric_bits)}{suffix}")
+
+        join_count = len(re.findall(r"\bjoin\b", lowered))
+        if join_count:
+            bits.append(f"{join_count} join{'s' if join_count != 1 else ''}")
+        if re.search(r"\bwhere\b", lowered):
+            bits.append("has filters")
         if re.search(r"\bover\s*\(", lowered):
             bits.append("uses window functions")
 
-        if clauses.get("where"):
-            bits.append("has filters")
+        group_match = re.search(r"\bgroup by\b\s+(.*?)(?=\bhaving\b|\border by\b|\blimit\b|$)", normalized, flags=re.IGNORECASE)
+        if group_match:
+            bits.append(f"grouped by {self._compact_sql(group_match.group(1), 72)}")
 
-        group_clause = clauses.get("group by", "")
-        if group_clause:
-            bits.append(f"grouped by {_compact(group_clause)}")
+        order_match = re.search(r"\border by\b\s+(.*?)(?=\blimit\b|$)", normalized, flags=re.IGNORECASE)
+        if order_match:
+            bits.append(f"ordered by {self._compact_sql(order_match.group(1), 72)}")
 
-        order_clause = clauses.get("order by", "")
-        if order_clause:
-            bits.append(f"ordered by {_compact(order_clause)}")
-
-        limit_match = re.match(r"(\d+)", clauses.get("limit", ""))
+        limit_match = re.search(r"\blimit\b\s+(\d+)", lowered)
         if limit_match:
             bits.append(f"limit {limit_match.group(1)}")
 
         return "; ".join(bits[:5])[:260]
+
+    def _compact_sql(self, text: str, limit: int = 72) -> str:
+        compacted = re.sub(r"\s+", " ", text).strip()
+        if len(compacted) <= limit:
+            return compacted
+        return compacted[: limit - 3].rstrip() + "..."
 
     # ------------------------------------------------------------------
     # Stage 2: Python validation + assembly

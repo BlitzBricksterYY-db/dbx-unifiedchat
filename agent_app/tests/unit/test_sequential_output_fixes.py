@@ -3,6 +3,8 @@ from types import SimpleNamespace
 import types
 import sys
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -49,6 +51,7 @@ from agent_server.multi_agent.agents.chart_generator import (
     ChartGenerator,
     SUPPORTED_CHART_TYPES,
     SUPPORTED_TRANSFORMS,
+    _load_sqlglot,
 )
 from agent_server.multi_agent.agents.sql_execution import _append_remaining_skipped_artifacts
 from agent_server.multi_agent.agents.summarize import (
@@ -289,6 +292,66 @@ def test_chart_generator_prompt_lists_supported_capabilities():
         assert transform_type in prompt
 
 
+def test_chart_generator_sql_summary_prefers_outer_cte_query_shape():
+    generator = ChartGenerator(llm=None)  # type: ignore[arg-type]
+    _parse_error, exp_module, parse_one_fn = _load_sqlglot()
+    if parse_one_fn is None or exp_module is None:
+        pytest.skip("sqlglot is not importable in this pytest harness")
+
+    summary = generator._summarize_sql_expression(
+        parse_one_fn(
+        """
+        WITH member_totals AS (
+            SELECT patient_id, SUM(paid_amount) AS total_paid
+            FROM claims
+            GROUP BY patient_id
+        ),
+        ranked_members AS (
+            SELECT patient_id, total_paid
+            FROM member_totals
+            WHERE total_paid > 100
+        )
+        SELECT patient_id, total_paid
+        FROM ranked_members
+        ORDER BY total_paid DESC
+        LIMIT 10
+        """
+        ),
+        exp_module,
+    )
+
+    assert "2 CTEs" in summary
+    assert "ordered by total_paid DESC" in summary
+    assert "limit 10" in summary
+    assert "grouped by patient_id" not in summary
+
+
+def test_chart_generator_sql_summary_handles_union_all():
+    generator = ChartGenerator(llm=None)  # type: ignore[arg-type]
+    _parse_error, exp_module, parse_one_fn = _load_sqlglot()
+    if parse_one_fn is None or exp_module is None:
+        pytest.skip("sqlglot is not importable in this pytest harness")
+
+    summary = generator._summarize_sql_expression(
+        parse_one_fn(
+        """
+        SELECT service_year, paid_amount
+        FROM medical_claims
+        UNION ALL
+        SELECT service_year, paid_amount
+        FROM pharmacy_claims
+        ORDER BY service_year
+        LIMIT 25
+        """
+        ),
+        exp_module,
+    )
+
+    assert "combines 2 SELECT branches via UNION ALL" in summary
+    assert "ordered by service_year" in summary
+    assert "limit 25" in summary
+
+
 def test_chart_generator_without_llm_prefers_time_series_rollup():
     generator = ChartGenerator(llm=None)  # type: ignore[arg-type]
 
@@ -347,6 +410,7 @@ def test_build_visualization_workspace_payload_groups_table_and_chart():
         entry=entry,
         chart_payload=chart_payload,
         preview_rows=entry["result"]["result"],
+        full_rows=entry["result"]["result"],
         source_row_count=2,
         total_entries=1,
     )
