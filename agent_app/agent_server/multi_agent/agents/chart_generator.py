@@ -109,6 +109,193 @@ def _json_default(o: Any) -> Any:
     raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 
+def _strip_sql_comments(sql: str) -> str:
+    """Remove SQL comments while preserving quoted strings."""
+    out: List[str] = []
+    i = 0
+    in_single = False
+    in_double = False
+    in_backtick = False
+    length = len(sql)
+
+    while i < length:
+        ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < length else ""
+
+        if in_single:
+            out.append(ch)
+            if ch == "'" and nxt == "'":
+                out.append(nxt)
+                i += 2
+                continue
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+
+        if in_double:
+            out.append(ch)
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+
+        if in_backtick:
+            out.append(ch)
+            if ch == "`":
+                in_backtick = False
+            i += 1
+            continue
+
+        if ch == "-" and nxt == "-":
+            i += 2
+            while i < length and sql[i] not in "\r\n":
+                i += 1
+            continue
+
+        if ch == "/" and nxt == "*":
+            i += 2
+            while i + 1 < length and not (sql[i] == "*" and sql[i + 1] == "/"):
+                i += 1
+            i += 2 if i + 1 < length else 1
+            continue
+
+        out.append(ch)
+        if ch == "'":
+            in_single = True
+        elif ch == '"':
+            in_double = True
+        elif ch == "`":
+            in_backtick = True
+        i += 1
+
+    return "".join(out)
+
+
+def _is_identifier_char(ch: str) -> bool:
+    return ch.isalnum() or ch == "_"
+
+
+def _keyword_matches(sql: str, start: int, keyword: str) -> bool:
+    end = start + len(keyword)
+    if sql[start:end].lower() != keyword:
+        return False
+    before = sql[start - 1] if start > 0 else ""
+    after = sql[end] if end < len(sql) else ""
+    return not _is_identifier_char(before) and not _is_identifier_char(after)
+
+
+def _scan_top_level_keyword_positions(sql: str, keywords: Sequence[str]) -> Dict[str, List[int]]:
+    """Locate top-level SQL keywords, ignoring nested subqueries and quoted text."""
+    positions: Dict[str, List[int]] = {keyword: [] for keyword in keywords}
+    i = 0
+    depth = 0
+    in_single = False
+    in_double = False
+    in_backtick = False
+    ordered_keywords = sorted(keywords, key=len, reverse=True)
+
+    while i < len(sql):
+        ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < len(sql) else ""
+
+        if in_single:
+            if ch == "'" and nxt == "'":
+                i += 2
+                continue
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+
+        if in_double:
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+
+        if in_backtick:
+            if ch == "`":
+                in_backtick = False
+            i += 1
+            continue
+
+        if ch == "'":
+            in_single = True
+            i += 1
+            continue
+        if ch == '"':
+            in_double = True
+            i += 1
+            continue
+        if ch == "`":
+            in_backtick = True
+            i += 1
+            continue
+
+        if ch == "(":
+            depth += 1
+            i += 1
+            continue
+        if ch == ")":
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+
+        if depth == 0:
+            matched = False
+            for keyword in ordered_keywords:
+                if _keyword_matches(sql, i, keyword):
+                    positions[keyword].append(i)
+                    i += len(keyword)
+                    matched = True
+                    break
+            if matched:
+                continue
+
+        i += 1
+
+    return positions
+
+
+def _extract_outer_query(sql: str) -> str:
+    """Return the outermost/final SELECT statement from a SQL string."""
+    cleaned = _strip_sql_comments(sql).strip().rstrip(";")
+    if not cleaned:
+        return ""
+
+    positions = _scan_top_level_keyword_positions(cleaned, ["select"])
+    top_level_selects = positions.get("select", [])
+    if not top_level_selects:
+        return cleaned
+    return cleaned[top_level_selects[-1] :].strip()
+
+
+def _top_level_clause_map(sql: str) -> Dict[str, str]:
+    """Extract top-level clause bodies for the outer query."""
+    clause_order = ["select", "from", "where", "group by", "having", "order by", "limit"]
+    positions = _scan_top_level_keyword_positions(sql, clause_order)
+    starts = {
+        clause: clause_positions[0]
+        for clause, clause_positions in positions.items()
+        if clause_positions
+    }
+    if not starts:
+        return {}
+
+    ordered = sorted(starts.items(), key=lambda item: item[1])
+    clause_map: Dict[str, str] = {}
+    for idx, (clause, start) in enumerate(ordered):
+        body_start = start + len(clause)
+        body_end = ordered[idx + 1][1] if idx + 1 < len(ordered) else len(sql)
+        clause_map[clause] = sql[body_start:body_end].strip()
+    return clause_map
+
+
+def _count_top_level_keyword(sql: str, keyword: str) -> int:
+    return len(_scan_top_level_keyword_positions(sql, [keyword]).get(keyword, []))
+
+
 class ChartGenerator:
     """Generates ECharts-compatible chart specs from query result data."""
 
@@ -435,19 +622,15 @@ Rules:
 
     def _summarize_sql(self, sql_query: Any) -> str:
         sql = str(sql_query or "").strip()
-        if not sql or sql.startswith("--"):
+        if not sql:
             return ""
 
-        normalized = re.sub(r"\s+", " ", sql).strip().rstrip(";")
+        outer_query = _extract_outer_query(sql)
+        normalized = re.sub(r"\s+", " ", outer_query).strip().rstrip(";")
+        if not normalized:
+            return ""
         lowered = normalized.lower()
-
-        def _clause(name: str) -> str:
-            match = re.search(
-                rf"\b{name}\b\s+(.*?)(?=\bfrom\b|\bwhere\b|\bgroup by\b|\bhaving\b|\border by\b|\blimit\b|$)",
-                normalized,
-                flags=re.IGNORECASE,
-            )
-            return match.group(1).strip() if match else ""
+        clauses = _top_level_clause_map(normalized)
 
         def _compact(text: str, limit: int = 72) -> str:
             text = re.sub(r"\s+", " ", text).strip()
@@ -456,8 +639,8 @@ Rules:
             return text[: limit - 3].rstrip() + "..."
 
         bits: List[str] = []
-        select_clause = _clause("select")
-        if "distinct" in lowered:
+        select_clause = clauses.get("select", "")
+        if re.search(r"^\s*distinct\b", select_clause, flags=re.IGNORECASE):
             bits.append("uses DISTINCT")
 
         if select_clause:
@@ -471,25 +654,25 @@ Rules:
                 suffix = " +" if len(aggregates) > 3 else ""
                 bits.append(f"aggregates {', '.join(metric_bits)}{suffix}")
 
-        join_count = len(re.findall(r"\bjoin\b", lowered))
+        join_count = _count_top_level_keyword(normalized, "join")
         if join_count:
             bits.append(f"{join_count} join{'s' if join_count != 1 else ''}")
 
         if re.search(r"\bover\s*\(", lowered):
             bits.append("uses window functions")
 
-        if re.search(r"\bwhere\b", lowered):
+        if clauses.get("where"):
             bits.append("has filters")
 
-        group_clause = _clause("group by")
+        group_clause = clauses.get("group by", "")
         if group_clause:
             bits.append(f"grouped by {_compact(group_clause)}")
 
-        order_clause = _clause("order by")
+        order_clause = clauses.get("order by", "")
         if order_clause:
             bits.append(f"ordered by {_compact(order_clause)}")
 
-        limit_match = re.search(r"\blimit\b\s+(\d+)", lowered)
+        limit_match = re.match(r"(\d+)", clauses.get("limit", ""))
         if limit_match:
             bits.append(f"limit {limit_match.group(1)}")
 
