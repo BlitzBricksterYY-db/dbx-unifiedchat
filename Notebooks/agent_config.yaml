@@ -1,0 +1,32 @@
+catalog_name: databricks_c3od_poc
+schema_name: multi_agent_genie
+sql_warehouse_id: cca0b29ed7524730
+genie_space_ids:
+- 01f072dbd668159d99934dfd3b17f544
+- 01f08f4d1f5f172ea825ec8c9a3c6064
+- 01f073c5476313fe8f51966e3ce85bd7
+- 01f07795f6981dc4a99d62c9fc7c2caa
+- 01f08a9fd9ca125a986d01c1a7a5b2fe
+volume_name: volume
+enriched_docs_table: enriched_genie_docs
+source_table: enriched_genie_docs_chunks
+uc_function_names:
+- get_space_summary
+- get_table_overview
+- get_column_detail
+- get_space_instructions
+- get_space_details
+llm_endpoint: databricks-claude-sonnet-4-5
+llm_endpoint_clarification: databricks-claude-haiku-4-5
+llm_endpoint_planning: databricks-claude-sonnet-4-5
+llm_endpoint_sql_synthesis_table: databricks-claude-sonnet-4-5
+llm_endpoint_sql_synthesis_genie: databricks-claude-sonnet-4-5
+llm_endpoint_execution: databricks-claude-haiku-4-5
+llm_endpoint_summarize: databricks-claude-haiku-4-5
+sample_size: 20
+max_unique_values: 20
+vs_endpoint_name: genie_multi_agent_vs
+embedding_model: databricks-gte-large-en
+lakebase_instance_name: multi-agent-genie-system-state-db
+lakebase_embedding_endpoint: databricks-gte-large-en
+lakebase_embedding_dims: 1024

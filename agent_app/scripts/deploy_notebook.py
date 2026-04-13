@@ -139,6 +139,10 @@ for cmd in commands:
 
 # COMMAND ----------
 
+config
+
+# COMMAND ----------
+
 # DBTITLE 1,SDK-based validate and deploy
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.apps import App, AppDeployment, AppDeploymentMode

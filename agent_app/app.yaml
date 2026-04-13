@@ -16,13 +16,13 @@ env:
   - name: CHAT_PROXY_TIMEOUT_SECONDS
     value: "300"
   - name: CATALOG_NAME
-    value: "serverless_dbx_unifiedchat_dev_catalog"
+    value: "databricks_c3od_poc"
   - name: SCHEMA_NAME
     value: "multi_agent_genie"
   - name: DATA_CATALOG_NAME
-    value: "healthverity_claims_sample_patient_dataset_dev"
+    value: "genie"
   - name: DATA_SCHEMA_NAME
-    value: "hv_claims_sample"
+    value: "dbo"
   - name: UC_FUNCTION_NAMES
     value: "get_space_summary,get_table_overview,get_column_detail,get_space_instructions,get_space_details"
   - name: LLM_ENDPOINT
@@ -38,9 +38,9 @@ env:
   - name: LLM_ENDPOINT_EXECUTION
     value: "databricks-claude-haiku-4-5"
   - name: LLM_ENDPOINT_SUMMARIZE
-    value: "databricks-gpt-5-4"
+    value: "databricks-claude-sonnet-4-5"
   - name: LLM_ENDPOINT_DETECT_CODE_LOOKUP
-    value: "databricks-gpt-5-4-mini"
+    value: "databricks-claude-haiku-4-5"
   - name: EMBEDDING_MODEL
     value: "databricks-gte-large-en"
   - name: VS_ENDPOINT_NAME
@@ -56,17 +56,17 @@ env:
   - name: SOURCE_TABLE
     value: "enriched_genie_docs_chunks"
   - name: SQL_WAREHOUSE_ID
-    value: "32f4d1aae5fcf8ca"
+    value: "cca0b29ed7524730"
   - name: GENIE_SPACE_IDS
-    value: "01f11b27d1121e2bb00d6ecd846b1988,01f11b27d23a1ab195fa7ba8efc06d13,01f11b27d3ea149694cf608c3d278673"
+    value: "01f072dbd668159d99934dfd3b17f544,01f08f4d1f5f172ea825ec8c9a3c6064,01f073c5476313fe8f51966e3ce85bd7,01f07795f6981dc4a99d62c9fc7c2caa,01f08a9fd9ca125a986d01c1a7a5b2fe"
   - name: LAKEBASE_INSTANCE_NAME
-    valueFrom: database
+    value: "c3od-agent-genie-system-state-db-dev"
   - name: LAKEBASE_EMBEDDING_ENDPOINT
     value: "databricks-gte-large-en"
   - name: LAKEBASE_EMBEDDING_DIMS
     value: "1024"
   - name: MLFLOW_EXPERIMENT_ID
-    valueFrom: experiment
+    value: "1512532220879769"
   - name: MLFLOW_TRACKING_URI
     value: "databricks"
   - name: MLFLOW_REGISTRY_URI
