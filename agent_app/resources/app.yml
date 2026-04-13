@@ -65,12 +65,6 @@ resources:
             value: ${var.mlflow_tracking_uri}
           - name: MLFLOW_REGISTRY_URI
             value: ${var.mlflow_registry_uri}
-          - name: AGENT_PREWARM_ON_STARTUP
-            value: ${var.agent_prewarm_on_startup}
-          - name: AGENT_PREWARM_SPACE_CONTEXT
-            value: ${var.agent_prewarm_space_context}
-          - name: AGENT_KEEP_WARM_INTERVAL_SECONDS
-            value: ${var.agent_keep_warm_interval_seconds}
 
       resources:
         - name: 'experiment'
@@ -99,6 +93,67 @@ resources:
           serving_endpoint:
             name: ${var.embedding_model}
             permission: 'CAN_QUERY'
+
+        # Genie spaces
+        - name: 'genie-space-1'
+          genie_space:
+            name: 'genie-space-1'
+            space_id: ${var.genie_space_id_1}
+            permission: 'CAN_RUN'
+        - name: 'genie-space-2'
+          genie_space:
+            name: 'genie-space-2'
+            space_id: ${var.genie_space_id_2}
+            permission: 'CAN_RUN'
+        - name: 'genie-space-3'
+          genie_space:
+            name: 'genie-space-3'
+            space_id: ${var.genie_space_id_3}
+            permission: 'CAN_RUN'
+        - name: 'genie-space-4'
+          genie_space:
+            name: 'genie-space-4'
+            space_id: ${var.genie_space_id_4}
+            permission: 'CAN_RUN'
+        - name: 'genie-space-5'
+          genie_space:
+            name: 'genie-space-5'
+            space_id: ${var.genie_space_id_5}
+            permission: 'CAN_RUN'
+
+        # UC functions
+        - name: 'uc-fn-get-space-summary'
+          uc_securable:
+            securable_full_name: '${var.catalog}.${var.schema}.get_space_summary'
+            securable_type: 'FUNCTION'
+            permission: 'EXECUTE'
+        - name: 'uc-fn-get-table-overview'
+          uc_securable:
+            securable_full_name: '${var.catalog}.${var.schema}.get_table_overview'
+            securable_type: 'FUNCTION'
+            permission: 'EXECUTE'
+        - name: 'uc-fn-get-column-detail'
+          uc_securable:
+            securable_full_name: '${var.catalog}.${var.schema}.get_column_detail'
+            securable_type: 'FUNCTION'
+            permission: 'EXECUTE'
+        - name: 'uc-fn-get-space-instructions'
+          uc_securable:
+            securable_full_name: '${var.catalog}.${var.schema}.get_space_instructions'
+            securable_type: 'FUNCTION'
+            permission: 'EXECUTE'
+        - name: 'uc-fn-get-space-details'
+          uc_securable:
+            securable_full_name: '${var.catalog}.${var.schema}.get_space_details'
+            securable_type: 'FUNCTION'
+            permission: 'EXECUTE'
+
+        # Lakebase (short-term + long-term memory)
+        - name: 'database'
+          database:
+            database_name: 'databricks_postgres'
+            instance_name: ${resources.database_instances.app_state_db.name}
+            permission: 'CAN_CONNECT_AND_CREATE'
 
         # SQL warehouse
         - name: 'sql-warehouse'

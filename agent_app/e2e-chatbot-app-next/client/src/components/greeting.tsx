@@ -15,7 +15,7 @@ export const Greeting = () => {
         className="mb-6"
       >
         <img
-          src="https://raw.githubusercontent.com/databricks-solutions/dbx-unifiedchat/main/docs/logos/dbx-unifiedchat-logo-pacman-eating-data.png"
+          src="https://i.postimg.cc/h4dnNdHq/Vector-style-C3OD-lo.png"
           alt="dbx-unifiedchat logo"
           className="h-24 w-auto drop-shadow-lg"
         />
