@@ -19,11 +19,18 @@ test.describe('Chat API Proxy', () => {
       data: {
         id: chatId,
         message: {
+          id: crypto.randomUUID(),
           role: 'user',
-          content: 'What diagnoses are most common?',
+          parts: [{ type: 'text', text: 'What diagnoses are most common?' }],
         },
         selectedChatModel: 'chat-model',
         selectedVisibilityType: 'private',
+        agentSettings: {
+          executionMode: 'parallel',
+          synthesisRoute: 'auto',
+          clarificationSensitivity: 'medium',
+          countOnly: false,
+        },
       },
     });
 

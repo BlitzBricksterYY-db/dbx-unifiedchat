@@ -294,17 +294,6 @@ class SQLExecutionAgent:
                 result_data = pandas_df.to_markdown(index=False)
             # else: dict format (default) - already in correct format
             
-            # Step 7: Display preview
-            print(f"{'='*80}")
-            print("📄 RESULTS PREVIEW (first 10 rows)")
-            print(f"{'='*80}")
-            # Preview first 10 rows
-            for i, row in enumerate(result_data[:10]):
-                if return_format == "markdown":
-                    break  # Don't print individual rows for markdown
-                print(f"Row {i+1}: {row}")
-            print(f"{'='*80}\n")
-            
             return {
                 "success": True,
                 "sql": extracted_sql,

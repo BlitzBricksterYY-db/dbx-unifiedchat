@@ -110,6 +110,8 @@ export function AgentSettingsPanel({
   const [open, setOpen] = useState(false);
   const [draftSettings, setDraftSettings] = useState(() => normalizeSettings(settings));
   const originalSettingsRef = useRef<AgentSettings>(normalizeSettings(settings));
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [panelMaxHeight, setPanelMaxHeight] = useState<number | null>(null);
 
   useEffect(() => {
     if (!open) {
@@ -142,6 +144,40 @@ export function AgentSettingsPanel({
     setOpen(false);
   }, [draftSettings, onConfirm]);
 
+  useEffect(() => {
+    if (!open) {
+      setPanelMaxHeight(null);
+      return;
+    }
+
+    const updatePanelMaxHeight = () => {
+      const containerRect = containerRef.current?.getBoundingClientRect();
+      if (!containerRect) return;
+
+      const viewportPadding = 16;
+      const triggerGap = 8;
+      const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+      const availableHeight = Math.max(
+        0,
+        Math.min(
+          containerRect.top - viewportPadding - triggerGap,
+          viewportHeight - viewportPadding * 2,
+        ),
+      );
+
+      setPanelMaxHeight(availableHeight);
+    };
+
+    updatePanelMaxHeight();
+    window.addEventListener('resize', updatePanelMaxHeight);
+    window.visualViewport?.addEventListener('resize', updatePanelMaxHeight);
+
+    return () => {
+      window.removeEventListener('resize', updatePanelMaxHeight);
+      window.visualViewport?.removeEventListener('resize', updatePanelMaxHeight);
+    };
+  }, [open]);
+
   const normalizedDraftSettings = normalizeSettings(draftSettings);
   const clarificationSensitivityIndex = Math.max(
     0,
@@ -151,7 +187,7 @@ export function AgentSettingsPanel({
   );
 
   return (
-    <div className="relative z-40">
+    <div ref={containerRef} className="relative z-40">
       <button
         type="button"
         onClick={handleOpenChange}
@@ -182,7 +218,8 @@ export function AgentSettingsPanel({
         <div
           id="agent-settings-panel"
           data-testid="agent-settings-panel"
-          className="absolute bottom-full right-0 z-[60] mb-2 w-64 rounded-lg border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+          className="absolute bottom-full right-0 z-[60] mb-2 w-64 overflow-y-auto rounded-lg border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+          style={panelMaxHeight ? { maxHeight: `${panelMaxHeight}px` } : undefined}
         >
           <div className="mb-3 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
             Agent Settings

@@ -16,10 +16,13 @@ import { DatabricksMessageCitationStreamdownIntegration } from '../databricks-me
 import { Streamdown } from 'streamdown';
 import { PaginatedTable } from './paginated-table';
 import { TabWidget } from './tab-widget';
-import { parseChartSpec } from './chart-spec';
+import { parseChartSpec, parseChartWorkspace } from './chart-spec';
 
 const InteractiveChart = lazy(() =>
   import('./interactive-chart').then((m) => ({ default: m.InteractiveChart })),
+);
+const VisualizationWorkspace = lazy(() =>
+  import('./visualization-workspace').then((m) => ({ default: m.VisualizationWorkspace })),
 );
 
 function encodeTabsToBase64(tabs: Array<{ title: string; content: string }>): string {
@@ -227,6 +230,19 @@ function EChartsCodeBlock(props: Record<string, unknown>) {
         <ChartErrorBoundary>
           <Suspense fallback={<div className="h-[400px] animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />}>
             <InteractiveChart spec={spec} />
+          </Suspense>
+        </ChartErrorBoundary>
+      );
+    }
+  }
+
+  if (className === 'language-viz-workspace' && children) {
+    const workspace = parseChartWorkspace(children);
+    if (workspace) {
+      return (
+        <ChartErrorBoundary>
+          <Suspense fallback={<div className="h-[240px] animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />}>
+            <VisualizationWorkspace workspace={workspace} />
           </Suspense>
         </ChartErrorBoundary>
       );

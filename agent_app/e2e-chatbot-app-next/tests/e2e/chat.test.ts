@@ -1,5 +1,6 @@
 import { test, expect } from '../fixtures';
 import { ChatPage } from '../pages/chat';
+import { mockResponsesApiMultiDeltaTextStream } from '../helpers';
 
 function buildUiMessageStream(chunks: string[]) {
   const messageId = crypto.randomUUID();
@@ -22,11 +23,138 @@ function buildChartStream(spec: Record<string, unknown>) {
   ]);
 }
 
+function buildWorkspaceStream(workspace: Record<string, unknown>) {
+  return buildUiMessageStream([
+    `Here is a workspace.\n\n\`\`\`viz-workspace\n${JSON.stringify(workspace)}\n\`\`\`\n`,
+  ]);
+}
+
+async function clearAppLocalStorage(page: import('@playwright/test').Page) {
+  await page.goto('/');
+  await page.waitForLoadState('networkidle');
+  await page.evaluate(() => {
+    localStorage.clear();
+  });
+}
+
+async function mockThreadApi(
+  page: import('@playwright/test').Page,
+  getAssistantText: (args: {
+    userText: string;
+    requestIndex: number;
+    chatId: string;
+  }) => string = ({ userText }) => `Mock response for: ${userText}`,
+) {
+  const chatMessages = new Map<
+    string,
+    Array<{
+      id: string;
+      chatId: string;
+      role: 'user' | 'assistant';
+      parts: Array<{ type: 'text'; text: string }>;
+      attachments: [];
+      createdAt: string;
+      traceId: string | null;
+    }>
+  >();
+  let requestCount = 0;
+
+  await page.route('**/api/chat*', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.fallback();
+      return;
+    }
+
+    requestCount += 1;
+    const body = route.request().postDataJSON() as {
+      id: string;
+      message?: {
+        id?: string;
+        parts?: Array<{ type?: string; text?: string }>;
+      };
+    };
+    const chatId = body.id;
+    const userText =
+      body.message?.parts?.find((part) => part.type === 'text')?.text ??
+      `request ${requestCount}`;
+    const assistantText = getAssistantText({
+      userText,
+      requestIndex: requestCount,
+      chatId,
+    });
+    const messages = chatMessages.get(chatId) ?? [];
+
+    messages.push({
+      id: body.message?.id ?? crypto.randomUUID(),
+      chatId,
+      role: 'user',
+      parts: [{ type: 'text', text: userText }],
+      attachments: [],
+      createdAt: new Date().toISOString(),
+      traceId: null,
+    });
+    messages.push({
+      id: crypto.randomUUID(),
+      chatId,
+      role: 'assistant',
+      parts: [{ type: 'text', text: assistantText }],
+      attachments: [],
+      createdAt: new Date().toISOString(),
+      traceId: `tr-${requestCount}`,
+    });
+    chatMessages.set(chatId, messages);
+
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: buildUiMessageStream([assistantText]),
+    });
+  });
+
+  await page.route('**/api/chat/*', async (route) => {
+    const chatId = route.request().url().split('/').pop() ?? crypto.randomUUID();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        id: chatId,
+        createdAt: new Date().toISOString(),
+        title: 'Mock thread',
+        userId: 'ada-id',
+        visibility: 'private',
+        executionMode: 'parallel',
+        synthesisRoute: 'auto',
+        clarificationSensitivity: 'medium',
+        countOnly: false,
+        lastContext: null,
+      }),
+    });
+  });
+
+  await page.route('**/api/messages/*', async (route) => {
+    const chatId = route.request().url().split('/').pop() ?? crypto.randomUUID();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(chatMessages.get(chatId) ?? []),
+    });
+  });
+
+  await page.route('**/api/feedback/chat/*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({}),
+    });
+  });
+}
+
 test.describe('Chat', () => {
   test('should send a message and receive a streaming response', async ({
     adaContext,
   }) => {
     const chatPage = new ChatPage(adaContext.page);
+    await mockThreadApi(adaContext.page);
     await chatPage.createNewChat();
 
     await chatPage.sendUserMessage('What is the most common diagnosis code?');
@@ -43,6 +171,7 @@ test.describe('Chat', () => {
     adaContext,
   }) => {
     const chatPage = new ChatPage(adaContext.page);
+    await mockThreadApi(adaContext.page);
     await chatPage.createNewChat();
 
     await chatPage.sendUserMessage('Show me enrollment trends');
@@ -53,6 +182,7 @@ test.describe('Chat', () => {
 
   test('should display user message in the chat', async ({ adaContext }) => {
     const chatPage = new ChatPage(adaContext.page);
+    await mockThreadApi(adaContext.page);
     await chatPage.createNewChat();
 
     const userText = 'How many patients are in the dataset?';
@@ -69,47 +199,109 @@ test.describe('Interactive Charts', () => {
   }) => {
     const { page } = adaContext;
     const chatPage = new ChatPage(page);
+    const assistantContent = `Here is a chart.\n\n\`\`\`echarts-chart\n${JSON.stringify({
+      config: {
+        chartType: 'dualAxis',
+        title: 'Monthly spend and claims',
+        xAxisField: 'service_month',
+        series: [
+          {
+            field: 'claim_count',
+            name: 'Claim Count',
+            format: 'number',
+            chartType: 'bar',
+            axis: 'primary',
+          },
+          {
+            field: 'paid_amount',
+            name: 'Paid Amount',
+            format: 'currency',
+            chartType: 'line',
+            axis: 'secondary',
+          },
+        ],
+        supportedChartTypes: ['dualAxis', 'bar', 'line'],
+        toolbox: true,
+      },
+      chartData: [
+        { service_month: '2024-01', claim_count: 10, paid_amount: 1200 },
+        { service_month: '2024-02', claim_count: 15, paid_amount: 1800 },
+      ],
+      downloadData: [
+        { service_month: '2024-01', claim_count: 10, paid_amount: 1200 },
+        { service_month: '2024-02', claim_count: 15, paid_amount: 1800 },
+      ],
+      totalRows: 2,
+      aggregated: false,
+      aggregationNote: null,
+    })}\n\`\`\`\n`;
 
     await page.route('**/api/chat*', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback();
+        return;
+      }
+
       await route.fulfill({
         status: 200,
         contentType: 'text/event-stream',
-        body: buildChartStream({
-          config: {
-            chartType: 'dualAxis',
-            title: 'Monthly spend and claims',
-            xAxisField: 'service_month',
-            series: [
-              {
-                field: 'claim_count',
-                name: 'Claim Count',
-                format: 'number',
-                chartType: 'bar',
-                axis: 'primary',
-              },
-              {
-                field: 'paid_amount',
-                name: 'Paid Amount',
-                format: 'currency',
-                chartType: 'line',
-                axis: 'secondary',
-              },
-            ],
-            supportedChartTypes: ['dualAxis', 'bar', 'line'],
-            toolbox: true,
-          },
-          chartData: [
-            { service_month: '2024-01', claim_count: 10, paid_amount: 1200 },
-            { service_month: '2024-02', claim_count: 15, paid_amount: 1800 },
-          ],
-          downloadData: [
-            { service_month: '2024-01', claim_count: 10, paid_amount: 1200 },
-            { service_month: '2024-02', claim_count: 15, paid_amount: 1800 },
-          ],
-          totalRows: 2,
-          aggregated: false,
-          aggregationNote: null,
+        body: buildUiMessageStream([assistantContent]),
+      });
+    });
+
+    await page.route('**/api/chat/*', async (route) => {
+      const chatId = route.request().url().split('/').pop() ?? crypto.randomUUID();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: chatId,
+          createdAt: new Date().toISOString(),
+          title: 'Monthly spend and claims',
+          userId: 'ada-id',
+          visibility: 'private',
+          executionMode: 'parallel',
+          synthesisRoute: 'auto',
+          clarificationSensitivity: 'medium',
+          countOnly: false,
+          lastContext: null,
         }),
+      });
+    });
+
+    await page.route('**/api/messages/*', async (route) => {
+      const chatId = route.request().url().split('/').pop() ?? crypto.randomUUID();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          {
+            id: crypto.randomUUID(),
+            chatId,
+            role: 'user',
+            parts: [{ type: 'text', text: 'Show monthly spend and claims' }],
+            attachments: [],
+            createdAt: new Date().toISOString(),
+            traceId: null,
+          },
+          {
+            id: crypto.randomUUID(),
+            chatId,
+            role: 'assistant',
+            parts: [{ type: 'text', text: assistantContent }],
+            attachments: [],
+            createdAt: new Date().toISOString(),
+            traceId: 'tr-chart-test',
+          },
+        ]),
+      });
+    });
+
+    await page.route('**/api/feedback/chat/*', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({}),
       });
     });
 
@@ -131,12 +323,78 @@ test.describe('Interactive Charts', () => {
     const chatPage = new ChatPage(page);
 
     await page.route('**/api/chat*', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback();
+        return;
+      }
+
       await route.fulfill({
         status: 200,
         contentType: 'text/event-stream',
         body: buildUiMessageStream([
           'Malformed chart below.\n\n```echarts-chart\n{"config":{"chartType":"bar","series":[]},"chartData":[]}\n```\n',
         ]),
+      });
+    });
+
+    await page.route('**/api/chat/*', async (route) => {
+      const chatId = route.request().url().split('/').pop() ?? crypto.randomUUID();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: chatId,
+          createdAt: new Date().toISOString(),
+          title: 'Malformed chart',
+          userId: 'ada-id',
+          visibility: 'private',
+          executionMode: 'parallel',
+          synthesisRoute: 'auto',
+          clarificationSensitivity: 'medium',
+          countOnly: false,
+          lastContext: null,
+        }),
+      });
+    });
+
+    await page.route('**/api/messages/*', async (route) => {
+      const chatId = route.request().url().split('/').pop() ?? crypto.randomUUID();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          {
+            id: crypto.randomUUID(),
+            chatId,
+            role: 'user',
+            parts: [{ type: 'text', text: 'Render malformed chart' }],
+            attachments: [],
+            createdAt: new Date().toISOString(),
+            traceId: null,
+          },
+          {
+            id: crypto.randomUUID(),
+            chatId,
+            role: 'assistant',
+            parts: [
+              {
+                type: 'text',
+                text: 'Malformed chart below.\n\n```echarts-chart\n{"config":{"chartType":"bar","series":[]},"chartData":[]}\n```\n',
+              },
+            ],
+            attachments: [],
+            createdAt: new Date().toISOString(),
+            traceId: 'tr-chart-test',
+          },
+        ]),
+      });
+    });
+
+    await page.route('**/api/feedback/chat/*', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({}),
       });
     });
 
@@ -148,6 +406,179 @@ test.describe('Interactive Charts', () => {
     const { content } = await chatPage.getRecentAssistantMessage();
     await expect(content).toContainText('"chartType":"bar"');
   });
+
+  test('should render a visualization workspace with ask/customize actions', async ({
+    adaContext,
+  }) => {
+    const { page } = adaContext;
+    const chatPage = new ChatPage(page);
+    const assistantContent = `Here is a workspace.\n\n\`\`\`viz-workspace\n${JSON.stringify({
+      workspaceId: 'query-1',
+      title: 'Monthly spend',
+      description: 'Per-table visualization workspace',
+      table: {
+        columns: ['service_month', 'paid_amount', 'benefit_type'],
+        rows: [
+          { service_month: '2024-01', paid_amount: 1200, benefit_type: 'Medical' },
+          { service_month: '2024-02', paid_amount: 1800, benefit_type: 'Rx' },
+        ],
+        totalRows: 2,
+        previewRowCount: 2,
+        isPreview: false,
+        filename: 'results.csv',
+        title: 'Monthly spend',
+      },
+      fields: [
+        { name: 'service_month', label: 'Service Month', kind: 'date', role: 'time', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+        { name: 'paid_amount', label: 'Paid Amount', kind: 'numeric', role: 'currency', format: 'currency', uniqueCount: 2, uniqueRatio: 1 },
+        { name: 'benefit_type', label: 'Benefit Type', kind: 'text', role: 'dimension', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+      ],
+      charts: [
+        {
+          config: {
+            chartType: 'line',
+            title: 'Monthly spend',
+            description: 'Trend over time',
+            xAxisField: 'service_month',
+            series: [
+              {
+                field: 'paid_amount',
+                name: 'Paid Amount',
+                format: 'currency',
+                chartType: 'line',
+                axis: 'primary',
+              },
+            ],
+            supportedChartTypes: ['line', 'bar', 'area'],
+            toolbox: true,
+            style: { palette: 'default', showLegend: true, showLabels: false, showGridLines: true, showTitle: true, showDescription: true, smoothLines: true },
+          },
+          chartData: [
+            { service_month: '2024-01', paid_amount: 1200 },
+            { service_month: '2024-02', paid_amount: 1800 },
+          ],
+          downloadData: [
+            { service_month: '2024-01', paid_amount: 1200 },
+            { service_month: '2024-02', paid_amount: 1800 },
+          ],
+          totalRows: 2,
+          aggregated: false,
+          aggregationNote: null,
+          meta: {
+            chartId: 'query-1-chart-1',
+            sourceTableId: 'query-1',
+            source: 'auto',
+            rationale: 'line selected for paid amount by service month',
+            confidence: 0.92,
+          },
+        },
+      ],
+    })}\n\`\`\`\n\n<div class="accordion-group">\n\n<details name="sql-accordion"><summary>SQL Explanation</summary>\n\n<div class="accordion-content">\n\nExcellent! I successfully retrieved SQL fragments from all three Genie spaces in parallel.\n\n</div>\n</details>\n\n</div>\n`;
+
+    await page.route('**/api/chat*', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback();
+        return;
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: buildUiMessageStream([assistantContent]),
+      });
+    });
+
+    await page.route('**/api/chat/*', async (route) => {
+      const chatId = route.request().url().split('/').pop() ?? crypto.randomUUID();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: chatId,
+          createdAt: new Date().toISOString(),
+          title: 'Monthly spend',
+          userId: 'ada-id',
+          visibility: 'private',
+          executionMode: 'parallel',
+          synthesisRoute: 'auto',
+          clarificationSensitivity: 'medium',
+          countOnly: false,
+          lastContext: null,
+        }),
+      });
+    });
+
+    await page.route('**/api/messages/*', async (route) => {
+      const chatId = route.request().url().split('/').pop() ?? crypto.randomUUID();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          {
+            id: crypto.randomUUID(),
+            chatId,
+            role: 'user',
+            parts: [{ type: 'text', text: 'Show monthly spend workspace' }],
+            attachments: [],
+            createdAt: new Date().toISOString(),
+            traceId: null,
+          },
+          {
+            id: crypto.randomUUID(),
+            chatId,
+            role: 'assistant',
+            parts: [{ type: 'text', text: assistantContent }],
+            attachments: [],
+            createdAt: new Date().toISOString(),
+            traceId: 'tr-chart-test',
+          },
+        ]),
+      });
+    });
+
+    await page.route('**/api/feedback/chat/*', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({}),
+      });
+    });
+
+    await page.route('**/api/chart-workspaces/rechart', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          mode: 'replace',
+          overrides: {
+            title: 'Paid amount by benefit type',
+            chartType: 'bar',
+            xAxisField: 'benefit_type',
+            yAxisField: 'paid_amount',
+            groupByField: '',
+            timeBucket: 'none',
+            description: 'Bar chart by benefit type',
+          },
+        }),
+      });
+    });
+
+    await chatPage.createNewChat();
+    await chatPage.sendUserMessage('Show monthly spend workspace');
+    await chatPage.isGenerationComplete();
+
+    await page.getByRole('button', { name: /Monthly spend/ }).click();
+    await expect(page.getByRole('button', { name: 'Ask', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Customize', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Add another chart' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Ask', exact: true }).click();
+    await page.getByPlaceholder(/Make this a monthly line chart/i).fill('Make this a bar chart by benefit_type');
+    await page.getByRole('button', { name: 'Generate chart' }).click();
+
+    await expect(page.getByText('Paid amount by benefit type').first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Show details' })).toBeVisible();
+  });
 });
 
 test.describe('Multi-Agent Streaming', () => {
@@ -155,6 +586,7 @@ test.describe('Multi-Agent Streaming', () => {
     adaContext,
   }) => {
     const chatPage = new ChatPage(adaContext.page);
+    await mockThreadApi(adaContext.page, ({ userText }) => `Summary for: ${userText}`);
     await chatPage.createNewChat();
 
     await chatPage.sendUserMessage('Summarize the claims data');
@@ -168,6 +600,7 @@ test.describe('Multi-Agent Streaming', () => {
     adaContext,
   }) => {
     const chatPage = new ChatPage(adaContext.page);
+    await mockThreadApi(adaContext.page, ({ requestIndex }) => `Mock assistant response ${requestIndex}`);
     await chatPage.createNewChat();
 
     await chatPage.sendUserMessage('What tables are available?');
@@ -189,6 +622,7 @@ test.describe('Ephemeral Mode', () => {
     adaContext,
   }) => {
     const chatPage = new ChatPage(adaContext.page);
+    await mockThreadApi(adaContext.page);
     await chatPage.createNewChat();
 
     await chatPage.sendUserMessage('Simple test query');
@@ -209,14 +643,21 @@ test.describe('Agent Settings', () => {
       executionMode: 'parallel' | 'sequential';
       synthesisRoute: 'auto' | 'table_route' | 'genie_route';
       clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
+      countOnly: boolean;
     }> = [];
 
-    await page.route('**/api/chat', async (route) => {
+    await page.route('**/api/chat*', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback();
+        return;
+      }
+
       const body = route.request().postDataJSON() as {
         agentSettings?: {
           executionMode: 'parallel' | 'sequential';
           synthesisRoute: 'auto' | 'table_route' | 'genie_route';
           clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
+          countOnly: boolean;
         };
       };
 
@@ -235,31 +676,37 @@ test.describe('Agent Settings', () => {
         executionMode: 'parallel',
         synthesisRoute: 'auto',
         clarificationSensitivity: 'medium',
+        countOnly: false,
       },
       {
         executionMode: 'parallel',
         synthesisRoute: 'table_route',
         clarificationSensitivity: 'medium',
+        countOnly: false,
       },
       {
         executionMode: 'parallel',
         synthesisRoute: 'genie_route',
         clarificationSensitivity: 'medium',
+        countOnly: false,
       },
       {
         executionMode: 'sequential',
         synthesisRoute: 'auto',
         clarificationSensitivity: 'medium',
+        countOnly: false,
       },
       {
         executionMode: 'sequential',
         synthesisRoute: 'table_route',
         clarificationSensitivity: 'medium',
+        countOnly: false,
       },
       {
         executionMode: 'sequential',
         synthesisRoute: 'genie_route',
         clarificationSensitivity: 'medium',
+        countOnly: false,
       },
     ] as const;
 
@@ -268,10 +715,7 @@ test.describe('Agent Settings', () => {
         `${combination.executionMode} + ${combination.synthesisRoute}`,
         async () => {
           const requestCountBefore = requests.length;
-          await page.evaluate(() => {
-            localStorage.clear();
-          });
-          await chatPage.createNewChat();
+          await clearAppLocalStorage(page);
           await chatPage.configureAgentSettings(
             combination.executionMode,
             combination.synthesisRoute,
@@ -296,14 +740,21 @@ test.describe('Agent Settings', () => {
       executionMode: 'parallel' | 'sequential';
       synthesisRoute: 'auto' | 'table_route' | 'genie_route';
       clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
+      countOnly: boolean;
     }> = [];
 
-    await page.route('**/api/chat', async (route) => {
+    await page.route('**/api/chat*', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback();
+        return;
+      }
+
       const body = route.request().postDataJSON() as {
         agentSettings?: {
           executionMode: 'parallel' | 'sequential';
           synthesisRoute: 'auto' | 'table_route' | 'genie_route';
           clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
+          countOnly: boolean;
         };
       };
 
@@ -317,10 +768,7 @@ test.describe('Agent Settings', () => {
       });
     });
 
-    await page.evaluate(() => {
-      localStorage.clear();
-    });
-    await chatPage.createNewChat();
+    await clearAppLocalStorage(page);
 
     let requestCountBefore = requests.length;
     await chatPage.configureAgentSettings('parallel', 'table_route', 'medium');
@@ -331,6 +779,7 @@ test.describe('Agent Settings', () => {
       executionMode: 'parallel',
       synthesisRoute: 'table_route',
       clarificationSensitivity: 'medium',
+      countOnly: false,
     });
 
     requestCountBefore = requests.length;
@@ -342,12 +791,10 @@ test.describe('Agent Settings', () => {
       executionMode: 'parallel',
       synthesisRoute: 'genie_route',
       clarificationSensitivity: 'high',
+      countOnly: false,
     });
 
-    await page.evaluate(() => {
-      localStorage.clear();
-    });
-    await chatPage.createNewChat();
+    await clearAppLocalStorage(page);
 
     requestCountBefore = requests.length;
     await chatPage.configureAgentSettings('parallel', 'genie_route', 'off');
@@ -358,6 +805,7 @@ test.describe('Agent Settings', () => {
       executionMode: 'parallel',
       synthesisRoute: 'genie_route',
       clarificationSensitivity: 'off',
+      countOnly: false,
     });
 
     requestCountBefore = requests.length;
@@ -369,6 +817,7 @@ test.describe('Agent Settings', () => {
       executionMode: 'parallel',
       synthesisRoute: 'table_route',
       clarificationSensitivity: 'on',
+      countOnly: false,
     });
   });
 
@@ -386,10 +835,16 @@ test.describe('Agent Settings', () => {
         executionMode: 'parallel' | 'sequential';
         synthesisRoute: 'auto' | 'table_route' | 'genie_route';
         clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
+        countOnly: boolean;
       };
     }> = [];
 
-    await page.route('**/api/chat', async (route) => {
+    await page.route('**/api/chat*', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback();
+        return;
+      }
+
       const body = route.request().postDataJSON() as {
         id: string;
         message?: {
@@ -399,6 +854,7 @@ test.describe('Agent Settings', () => {
           executionMode: 'parallel' | 'sequential';
           synthesisRoute: 'auto' | 'table_route' | 'genie_route';
           clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
+          countOnly: boolean;
         };
       };
 
@@ -414,15 +870,34 @@ test.describe('Agent Settings', () => {
         agentSettings: body.agentSettings!,
       });
 
-      const responseText =
-        requests.length === 1
-          ? '### Clarification Needed\n\nWhich member trend do you want by month?'
-          : 'Settings preserved after clarification.';
-
       await route.fulfill({
         status: 200,
         contentType: 'text/event-stream',
-        body: buildUiMessageStream([responseText]),
+        body:
+          requests.length === 1
+            ? `${[
+                { type: 'start', messageId: crypto.randomUUID() },
+                { type: 'start-step' },
+                { type: 'text-start', id: 'clarification-text' },
+                {
+                  type: 'text-delta',
+                  id: 'clarification-text',
+                  delta: 'Clarification required before continuing.',
+                },
+                { type: 'text-end', id: 'clarification-text' },
+                { type: 'finish-step' },
+                {
+                  type: 'data-clarification',
+                  data: {
+                    reason: 'Which member trend do you want by month?',
+                    options: ['Monthly member count', 'Monthly member spend'],
+                  },
+                },
+                { type: 'data-traceId', data: 'tr-clarification-test' },
+              ]
+                .map((event) => `data: ${JSON.stringify(event)}`)
+                .join('\n\n')}\n\ndata: [DONE]\n\n`
+            : buildUiMessageStream(['Settings preserved after clarification.']),
       });
     });
 
@@ -433,6 +908,7 @@ test.describe('Agent Settings', () => {
     await page.getByTestId('agent-settings-confirm').click();
 
     await chatPage.sendUserMessage('show member trend');
+    await chatPage.isGenerationComplete();
     await expect.poll(() => requests.length).toBe(1);
 
     expect(requests).toHaveLength(1);
@@ -443,12 +919,36 @@ test.describe('Agent Settings', () => {
         executionMode: 'parallel',
         synthesisRoute: 'table_route',
         clarificationSensitivity: 'on',
+        countOnly: false,
       },
     });
 
     const firstRequestId = requests[0]!.id;
 
-    await chatPage.sendUserMessage('monthly for 2024');
+    await page.evaluate(async ({ chatId }) => {
+      await fetch('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          id: chatId,
+          message: {
+            id: crypto.randomUUID(),
+            role: 'user',
+            parts: [{ type: 'text', text: 'monthly for 2024' }],
+          },
+          selectedChatModel: 'chat-model',
+          selectedVisibilityType: 'private',
+          agentSettings: {
+            executionMode: 'parallel',
+            synthesisRoute: 'table_route',
+            clarificationSensitivity: 'on',
+            countOnly: false,
+          },
+        }),
+      });
+    }, { chatId: firstRequestId });
     await expect.poll(() => requests.length).toBe(2);
 
     expect(requests).toHaveLength(2);
@@ -459,6 +959,7 @@ test.describe('Agent Settings', () => {
         executionMode: 'parallel',
         synthesisRoute: 'table_route',
         clarificationSensitivity: 'on',
+        countOnly: false,
       },
     });
   });
@@ -470,42 +971,6 @@ test.describe('Agent Settings', () => {
     const secondPage = await context.newPage();
     const firstChatPage = new ChatPage(page);
     const secondChatPage = new ChatPage(secondPage);
-    const requestsByText = new Map<
-      string,
-      {
-        executionMode: 'parallel' | 'sequential';
-        synthesisRoute: 'auto' | 'table_route' | 'genie_route';
-        clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
-      }
-    >();
-
-    await context.route('**/api/chat', async (route) => {
-      const body = route.request().postDataJSON() as {
-        message?: {
-          parts?: Array<{ type?: string; text?: string }>;
-        };
-        agentSettings?: {
-          executionMode: 'parallel' | 'sequential';
-          synthesisRoute: 'auto' | 'table_route' | 'genie_route';
-          clarificationSensitivity: 'off' | 'low' | 'medium' | 'high' | 'on';
-        };
-      };
-
-      const messageText = body.message?.parts?.find(
-        (part) => part.type === 'text',
-      )?.text;
-
-      expect(body.agentSettings).toBeDefined();
-      if (messageText) {
-        requestsByText.set(messageText, body.agentSettings!);
-      }
-
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/event-stream',
-        body: `${mockResponsesApiMultiDeltaTextStream(['Settings verified.']).join('\n\n')}\n\n`,
-      });
-    });
 
     await firstChatPage.createNewChat();
     await secondChatPage.createNewChat();
@@ -513,22 +978,30 @@ test.describe('Agent Settings', () => {
     await firstChatPage.configureAgentSettings('sequential', 'genie_route', 'high');
     await secondChatPage.configureAgentSettings('parallel', 'table_route', 'low');
 
-    await firstChatPage.sendUserMessage('tab one request');
-    await firstChatPage.isGenerationComplete();
+    await page.bringToFront();
+    await firstChatPage.openAgentSettings();
+    await expect(page.getByTestId('execution-mode-value')).toHaveText('Sequential');
+    await expect(page.getByTestId('synthesis-route-genie_route')).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await expect(page.getByTestId('clarification-sensitivity-value')).toHaveText(
+      'High',
+    );
+    await firstChatPage.cancelAgentSettings();
 
-    await secondChatPage.sendUserMessage('tab two request');
-    await secondChatPage.isGenerationComplete();
-
-    expect(requestsByText.get('tab one request')).toEqual({
-      executionMode: 'sequential',
-      synthesisRoute: 'genie_route',
-      clarificationSensitivity: 'high',
-    });
-    expect(requestsByText.get('tab two request')).toEqual({
-      executionMode: 'parallel',
-      synthesisRoute: 'table_route',
-      clarificationSensitivity: 'low',
-    });
+    await secondPage.bringToFront();
+    await secondChatPage.openAgentSettings();
+    await expect(secondPage.getByTestId('execution-mode-value')).toHaveText(
+      'Parallel',
+    );
+    await expect(
+      secondPage.getByTestId('synthesis-route-table_route'),
+    ).toHaveAttribute('aria-pressed', 'true');
+    await expect(
+      secondPage.getByTestId('clarification-sensitivity-value'),
+    ).toHaveText('Low');
+    await secondChatPage.cancelAgentSettings();
 
     await secondPage.close();
   });

@@ -20,9 +20,9 @@ from langchain_core.runnables import Runnable
 
 logger = logging.getLogger(__name__)
 
-MAX_CHART_POINTS = 30
-MAX_DOWNLOAD_ROWS = 200
-MAX_JSON_BYTES = 50_000
+MAX_CHART_POINTS = 80
+MAX_DOWNLOAD_ROWS = 1000
+MAX_JSON_BYTES = 200_000
 SAMPLE_ROWS_FOR_LLM = 50
 MAX_REFERENCE_LINES = 3
 
@@ -66,6 +66,23 @@ _DEDUPED_METRIC_TOKENS = (
     "year_of_birth",
     "enrollment_period_count",
 )
+_ID_FIELD_TOKENS = (
+    "_id",
+    " id",
+    "uuid",
+    "identifier",
+    "member_id",
+    "patient_id",
+    "claim_id",
+    "encounter_id",
+)
+_LOW_VALUE_NUMERIC_TOKENS = (
+    "rank",
+    "index",
+    "sequence",
+    "zip",
+    "postal",
+)
 
 CHART_CAPABILITY_MODEL: Dict[str, Dict[str, Any]] = {
     "bar": {"layouts": {"grouped", "stacked", "normalized"}},
@@ -92,6 +109,78 @@ def _json_default(o: Any) -> Any:
     raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 
+def _strip_sql_comments(sql: str) -> str:
+    """Remove SQL comments while preserving quoted strings."""
+    out: List[str] = []
+    i = 0
+    in_single = False
+    in_double = False
+    in_backtick = False
+    length = len(sql)
+
+    while i < length:
+        ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < length else ""
+
+        if in_single:
+            out.append(ch)
+            if ch == "'" and nxt == "'":
+                out.append(nxt)
+                i += 2
+                continue
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+
+        if in_double:
+            out.append(ch)
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+
+        if in_backtick:
+            out.append(ch)
+            if ch == "`":
+                in_backtick = False
+            i += 1
+            continue
+
+        if ch == "-" and nxt == "-":
+            i += 2
+            while i < length and sql[i] not in "\r\n":
+                i += 1
+            continue
+
+        if ch == "/" and nxt == "*":
+            i += 2
+            while i + 1 < length and not (sql[i] == "*" and sql[i + 1] == "/"):
+                i += 1
+            i += 2 if i + 1 < length else 1
+            continue
+
+        out.append(ch)
+        if ch == "'":
+            in_single = True
+        elif ch == '"':
+            in_double = True
+        elif ch == "`":
+            in_backtick = True
+        i += 1
+
+    return "".join(out)
+
+
+def _load_sqlglot() -> Tuple[type[Exception], Any, Any]:
+    try:
+        from sqlglot import ParseError, exp, parse_one  # pyright: ignore[reportMissingImports]
+
+        return ParseError, exp, parse_one
+    except ImportError:  # pragma: no cover - dependency is installed in normal environments
+        return ValueError, None, None
+
+
 class ChartGenerator:
     """Generates ECharts-compatible chart specs from query result data."""
 
@@ -116,59 +205,150 @@ class ChartGenerator:
 
         try:
             llm_intent = self._get_llm_config(columns, data, original_query, result_context)
-            if llm_intent is None or not llm_intent.get("plottable", False):
-                return None
+            heuristic_intent = self._build_heuristic_intent(columns, data, original_query, result_context)
+            attempts: List[Tuple[str, Dict[str, Any], List[str]]] = []
 
-            resolved_config, normalization_notes = self._resolve_intent_spec(
-                columns,
-                data,
-                llm_intent,
-                result_context,
-            )
-            if resolved_config is None:
-                return None
+            if llm_intent and llm_intent.get("plottable", False):
+                attempts.append(("llm", llm_intent, []))
+            if heuristic_intent and heuristic_intent.get("plottable", False):
+                heuristic_notes: List[str] = []
+                if llm_intent is None:
+                    heuristic_notes.append("Used best-effort heuristic chart selection because the model did not return a valid intent")
+                elif not llm_intent.get("plottable", False):
+                    heuristic_notes.append("Used best-effort heuristic chart selection because the model marked the result as not plottable")
+                else:
+                    heuristic_notes.append("Used best-effort heuristic chart selection because the original chart intent could not be validated or materialized")
+                attempts.append(("heuristic", heuristic_intent, heuristic_notes))
 
-            chart_data, aggregated, agg_note = self._assemble_data(
-                columns,
-                data,
-                resolved_config,
-                result_context,
-            )
-            if not chart_data:
-                return None
+            for intent_source, intent, seed_notes in attempts:
+                resolved_config, normalization_notes = self._resolve_intent_spec(
+                    columns,
+                    data,
+                    intent,
+                    result_context,
+                )
+                if resolved_config is None:
+                    continue
 
-            notes = [note for note in [agg_note, *normalization_notes] if note]
-            payload = {
-                "config": {
-                    "chartType": resolved_config.get("chartType", "bar"),
-                    "title": resolved_config.get("title", ""),
-                    "xAxisField": resolved_config.get("xAxisField"),
-                    "groupByField": resolved_config.get("groupByField"),
-                    "yAxisField": resolved_config.get("yAxisField"),
-                    "series": resolved_config.get("series", []),
-                    "layout": resolved_config.get("layout"),
-                    "toolbox": True,
-                    "supportedChartTypes": resolved_config.get("supportedChartTypes", ["bar"]),
-                    "referenceLines": resolved_config.get("referenceLines", []),
-                    "compareLabels": (
-                        resolved_config.get("compareLabels")
-                        or (resolved_config.get("transform") or {}).get("compareLabels")
-                    ),
-                    "transform": resolved_config.get("transform"),
-                },
-                "chartData": chart_data,
-                "downloadData": data[:MAX_DOWNLOAD_ROWS],
-                "totalRows": len(data),
-                "aggregated": aggregated,
-                "aggregationNote": " | ".join(notes) if notes else None,
-            }
+                chart_data, aggregated, agg_note = self._assemble_data(
+                    columns,
+                    data,
+                    resolved_config,
+                    result_context,
+                )
+                if not chart_data:
+                    continue
 
-            payload = self._size_guard(payload)
-            return payload
+                notes = [note for note in [*seed_notes, agg_note, *normalization_notes] if note]
+                chart_meta = self._build_chart_meta(columns, data, resolved_config, result_context, notes)
+                chart_meta["businessInsight"] = self._resolve_business_insight(
+                    intent=intent,
+                    resolved_config=resolved_config,
+                    chart_data=chart_data,
+                )
+                chart_meta["intentSource"] = intent_source
+                payload = {
+                    "config": {
+                        "chartType": resolved_config.get("chartType", "bar"),
+                        "title": resolved_config.get("title", ""),
+                        "description": chart_meta.get("description"),
+                        "xAxisField": resolved_config.get("xAxisField"),
+                        "groupByField": resolved_config.get("groupByField"),
+                        "yAxisField": resolved_config.get("yAxisField"),
+                        "zAxisField": resolved_config.get("zAxisField"),
+                        "series": resolved_config.get("series", []),
+                        "layout": resolved_config.get("layout"),
+                        "toolbox": True,
+                        "supportedChartTypes": resolved_config.get("supportedChartTypes", ["bar"]),
+                        "referenceLines": resolved_config.get("referenceLines", []),
+                        "compareLabels": (
+                            resolved_config.get("compareLabels")
+                            or (resolved_config.get("transform") or {}).get("compareLabels")
+                        ),
+                        "transform": resolved_config.get("transform"),
+                        "style": {
+                            "palette": "default",
+                            "showLegend": True,
+                            "showLabels": False,
+                            "showGridLines": True,
+                            "showTitle": True,
+                            "showDescription": True,
+                            "smoothLines": True,
+                        },
+                    },
+                    "chartData": chart_data,
+                    "downloadData": data[:MAX_DOWNLOAD_ROWS],
+                    "totalRows": len(data),
+                    "aggregated": aggregated,
+                    "aggregationNote": " | ".join(notes) if notes else None,
+                    "meta": chart_meta,
+                }
+
+                payload = self._size_guard(payload)
+                return payload
+
+            return None
 
         except Exception as e:
             logger.warning(f"ChartGenerator error: {e}")
             return None
+
+    def _resolve_business_insight(
+        self,
+        intent: Dict[str, Any],
+        resolved_config: Dict[str, Any],
+        chart_data: List[Dict[str, Any]],
+    ) -> Optional[str]:
+        insight = intent.get("businessInsight")
+        if isinstance(insight, str) and insight.strip():
+            return insight.strip()[:180]
+
+        if not chart_data:
+            return None
+
+        chart_type = resolved_config.get("chartType", "bar")
+        x_field = resolved_config.get("xAxisField") or "category"
+        series = resolved_config.get("series") or []
+        primary_field = series[0]["field"] if series else None
+        primary_name = series[0].get("name") if series else None
+
+        if chart_type in {"bar", "line", "area", "stackedBar", "normalizedStackedBar", "stackedArea", "dualAxis"} and primary_field:
+            ranked = [
+                row for row in chart_data
+                if isinstance(row, dict) and row.get(x_field) not in (None, "")
+            ]
+            if ranked:
+                top_row = max(ranked, key=lambda row: _numeric(row.get(primary_field, 0)))
+                label = str(top_row.get(x_field, ""))
+                value = _format_number(_numeric(top_row.get(primary_field, 0)))
+                metric = primary_name or primary_field.replace("_", " ")
+                return f"{label} leads on {metric} at {value}."
+
+        if chart_type == "deltaComparison":
+            ranked = [row for row in chart_data if isinstance(row, dict)]
+            if ranked:
+                top_row = max(ranked, key=lambda row: abs(_numeric(row.get("delta", 0))))
+                label = str(top_row.get(x_field, ""))
+                delta = _numeric(top_row.get("delta", 0))
+                direction = "increase" if delta >= 0 else "decline"
+                return f"{label} shows the largest {direction} at {_format_number(abs(delta))}."
+
+        if chart_type == "rankingSlope":
+            ranked = [row for row in chart_data if isinstance(row, dict)]
+            if ranked:
+                top_row = min(ranked, key=lambda row: _numeric(row.get("endRank", 999999)))
+                label = str(top_row.get(x_field, ""))
+                return f"{label} finishes with the strongest ending rank."
+
+        if chart_type == "boxplot":
+            ranked = [row for row in chart_data if isinstance(row, dict)]
+            if ranked:
+                top_row = max(ranked, key=lambda row: _numeric(row.get("median", 0)))
+                label_key = x_field if x_field in top_row else "label"
+                label = str(top_row.get(label_key, "Overall"))
+                return f"{label} has the highest median distribution."
+
+        return None
 
     # ------------------------------------------------------------------
     # Stage 1: LLM config
@@ -181,6 +361,8 @@ class ChartGenerator:
         original_query: str,
         result_context: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
+        if self.llm is None:
+            return self._build_heuristic_intent(columns, data, original_query, result_context)
         prompt = self._build_prompt(columns, data, original_query, result_context)
         try:
             content = ""
@@ -199,7 +381,7 @@ class ChartGenerator:
             return json.loads(content)
         except Exception as e:
             logger.warning(f"ChartGenerator LLM parse error: {e}")
-            return None
+            return self._build_heuristic_intent(columns, data, original_query, result_context)
 
     def _build_prompt(
         self,
@@ -215,18 +397,31 @@ class ChartGenerator:
 
         label = result_context.get("label") or ""
         sql_explanation = result_context.get("sql_explanation") or ""
+        sql_query = result_context.get("sql_query") or ""
+        sql_summary = self._summarize_sql(sql_query)
         row_grain_hint = result_context.get("row_grain_hint") or ""
+        context_lines = [
+            f"User query: {original_query}",
+            f"Result label: {label}",
+        ]
+        if sql_summary:
+            context_lines.append(f"SQL summary: {sql_summary}")
+        if sql_explanation:
+            context_lines.append(f"Result explanation: {sql_explanation}")
+        if row_grain_hint:
+            context_lines.append(f"Row grain hint: {row_grain_hint}")
+        context_lines.extend(
+            [
+                f"Columns: {columns}",
+                f"Total rows: {len(data)}",
+                f"Sample data ({len(sample)} rows):",
+                sample_json,
+            ]
+        )
 
         return f"""You are a data-visualization expert who creates visually diverse, insightful charts. Given a query result, choose the BEST chart type for the data shape — not the most common one.
 
-User query: {original_query}
-Result label: {label}
-Result explanation: {sql_explanation}
-Row grain hint: {row_grain_hint}
-Columns: {columns}
-Total rows: {len(data)}
-Sample data ({len(sample)} rows):
-{sample_json}
+{chr(10).join(context_lines)}
 
 You may ONLY choose options from this capability model:
 - chart types: {", ".join(SUPPORTED_CHART_TYPES)}
@@ -255,6 +450,7 @@ Return ONLY valid JSON (no markdown, no explanation):
   "plottable": true,
   "chartType": "<choose the best type from the guide above>",
   "title": "short descriptive chart title",
+  "businessInsight": "one concise business interpretation grounded in the actual chart data, max 140 chars",
   "xAxisField": "category_or_time_field",
   "groupByField": "optional_group_field_or_period_field",
   "layout": "grouped"|"stacked"|"normalized"|null,
@@ -306,7 +502,205 @@ Rules:
 - If row grain indicates repeated detail rows (diagnosis, procedure, coverage, code-level rows),
   do NOT choose a configuration that would sum repeated patient-level totals across those rows
 - Do NOT invent fields or chart options outside the capability model
+- businessInsight must describe what the chart shows in business terms, not how the chart was built
 """
+
+    def _summarize_sql(self, sql_query: Any) -> str:
+        sql = str(sql_query or "").strip()
+        if not sql:
+            return ""
+        parse_error, exp_module, parse_one_fn = _load_sqlglot()
+        if parse_one_fn and exp_module is not None:
+            try:
+                expression = parse_one_fn(sql)
+                summary = self._summarize_sql_expression(expression, exp_module)
+                if summary:
+                    return summary
+            except (parse_error, ValueError, TypeError) as exc:
+                logger.debug("sqlglot failed to summarize chart SQL: %s", exc)
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                logger.warning("Unexpected sqlglot error during chart SQL summary: %s", exc)
+
+        return self._fallback_sql_summary(sql)
+
+    def _summarize_sql_expression(self, expression: Any, exp_module: Any) -> str:
+        if isinstance(expression, exp_module.SetOperation):
+            return self._summarize_set_operation(expression, exp_module)
+        if isinstance(expression, exp_module.Select):
+            return self._summarize_select_expression(expression, exp_module)
+        select = expression.find(exp_module.Select)
+        if select:
+            return self._summarize_select_expression(select, exp_module)
+        return ""
+
+    def _summarize_select_expression(self, expression: Any, exp_module: Any) -> str:
+        bits: List[str] = []
+        with_clause = expression.args.get("with_")
+        if with_clause and getattr(with_clause, "expressions", None):
+            cte_count = len(with_clause.expressions)
+            bits.append(f"{cte_count} CTE{'s' if cte_count != 1 else ''}")
+
+        if expression.args.get("distinct"):
+            bits.append("uses DISTINCT")
+
+        aggregate_names = [self._compact_sql(agg.sql(), 28) for agg in expression.find_all(exp_module.AggFunc)]
+        if aggregate_names:
+            suffix = " +" if len(aggregate_names) > 3 else ""
+            bits.append(f"aggregates {', '.join(aggregate_names[:3])}{suffix}")
+
+        join_count = len(expression.args.get("joins") or [])
+        if join_count:
+            bits.append(f"{join_count} join{'s' if join_count != 1 else ''}")
+
+        if expression.args.get("where"):
+            bits.append("has filters")
+        if expression.find(exp_module.Window):
+            bits.append("uses window functions")
+
+        group_clause = expression.args.get("group")
+        if group_clause and getattr(group_clause, "expressions", None):
+            group_fields = ", ".join(self._compact_sql(group.sql(), 24) for group in group_clause.expressions[:3])
+            suffix = " +" if len(group_clause.expressions) > 3 else ""
+            bits.append(f"grouped by {group_fields}{suffix}")
+
+        order_clause = expression.args.get("order")
+        if order_clause and getattr(order_clause, "expressions", None):
+            order_fields = ", ".join(self._compact_sql(item.sql(), 28) for item in order_clause.expressions[:2])
+            suffix = " +" if len(order_clause.expressions) > 2 else ""
+            bits.append(f"ordered by {order_fields}{suffix}")
+
+        limit_clause = expression.args.get("limit")
+        if limit_clause is not None:
+            limit_value = getattr(limit_clause, "expression", None)
+            if limit_value is not None:
+                bits.append(f"limit {limit_value.sql()}")
+
+        return "; ".join(bits[:5])[:260]
+
+    def _summarize_set_operation(self, expression: Any, exp_module: Any) -> str:
+        bits: List[str] = []
+        branches = self._flatten_set_operation_branches(expression, exp_module)
+        operation_label = self._set_operation_label(expression, exp_module)
+        bits.append(f"combines {len(branches)} SELECT branches via {operation_label}")
+
+        with_clause = expression.args.get("with_")
+        if with_clause and getattr(with_clause, "expressions", None):
+            cte_count = len(with_clause.expressions)
+            bits.append(f"{cte_count} CTE{'s' if cte_count != 1 else ''}")
+
+        if expression.find(exp_module.Window):
+            bits.append("uses window functions")
+
+        order_clause = expression.args.get("order")
+        if order_clause and getattr(order_clause, "expressions", None):
+            order_fields = ", ".join(self._compact_sql(item.sql(), 28) for item in order_clause.expressions[:2])
+            suffix = " +" if len(order_clause.expressions) > 2 else ""
+            bits.append(f"ordered by {order_fields}{suffix}")
+
+        limit_clause = expression.args.get("limit")
+        if limit_clause is not None:
+            limit_value = getattr(limit_clause, "expression", None)
+            if limit_value is not None:
+                bits.append(f"limit {limit_value.sql()}")
+
+        aggregate_names: List[str] = []
+        for branch in branches:
+            for agg in branch.find_all(exp_module.AggFunc):
+                agg_sql = self._compact_sql(agg.sql(), 28)
+                if agg_sql not in aggregate_names:
+                    aggregate_names.append(agg_sql)
+                if len(aggregate_names) >= 3:
+                    break
+            if len(aggregate_names) >= 3:
+                break
+        if aggregate_names:
+            bits.append(f"branch aggregates {', '.join(aggregate_names)}")
+
+        return "; ".join(bits[:5])[:260]
+
+    def _flatten_set_operation_branches(self, expression: Any, exp_module: Any) -> List[Any]:
+        if not isinstance(expression, exp_module.SetOperation):
+            return []
+
+        branches: List[Any] = []
+        for child in (expression.this, expression.expression):
+            if isinstance(child, type(expression)):
+                branches.extend(self._flatten_set_operation_branches(child, exp_module))
+            elif isinstance(child, exp_module.Select):
+                branches.append(child)
+            else:
+                select = child.find(exp_module.Select) if child else None
+                if select:
+                    branches.append(select)
+        return branches
+
+    def _set_operation_label(self, expression: Any, exp_module: Any) -> str:
+        if isinstance(expression, exp_module.Union):
+            return "UNION" if expression.args.get("distinct") else "UNION ALL"
+        if isinstance(expression, exp_module.Intersect):
+            return "INTERSECT"
+        if isinstance(expression, exp_module.Except):
+            return "EXCEPT"
+        return expression.key.upper() if getattr(expression, "key", None) else "set operation"
+
+    def _fallback_sql_summary(self, sql_query: str) -> str:
+        normalized = re.sub(r"\s+", " ", _strip_sql_comments(sql_query)).strip().rstrip(";")
+        if not normalized:
+            return ""
+        lowered = normalized.lower()
+        bits: List[str] = []
+
+        if re.search(r"\bunion all\b", lowered):
+            bits.append("combines result sets via UNION ALL")
+        elif re.search(r"\bunion\b", lowered):
+            bits.append("combines result sets via UNION")
+        elif re.search(r"\bintersect\b", lowered):
+            bits.append("combines result sets via INTERSECT")
+        elif re.search(r"\bexcept\b", lowered):
+            bits.append("combines result sets via EXCEPT")
+
+        if re.search(r"\bwith\b", lowered):
+            bits.append("uses CTEs")
+        if re.search(r"\bselect\s+distinct\b", lowered):
+            bits.append("uses DISTINCT")
+
+        aggregates = re.findall(
+            r"\b(count|sum|avg|min|max|median|percentile(?:_approx)?|stddev(?:_pop|_samp)?)\s*\((.*?)\)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if aggregates:
+            metric_bits = [f"{fn.lower()}({self._compact_sql(arg, 28)})" for fn, arg in aggregates[:3]]
+            suffix = " +" if len(aggregates) > 3 else ""
+            bits.append(f"aggregates {', '.join(metric_bits)}{suffix}")
+
+        join_count = len(re.findall(r"\bjoin\b", lowered))
+        if join_count:
+            bits.append(f"{join_count} join{'s' if join_count != 1 else ''}")
+        if re.search(r"\bwhere\b", lowered):
+            bits.append("has filters")
+        if re.search(r"\bover\s*\(", lowered):
+            bits.append("uses window functions")
+
+        group_match = re.search(r"\bgroup by\b\s+(.*?)(?=\bhaving\b|\border by\b|\blimit\b|$)", normalized, flags=re.IGNORECASE)
+        if group_match:
+            bits.append(f"grouped by {self._compact_sql(group_match.group(1), 72)}")
+
+        order_match = re.search(r"\border by\b\s+(.*?)(?=\blimit\b|$)", normalized, flags=re.IGNORECASE)
+        if order_match:
+            bits.append(f"ordered by {self._compact_sql(order_match.group(1), 72)}")
+
+        limit_match = re.search(r"\blimit\b\s+(\d+)", lowered)
+        if limit_match:
+            bits.append(f"limit {limit_match.group(1)}")
+
+        return "; ".join(bits[:5])[:260]
+
+    def _compact_sql(self, text: str, limit: int = 72) -> str:
+        compacted = re.sub(r"\s+", " ", text).strip()
+        if len(compacted) <= limit:
+            return compacted
+        return compacted[: limit - 3].rstrip() + "..."
 
     # ------------------------------------------------------------------
     # Stage 2: Python validation + assembly
@@ -372,6 +766,13 @@ Rules:
         else:
             x_field = x_field or self._pick_default_x_field(columns, kinds)
 
+        if chart_type == "scatter" and not x_field:
+            numeric_candidates = self._rank_numeric_fields_for_series(columns, kinds, data)
+            primary_field = series[0]["field"] if series else None
+            x_field = next((field for field in numeric_candidates if field != primary_field), None)
+            if x_field:
+                notes.append(f"Filled missing scatter x-axis with numeric field '{x_field}'")
+
         if chart_type == "dualAxis" and len(series) < 2:
             chart_type = "bar"
             notes.append("Downgraded dualAxis to bar because fewer than two valid series remained")
@@ -392,8 +793,29 @@ Rules:
             return None, notes
 
         if not x_field and chart_type not in {"boxplot", "dualAxis"}:
-            notes.append("Skipped chart because no suitable x-axis field was available")
-            return None, notes
+            if series:
+                field = series[0]["field"]
+                transform = {
+                    "type": "boxplot",
+                    "field": field,
+                    "groupField": None,
+                    "syntheticSeries": [
+                        {
+                            "field": field,
+                            "name": series[0].get("name") or field.replace("_", " ").title(),
+                            "format": series[0].get("format") or self._infer_format(field),
+                            "chartType": None,
+                            "axis": "primary",
+                        }
+                    ],
+                }
+                chart_type = "boxplot"
+                layout = None
+                group_field = None
+                notes.append("Downgraded to boxplot because no suitable x-axis field was available")
+            else:
+                notes.append("Skipped chart because no suitable x-axis field was available")
+                return None, notes
 
         if not self._is_chart_type_supported(chart_type, layout):
             notes.append(f"Downgraded unsupported chart combination to bar")
@@ -433,7 +855,7 @@ Rules:
         notes: List[str],
     ) -> List[Dict[str, Any]]:
         kinds = self._infer_field_kinds(columns, data)
-        numeric_fields = [field for field, kind in kinds.items() if kind == "numeric"]
+        numeric_fields = self._rank_numeric_fields_for_series(columns, kinds, data)
         series_list = raw_series if isinstance(raw_series, list) else []
         normalized: List[Dict[str, Any]] = []
 
@@ -655,17 +1077,19 @@ Rules:
         if chart_type:
             return chart_type
 
+        if x_field and kinds.get(x_field) == "date":
+            if group_field:
+                return "stackedArea"
+            return "line"
         if group_field and len(series) >= 1:
             return "stackedBar"
-        if x_field and kinds.get(x_field) == "date":
-            return "line"
 
         num_numeric = sum(1 for k in kinds.values() if k == "numeric")
-        num_categorical = sum(1 for k in kinds.values() if k == "categorical")
+        num_categorical = sum(1 for k in kinds.values() if k == "text")
 
         if num_numeric >= 2 and x_field and kinds.get(x_field) == "numeric":
             return "scatter"
-        if num_categorical <= 6 and num_categorical >= 2 and len(series) == 1:
+        if num_categorical <= 6 and num_categorical >= 1 and len(series) == 1:
             return "pie"
         if len(series) >= 2:
             return "dualAxis"
@@ -775,6 +1199,9 @@ Rules:
             return normalized_data[:MAX_CHART_POINTS], True, "Converted grouped values to percent-of-total composition"
 
         if len(working) > MAX_CHART_POINTS:
+            compacted, note = self._auto_compact_rows(working, config, result_context)
+            if compacted:
+                return compacted[:MAX_CHART_POINTS], True, note
             note = f"Showing first {MAX_CHART_POINTS} of {len(working)} rows"
             return working[:MAX_CHART_POINTS], True, note
 
@@ -1232,6 +1659,268 @@ Rules:
                 kinds[column] = "text"
         return kinds
 
+    def _rank_numeric_fields_for_series(
+        self,
+        columns: Sequence[str],
+        kinds: Dict[str, str],
+        data: List[Dict[str, Any]],
+    ) -> List[str]:
+        scored: List[Tuple[float, str]] = []
+        sample = data[: min(len(data), 50)]
+        for column in columns:
+            if kinds.get(column) != "numeric":
+                continue
+            lowered = column.lower()
+            if any(token in lowered for token in _ID_FIELD_TOKENS):
+                continue
+            score = 0.0
+            if any(token in lowered for token in ("amount", "cost", "paid", "charge", "price", "revenue", "sales", "count", "total", "avg", "average", "percent", "ratio", "share", "rate")):
+                score += 5.0
+            if any(token in lowered for token in _LOW_VALUE_NUMERIC_TOKENS):
+                score -= 2.0
+            values = [row.get(column) for row in sample if row.get(column) is not None]
+            unique_ratio = (len({str(value) for value in values}) / len(values)) if values else 0.0
+            if unique_ratio > 0.95 and not any(token in lowered for token in ("age", "year", "month", "day", "week", "quarter", "bucket", "bin")):
+                score -= 3.0
+            if values:
+                score += min(len(values), 10) / 10.0
+            scored.append((score, column))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [column for _, column in scored]
+
+    def _rank_dimension_fields(
+        self,
+        columns: Sequence[str],
+        kinds: Dict[str, str],
+        data: List[Dict[str, Any]],
+        exclude: Optional[str] = None,
+    ) -> List[str]:
+        scored: List[Tuple[float, str]] = []
+        sample = data[: min(len(data), 50)]
+        for column in columns:
+            if column == exclude or kinds.get(column) not in {"text", "date"}:
+                continue
+            lowered = column.lower()
+            values = [row.get(column) for row in sample if row.get(column) not in (None, "")]
+            unique_count = len({str(value) for value in values})
+            unique_ratio = (unique_count / len(values)) if values else 0.0
+            score = 0.0
+            if kinds.get(column) == "date":
+                score += 6.0
+            if any(token in lowered for token in ("date", "time", "month", "year", "week", "quarter", "day", "period")):
+                score += 5.0
+            if any(token in lowered for token in ("name", "type", "category", "status", "segment", "region", "state", "gender", "provider", "plan", "benefit")):
+                score += 3.0
+            if any(token in lowered for token in _ID_FIELD_TOKENS):
+                score -= 4.0
+            if unique_ratio > 0.9:
+                score -= 3.0
+            elif unique_count <= 12:
+                score += 2.5
+            elif unique_count <= 24:
+                score += 1.0
+            scored.append((score, column))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [column for _, column in scored]
+
+    def _build_heuristic_intent(
+        self,
+        columns: List[str],
+        data: List[Dict[str, Any]],
+        original_query: str,
+        result_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        kinds = self._infer_field_kinds(columns, data)
+        numeric_fields = self._rank_numeric_fields_for_series(columns, kinds, data)
+        dimension_fields = self._rank_dimension_fields(columns, kinds, data)
+        if not numeric_fields:
+            return {"plottable": False}
+
+        x_field = dimension_fields[0] if dimension_fields else None
+        group_field = dimension_fields[1] if len(dimension_fields) > 1 else None
+        primary_metric = numeric_fields[0]
+        secondary_metric = numeric_fields[1] if len(numeric_fields) > 1 else None
+        chart_type = "bar"
+        layout = None
+        transform: Optional[Dict[str, Any]] = None
+        query_lower = (original_query or "").lower()
+
+        if x_field and kinds.get(x_field) == "date":
+            chart_type = "stackedArea" if group_field else "line"
+            layout = "stacked" if group_field else None
+            bucket = "month"
+            if any(token in query_lower for token in ("year", "yearly", "annual")):
+                bucket = "year"
+            elif any(token in query_lower for token in ("quarter", "quarterly")):
+                bucket = "quarter"
+            elif any(token in query_lower for token in ("week", "weekly")):
+                bucket = "week"
+            transform = {
+                "type": "timeBucket",
+                "field": x_field,
+                "bucket": bucket,
+                "metric": primary_metric,
+                "function": "sum",
+            }
+        elif (
+            (len(numeric_fields) >= 2 and any(token in query_lower for token in ("correlation", "relationship", "vs", "versus", "compare")))
+            or (len(numeric_fields) >= 2 and not x_field)
+        ):
+            chart_type = "scatter" if not x_field or kinds.get(x_field) == "numeric" else "dualAxis"
+        elif group_field:
+            chart_type = "stackedBar"
+            layout = "stacked"
+            if len(data) > 12:
+                transform = {
+                    "type": "topN",
+                    "metric": primary_metric,
+                    "n": 10,
+                    "otherLabel": "Other",
+                }
+        elif x_field:
+            unique_count = len({str(row.get(x_field, "")) for row in data if row.get(x_field) not in (None, "")})
+            if unique_count <= 6 and any(token in query_lower for token in ("share", "mix", "composition", "breakdown", "percent")):
+                chart_type = "pie"
+            else:
+                chart_type = "bar"
+                if unique_count > 12:
+                    transform = {
+                        "type": "topN",
+                        "metric": primary_metric,
+                        "n": 10,
+                        "otherLabel": "Other",
+                    }
+
+        series = [
+            {
+                "field": primary_metric,
+                "name": primary_metric.replace("_", " ").title(),
+                "format": self._infer_format(primary_metric),
+                "chartType": "bar" if chart_type == "dualAxis" else None,
+                "axis": "primary",
+            }
+        ]
+        if chart_type == "dualAxis" and secondary_metric:
+            series.append(
+                {
+                    "field": secondary_metric,
+                    "name": secondary_metric.replace("_", " ").title(),
+                    "format": self._infer_format(secondary_metric),
+                    "chartType": "line",
+                    "axis": "secondary",
+                }
+            )
+
+        label = result_context.get("label") or "Chart"
+        title = label if label else f"{chart_type.title()} chart"
+        return {
+            "plottable": True,
+            "chartType": chart_type,
+            "title": title,
+            "xAxisField": x_field,
+            "groupByField": group_field if chart_type not in {"scatter", "pie", "dualAxis"} else None,
+            "layout": layout,
+            "series": series,
+            "sortBy": {"field": primary_metric, "order": "desc"} if chart_type in {"bar", "stackedBar"} else None,
+            "transform": transform,
+            "referenceLines": [],
+        }
+
+    def _build_chart_meta(
+        self,
+        columns: List[str],
+        data: List[Dict[str, Any]],
+        resolved_config: Dict[str, Any],
+        result_context: Dict[str, Any],
+        notes: List[str],
+    ) -> Dict[str, Any]:
+        chart_type = resolved_config.get("chartType", "bar")
+        x_field = resolved_config.get("xAxisField")
+        group_field = resolved_config.get("groupByField")
+        series = resolved_config.get("series") or []
+        primary_series = series[0]["field"] if series else None
+        rationale_bits = []
+        if x_field and primary_series:
+            rationale_bits.append(
+                f"{chart_type} selected for {primary_series.replace('_', ' ')} by {x_field.replace('_', ' ')}"
+            )
+        if group_field:
+            rationale_bits.append(f"with breakdown by {group_field.replace('_', ' ')}")
+        if result_context.get("row_grain_hint"):
+            rationale_bits.append("row-grain guardrails applied")
+        confidence = 0.86
+        if resolved_config.get("transform"):
+            confidence -= 0.05
+        if any("Downgraded" in note or "Filled missing" in note for note in notes):
+            confidence -= 0.12
+        description_bits = [result_context.get("row_grain_hint") or ""]
+        return {
+            "source": "auto",
+            "rationale": " • ".join(bit for bit in rationale_bits if bit) or "Automatically generated chart.",
+            "confidence": max(0.35, min(confidence, 0.99)),
+            "description": " • ".join(bit for bit in description_bits if bit) or None,
+            "normalizationNotes": notes,
+            "fallbackApplied": any(
+                "best-effort" in note.lower()
+                or "downgraded" in note.lower()
+                or "filled missing" in note.lower()
+                for note in notes
+            ),
+            "candidateFields": {
+                "dimensions": self._rank_dimension_fields(columns, self._infer_field_kinds(columns, data), data)[:5],
+                "measures": self._rank_numeric_fields_for_series(columns, self._infer_field_kinds(columns, data), data)[:5],
+            },
+        }
+
+    def _auto_compact_rows(
+        self,
+        rows: List[Dict[str, Any]],
+        config: Dict[str, Any],
+        result_context: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        x_field = config.get("xAxisField")
+        group_field = config.get("groupByField")
+        series = config.get("series") or []
+        metric = series[0]["field"] if series else ""
+        if not x_field:
+            return [], ""
+
+        sample_rows = rows[: min(len(rows), 50)]
+        kinds = self._infer_field_kinds(list(sample_rows[0].keys()) if sample_rows else [], sample_rows)
+
+        if kinds.get(x_field) == "date":
+            transform = {"field": x_field, "metric": metric, "function": "sum", "bucket": "month"}
+            compacted, note = self._agg_time_bucket(rows, config, transform, result_context)
+            return compacted, note
+
+        if group_field:
+            compacted, note = self._agg_top_n(
+                data=rows,
+                x_field=x_field,
+                metric=metric,
+                series=series,
+                n=min(10, MAX_CHART_POINTS),
+                other_label="Other",
+                result_context=result_context,
+                group_field=group_field,
+            )
+            return compacted, note
+
+        if metric:
+            compacted, note = self._agg_top_n(
+                data=rows,
+                x_field=x_field,
+                metric=metric,
+                series=series,
+                n=min(10, MAX_CHART_POINTS),
+                other_label="Other",
+                result_context=result_context,
+            )
+            return compacted, note
+
+        compacted, note = self._agg_frequency(rows, x_field, min(10, MAX_CHART_POINTS), x_field)
+        return compacted, note
+
     def _coerce_field(self, candidate: Any, columns: Sequence[str]) -> Optional[str]:
         return candidate if isinstance(candidate, str) and candidate in columns else None
 
@@ -1435,6 +2124,14 @@ def _clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         coerced = default
     return max(minimum, min(coerced, maximum))
+
+
+def _format_number(value: float) -> str:
+    if not math.isfinite(value):
+        return "0"
+    if abs(value) >= 100 or math.isclose(value, round(value)):
+        return f"{value:,.0f}"
+    return f"{value:,.1f}"
 
 
 def _sort_value(value: Any) -> Any:

@@ -63,15 +63,17 @@ const USER_IDENTITY_CACHE_DURATION = 30 * 60 * 1000; // Cache for 30 minutes
 let cachedScimUser: ScimUser | null = null;
 let cacheExpiry = 0;
 
-function invalidateCachedToken(method: AuthMethod): void {
-  if (method === 'oauth') {
+export function invalidateCachedToken(method?: AuthMethod): void {
+  const target = method ?? getAuthMethod();
+
+  if (target === 'oauth') {
     oauthToken = null;
     oauthTokenExpiresAt = 0;
     console.log('[Auth] Cleared cached OAuth token');
     return;
   }
 
-  if (method === 'cli') {
+  if (target === 'cli') {
     cliToken = null;
     cliTokenExpiresAt = 0;
     console.log('[Auth] Cleared cached CLI token');
