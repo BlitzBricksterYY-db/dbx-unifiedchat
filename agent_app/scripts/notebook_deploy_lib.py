@@ -246,7 +246,7 @@ def print_preflight_report(config: NotebookDeployConfig, report: PreflightReport
 
 
 def build_deploy_command(config: NotebookDeployConfig) -> str:
-    command = ["./scripts/deploy.sh", "--target", config.target]
+    command = ["./scripts/deploy.sh", "--target", config.target, "--skip-bootstrap"]
     if config.profile:
         command.extend(["--profile", config.profile])
     if config.sync_first:
@@ -260,12 +260,33 @@ def build_deploy_command(config: NotebookDeployConfig) -> str:
     return _render_command(command)
 
 
+def build_destroy_command(config: NotebookDeployConfig) -> str:
+    command = ["./scripts/destroy.sh", "--target", config.target]
+    if config.profile:
+        command.extend(["--profile", config.profile])
+    return _render_command(command)
+
+
 def print_terminal_handoff(config: NotebookDeployConfig) -> None:
-    print("Run these commands in the Databricks web terminal")
+    print("Deploy handoff")
     print(f"  cd {shlex.quote(str(config.project_dir))}")
     print(f"  {build_deploy_command(config)}")
     print()
-    print("After the terminal command finishes, rerun the verification cells.")
+    print("Notes")
+    print(f"  - deploy_mode widget -> {config.deploy_mode}")
+    print(f"  - sync_first widget  -> {config.sync_first}")
+    print(f"  - run_after widget   -> {config.run_after}")
+    print("  - --skip-bootstrap is included for the Databricks web terminal flow")
+    print()
+    print("Destroy handoff")
+    print("  WARNING: This removes bundle-managed resources for the selected target.")
+    print("  WARNING: Review the target/profile carefully before running it.")
+    print("  Usage:")
+    print(f"    cd {shlex.quote(str(config.project_dir))}")
+    print(f"    {build_destroy_command(config)}")
+    print("  To skip the confirmation prompt only after review, add: --auto-approve")
+    print()
+    print("After the deploy terminal command finishes, rerun the verification cells.")
 
 
 def bootstrap_lakebase_role(

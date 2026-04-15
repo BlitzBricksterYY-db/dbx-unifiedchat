@@ -28,6 +28,7 @@ It is intentionally not a second deployment system.
   - repo-backed Databricks notebook source
   - provides widgets for `project_dir`, `target`, `deploy_mode`, `sync_first`, and `run_after`
   - organized into preflight, terminal handoff, and verification sections
+  - prints both a deploy handoff and a separate destroy handoff
 
 - `scripts/notebook_deploy_lib.py`
   - resolves bundle settings from `agent_app/databricks.yml`
@@ -86,7 +87,7 @@ Fresh terminal example:
 ```bash
 cd agent_app/scripts
 databricks auth login --profile prod
-./deploy.sh --target prod --full-deploy --run
+./deploy.sh --target prod --skip-bootstrap --full-deploy --run
 ```
 
 ## How To Use
@@ -100,8 +101,35 @@ databricks auth login --profile prod
    - `sync_first`: `true` or `false`
    - `run_after`: `true` or `false`
 3. Run the preflight cell.
-4. Copy the printed `./scripts/deploy.sh ...` command into the Databricks web terminal and run it from the `agent_app` directory.
+4. Copy the printed deploy handoff into the Databricks web terminal and run it from the `agent_app` directory.
 5. Re-run the verification cell after the command completes.
+
+## Handoff Examples
+
+The notebook deploy handoff reflects the current widget values and includes
+`--skip-bootstrap` for the Databricks web-terminal flow.
+
+Example deploy handoff:
+
+```bash
+cd /Workspace/Users/you@example.com/path/to/agent_app
+./scripts/deploy.sh --target prod --skip-bootstrap --profile prod --full-deploy --run
+```
+
+If `sync_first=true`, the handoff also includes `--sync`.
+
+The notebook also prints a separate destroy handoff for teardown:
+
+```bash
+cd /Workspace/Users/you@example.com/path/to/agent_app
+./scripts/destroy.sh --target prod --profile prod
+```
+
+Destroy warning:
+
+- `destroy.sh` removes bundle-managed resources for the selected target
+- review the resolved target and profile before running it
+- add `--auto-approve` only for an already reviewed non-interactive teardown
 
 ## Notes
 

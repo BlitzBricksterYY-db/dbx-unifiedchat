@@ -108,9 +108,11 @@ print_preflight_report(config, preflight)
 # MAGIC %md
 # MAGIC ## 2. Terminal Handoff
 # MAGIC
-# MAGIC Run the printed command in the Databricks web terminal from the `agent_app`
-# MAGIC directory. This keeps the workspace path aligned with the same deploy surface
-# MAGIC used locally and in CI.
+# MAGIC Run the printed deploy command in the Databricks web terminal from the
+# MAGIC `agent_app` directory. The handoff reflects the current widget values and
+# MAGIC includes `--skip-bootstrap` for the web-terminal flow.
+# MAGIC
+# MAGIC A separate destroy handoff is also printed below with warnings and usage.
 
 # COMMAND ----------
 
