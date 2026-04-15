@@ -32,7 +32,11 @@ class NotebookDeployConfig:
 
     @property
     def app_name(self) -> str:
-        return f"dbx-unifiedchat-app-{self.target}"
+        return resolve_app_name(
+            self.project_dir,
+            target=self.target,
+            bundle_app_key=self.bundle_app_key,
+        )
 
 
 @dataclass
@@ -68,6 +72,19 @@ def load_bundle_config(project_dir: Path) -> dict:
 
 def load_app_resource(project_dir: Path) -> dict:
     return load_yaml(project_dir / "resources" / "app.yml")
+
+
+def resolve_app_name(project_dir: Path, *, target: str, bundle_app_key: str) -> str:
+    app_resource = load_app_resource(project_dir)
+    app_config = ((app_resource.get("resources") or {}).get("apps") or {}).get(
+        bundle_app_key
+    )
+    raw_name = (app_config or {}).get("name")
+    if not raw_name:
+        return f"dbx-unifiedchat-app-{target}"
+    if isinstance(raw_name, str):
+        return raw_name.replace("${bundle.target}", target)
+    return str(raw_name)
 
 
 def resolve_bundle_var(project_dir: Path, target: str, var_name: str) -> str | None:
