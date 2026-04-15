@@ -39,6 +39,34 @@ It is intentionally not a second deployment system.
 - the notebook does not read `.env`
 - `deploy.sh` remains the supported execution entrypoint
 
+## Prerequisites
+
+Before running the printed `./scripts/deploy.sh ...` command in a terminal, make sure:
+
+- the repo is available in the Databricks web terminal and you can `cd` into `agent_app`
+- `python3` is installed and on `PATH`
+- the Databricks CLI is installed and on `PATH`
+- `uv` is installed and on `PATH` for the default bootstrap flow
+- Databricks authentication is set up for the target workspace/profile you plan to use
+
+For profile-based auth, a typical setup step is:
+
+```bash
+databricks auth login --profile prod
+```
+
+You do not need to manually create `agent_app/.venv` for the normal deploy path.
+`deploy.sh` creates or reuses the project virtual environment with `uv sync --dev`
+unless you explicitly use `--skip-bootstrap` or `--ci`.
+
+Fresh terminal example:
+
+```bash
+cd agent_app/scripts
+databricks auth login --profile prod
+./deploy.sh --target prod --full-deploy --run
+```
+
 ## How To Use
 
 1. Open `scripts/deploy_notebook.py` from the repo in Databricks.

@@ -16,7 +16,7 @@ from scripts.grant_lakebase_permissions import (
 
 
 MANUAL_GRANT_NOTES = (
-    "HealthVerity source tables still require manual SELECT grants after deploy.",
+    "",
 )
 
 

@@ -404,7 +404,7 @@ def sync_app_resource_permissions(config: PermissionGrantConfig, workspace_clien
     for resource in resources:
         if config.instance_name and resource.name == "database":
             continue
-        if config.genie_space_ids and resource.genie_space is not None:
+        if config.genie_space_ids and getattr(resource, "genie_space", None) is not None:
             continue
         updated_resources.append(resource)
 

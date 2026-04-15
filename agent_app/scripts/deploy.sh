@@ -150,11 +150,11 @@ require_command() {
 
 check_databricks_cli_version() {
   local version
-  version="$(databricks --version 2>/dev/null | python3 - <<'PY'
+  version="$(python3 - "$(databricks --version 2>/dev/null)" <<'PY'
 import re
 import sys
 
-text = sys.stdin.read()
+text = sys.argv[1]
 match = re.search(r"(\d+\.\d+\.\d+)", text)
 print(match.group(1) if match else "")
 PY
@@ -185,7 +185,7 @@ bootstrap_local_env() {
   else
     info "Reusing existing .venv"
   fi
-  uv sync --dev >/dev/null
+  env -u VIRTUAL_ENV uv sync --dev >/dev/null
   success "Local Python dependencies synced"
 }
 
@@ -204,18 +204,22 @@ BUNDLE_VALIDATE_OUTPUT=""
 bundle_validate_output() {
   if [[ -z "$BUNDLE_VALIDATE_OUTPUT" ]]; then
     if ! BUNDLE_VALIDATE_OUTPUT="$(databricks bundle validate -t "$TARGET" "${PROFILE_ARGS[@]}" --output json)"; then
-      error "Bundle validation failed. See the Databricks CLI output above."
+      if [[ -n "$PROFILE" ]]; then
+        error "Bundle validation failed. See the Databricks CLI output above. If the profile token is stale, run: databricks auth login --profile $PROFILE"
+      fi
+      error "Bundle validation failed. See the Databricks CLI output above. If workspace auth expired, re-authenticate and retry."
     fi
   fi
   printf '%s\n' "$BUNDLE_VALIDATE_OUTPUT"
 }
 
 resolve_bundle_metadata() {
-  bundle_validate_output | python3 - <<'PY'
+  BUNDLE_VALIDATE_JSON="$(bundle_validate_output)" python3 - <<'PY'
 import json
+import os
 import sys
 
-config = json.load(sys.stdin)
+config = json.loads(os.environ["BUNDLE_VALIDATE_JSON"])
 apps = (config.get("resources") or {}).get("apps") or {}
 jobs = (config.get("resources") or {}).get("jobs") or {}
 
@@ -235,18 +239,21 @@ PY
 }
 
 load_bundle_metadata() {
-  eval "$(resolve_bundle_metadata | python3 - <<'PY'
+  eval "$(RESOLVED_METADATA="$(resolve_bundle_metadata)" python3 - <<'PY'
 import json
+import os
 import shlex
 import sys
 
-for line in sys.stdin:
+for line in os.environ["RESOLVED_METADATA"].splitlines():
     key, raw = line.rstrip("\n").split("=", 1)
     print(f"{key}={shlex.quote(json.loads(raw))}")
 PY
 )"
 
-  [[ -z "${APP_KEY:-}" || -z "${APP_NAME:-}" ]] && error "Failed to resolve app metadata from bundle validate output."
+  if [[ -z "${APP_KEY:-}" || -z "${APP_NAME:-}" ]]; then
+    error "Failed to resolve app metadata from bundle validate output."
+  fi
 }
 
 run_bundle_job_if_requested() {
@@ -270,11 +277,12 @@ smoke_verify_app() {
   section "Smoke verifying deployed app"
   local app_json
   app_json="$(databricks apps get "$APP_NAME" "${PROFILE_ARGS[@]}" --output json)"
-  python3 - <<'PY' <<<"$app_json"
+  APP_JSON="$app_json" python3 - <<'PY'
 import json
+import os
 import sys
 
-app = json.load(sys.stdin)
+app = json.loads(os.environ["APP_JSON"])
 sp_id = app.get("service_principal_client_id") or ""
 url = app.get("url") or ""
 compute_status = app.get("compute_status") or ""

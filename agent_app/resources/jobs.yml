@@ -62,7 +62,7 @@ resources:
             notebook_path: ../workflows/04_prepare_shared_infra.py
             source: WORKSPACE
             base_parameters:
-              app_name: "dbx-unifiedchat-app-${bundle.target}"
+              app_name: ${resources.apps.agent_migration.name}
               target: ${bundle.target}
               catalog_name: ${var.catalog_name}
               schema_name: ${var.schema_name}
@@ -70,6 +70,8 @@ resources:
               data_schema_name: ${var.data_schema_name}
               sql_warehouse_id: ${var.sql_warehouse_id}
               lakebase_instance_name: ${var.lakebase_instance_name}
+              lakebase_capacity: ${var.lakebase_capacity}
+              source_table: ${var.source_table}
               experiment_id: ${var.experiment_id}
           timeout_seconds: 1800
 
@@ -95,7 +97,7 @@ resources:
             notebook_path: ../workflows/05_validate_app_deployment.py
             source: WORKSPACE
             base_parameters:
-              app_name: "dbx-unifiedchat-app-${bundle.target}"
+              app_name: ${resources.apps.agent_migration.name}
               target: ${bundle.target}
               catalog_name: ${var.catalog_name}
               schema_name: ${var.schema_name}

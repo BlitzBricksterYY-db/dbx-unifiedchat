@@ -8,6 +8,7 @@ Smoke-validate the Databricks App deployment surface after bundle deploy and pre
 
 import os
 from pathlib import Path
+from typing import Optional
 
 import mlflow
 from databricks.sdk import WorkspaceClient
@@ -34,6 +35,35 @@ for key, default in _WIDGET_DEFAULTS.items():
 
 params = {key: dbutils.widgets.get(key).strip() for key in _WIDGET_DEFAULTS}
 app_name = params["app_name"] or f"dbx-unifiedchat-app-{params['target'] or 'dev'}"
+target = params["target"] or "dev"
+
+
+def ensure_experiment(
+    workspace_client: WorkspaceClient,
+    *,
+    target: str,
+    experiment_id: Optional[str],
+):
+    if experiment_id:
+        experiment = mlflow.get_experiment(experiment_id)
+        if experiment is not None:
+            return experiment
+
+    current_user = workspace_client.current_user.me()
+    user_name = getattr(current_user, "user_name", None)
+    if not user_name:
+        raise RuntimeError("Unable to resolve current workspace user for experiment validation.")
+
+    experiment_name = f"/Users/{user_name}/multi-agent-genie-{target}"
+    experiment = mlflow.get_experiment_by_name(experiment_name)
+    if experiment is None:
+        created_id = mlflow.create_experiment(experiment_name)
+        experiment = mlflow.get_experiment(created_id)
+        print(
+            "Created fallback MLflow experiment for validation: "
+            f"{experiment.name} ({experiment.experiment_id})"
+        )
+    return experiment
 
 print("=" * 80)
 print("VALIDATE APP DEPLOYMENT")
@@ -63,13 +93,11 @@ if not sp_client_id:
 if not app_url:
     raise RuntimeError("App validation failed: missing app URL.")
 
-experiment_id = params["experiment_id"]
-if experiment_id:
-    experiment = mlflow.get_experiment(experiment_id)
-    if experiment is None:
-        raise RuntimeError(
-            f"Configured MLflow experiment '{experiment_id}' could not be resolved."
-        )
-    print(f"mlflow_experiment: {experiment.name} ({experiment.experiment_id})")
+experiment = ensure_experiment(
+    w,
+    target=target,
+    experiment_id=params["experiment_id"] or None,
+)
+print(f"mlflow_experiment: {experiment.name} ({experiment.experiment_id})")
 
 print("\nApp deployment validation passed.")
