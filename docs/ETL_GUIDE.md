@@ -194,7 +194,7 @@ ETL uses the same configuration as the agent system:
 
 ### For Databricks ETL
 
-Uses `dev_config.yaml` or `prod_config.yaml`:
+Uses `agent_app/databricks.yml` target variables:
 ```yaml
 # Genie Configuration
 genie_space_ids:
@@ -204,10 +204,10 @@ genie_space_ids:
 # Table Metadata
 sample_size: 100
 max_unique_values: 50
-sql_warehouse_id: warehouse_id
+sql_warehouse_id: your_warehouse_id
 
 # Vector Search
-vs_endpoint_name: endpoint_name
+vs_endpoint_name: your_endpoint_name
 embedding_model: databricks-gte-large-en
 ```
 

@@ -6,9 +6,6 @@ This repository now has one supported deployment surface for the application:
 - canonical entrypoint: `agent_app/scripts/deploy.sh`
 - guided workspace/operator path: `agent_app/scripts/deploy_notebook.py`
 
-The repository-root bundle and legacy Model Serving notebooks remain in the repo
-as reference material, but they are no longer the recommended app deployment path.
-
 ## Canonical Flow
 
 Run deployments from `agent_app/`:
@@ -118,6 +115,5 @@ GitHub Actions should deploy from the same place humans do:
 
 ## Legacy Notes
 
-The older root-bundle and Model Serving deployment materials are intentionally left
-in the repo for migration/reference purposes. They should not be treated as the
-primary deployment story for the app going forward.
+The older Model Serving deployment materials remain as historical reference only.
+They are not part of the supported app deployment path.

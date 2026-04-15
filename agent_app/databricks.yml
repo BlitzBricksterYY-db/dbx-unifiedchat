@@ -14,25 +14,11 @@ variables:
     default: "healthverity_claims_sample_patient_dataset"
   data_schema_name:
     default: "hv_claims_sample"
-
-  # Compatibility aliases for older scripts/resources.
-  catalog:
-    default: "serverless_dbx_unifiedchat_catalog"
-  schema:
-    default: "multi_agent_genie"
-  data_catalog:
-    default: "healthverity_claims_sample_patient_dataset"
-  data_schema:
-    default: "hv_claims_sample"
   uc_function_names:
     default: "get_space_summary,get_table_overview,get_column_detail,get_space_instructions,get_space_details"
 
   # Canonical SQL warehouse setting
   sql_warehouse_id:
-    default: "a4ed2ccbda385db9"
-
-  # Compatibility alias for older scripts/resources.
-  warehouse_id:
     default: "a4ed2ccbda385db9"
 
   # Lakebase
@@ -118,15 +104,10 @@ targets:
       schema_name: "multi_agent_genie"
       data_catalog_name: "healthverity_claims_sample_patient_dataset_dev"
       data_schema_name: "hv_claims_sample"
-      catalog: "serverless_dbx_unifiedchat_dev_catalog"
-      schema: "multi_agent_genie"
-      data_catalog: "healthverity_claims_sample_patient_dataset_dev"
-      data_schema: "hv_claims_sample"
       uc_function_names: "get_space_summary,get_table_overview,get_column_detail,get_space_instructions,get_space_details"
       experiment_id: "4357851413903846"
       agent_keep_warm_interval_seconds: "600"
       sql_warehouse_id: "32f4d1aae5fcf8ca"
-      warehouse_id: "32f4d1aae5fcf8ca"
       lakebase_instance_name: "multi-agent-genie-system-state-db-dev"
       lakebase_capacity: "CU_1"
       genie_space_ids: "01f11b27d1121e2bb00d6ecd846b1988,01f11b27d23a1ab195fa7ba8efc06d13,01f11b27d3ea149694cf608c3d278673"
@@ -138,14 +119,10 @@ targets:
     variables:
       catalog_name: "serverless_dbx_unifiedchat_catalog"
       schema_name: "multi_agent_genie"
-      catalog: "serverless_dbx_unifiedchat_catalog"
-      schema: "multi_agent_genie"
       experiment_id: "2377237249204444"
       agent_keep_warm_interval_seconds: "600"
-      # Canonical and compatibility aliases should stay aligned:
       # sql_warehouse_id: "<prod-warehouse-id>"
       # Override these per-environment as needed:
-      # warehouse_id: "<prod-warehouse-id>"
       # genie_space_id_1: "<prod-space-id>"
       # genie_space_id_2: "<prod-space-id>"
       # genie_space_id_3: "<prod-space-id>"

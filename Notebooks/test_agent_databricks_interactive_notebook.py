@@ -41,7 +41,7 @@ To switch targets (dev/prod):
 
 # COMMAND ----------
 
-# DBTITLE 1,Setup Path + Load Defaults from databricks.yml
+# DBTITLE 1,Setup Path + Load Defaults from agent_app/databricks.yml
 import sys
 import os
 import yaml
@@ -58,10 +58,10 @@ if src_path not in sys.path:
 print(f"Repo root: {repo_root}")
 print(f"Source path: {src_path}")
 
-# --- Read databricks.yml (single source of truth) ---
+# --- Read agent_app/databricks.yml (single source of truth) ---
 TARGET = "dev"
 
-bundle_yml_path = os.path.join(repo_root, "databricks.yml")
+bundle_yml_path = os.path.join(repo_root, "agent_app", "databricks.yml")
 with open(bundle_yml_path) as f:
     bundle = yaml.safe_load(f)
 
@@ -69,9 +69,9 @@ params = {k: v.get("default") for k, v in bundle["variables"].items()}
 target_overrides = bundle.get("targets", {}).get(TARGET, {}).get("variables", {})
 params.update(target_overrides)
 
-print(f"Loaded {len(params)} parameters from databricks.yml (target={TARGET})")
+print(f"Loaded {len(params)} parameters from agent_app/databricks.yml (target={TARGET})")
 
-# --- Create widgets pre-filled with databricks.yml values ---
+# --- Create widgets pre-filled from agent_app/databricks.yml ---
 # Edit any widget in the notebook UI bar to override before running the next cell.
 _WIDGET_KEYS = [
     "catalog_name", "schema_name", "sql_warehouse_id", "genie_space_ids",

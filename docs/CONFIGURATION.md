@@ -8,16 +8,12 @@ Local development still uses:
 
 - `agent_app/.env` for local-only runtime settings
 
-The repository-root `databricks.yml` remains in the repo as migration/reference
-material and should not be treated as the primary app deployment config.
-
 ## Active Configuration Layers
 
 | Layer | File | Purpose |
 |------|------|---------|
 | Bundle deploy | `agent_app/databricks.yml` | Canonical dev/prod targets, ETL settings, app settings, Lakebase, warehouse, and Genie IDs |
 | Local runtime | `agent_app/.env` | Local development auth, ports, PG connection, and app runtime overrides |
-| Legacy reference | `databricks.yml` | Historical root bundle configuration retained during migration |
 
 ## Canonical Bundle Variables
 
@@ -35,9 +31,6 @@ shared app + ETL flow:
 - `vs_endpoint_name`
 - `embedding_model`
 - `pipeline_type`
-
-Compatibility aliases such as `catalog`, `schema`, and `warehouse_id` remain in
-the bundle for older scripts, but new deployment logic should prefer the canonical names.
 
 ## Targets
 
@@ -121,7 +114,6 @@ The deployment simplification work is opinionated in a few ways:
 
 - run `cd agent_app && databricks bundle validate -t <target>`
 - check the target overrides in `agent_app/databricks.yml`
-- confirm you are not assuming the root `databricks.yml` is active
 
 ### Local app uses stale values
 

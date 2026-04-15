@@ -32,7 +32,7 @@ class NotebookDeployConfig:
 
     @property
     def app_name(self) -> str:
-        return f"multi-agent-genie-app-{self.target}"
+        return f"dbx-unifiedchat-app-{self.target}"
 
 
 @dataclass
@@ -85,18 +85,6 @@ def resolve_bundle_var(project_dir: Path, target: str, var_name: str) -> str | N
     if isinstance(value, str):
         return value.replace("${bundle.target}", target)
     return str(value)
-
-
-def resolve_bundle_var_names(
-    project_dir: Path,
-    target: str,
-    *var_names: str,
-) -> str | None:
-    for var_name in var_names:
-        value = resolve_bundle_var(project_dir, target, var_name)
-        if value is not None:
-            return value
-    return None
 
 
 def bundle_settings(project_dir: Path, target: str) -> dict[str, str | None]:

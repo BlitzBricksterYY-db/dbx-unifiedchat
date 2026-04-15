@@ -168,11 +168,11 @@ Useful options:
 * `./scripts/dev-local-hot-reload.sh --profile <profile>`
 * `./scripts/dev-local-hot-reload.sh --skip-migrate`
 
-#### 4. Legacy root bundle and Model Serving path
+#### 4. Legacy Model Serving notebooks
 
-The repository-root bundle and the legacy Model Serving notebooks still exist as
-reference material, but they are no longer the recommended deployment path for
-the application. Use `agent_app/` for active deployments.
+The older Model Serving notebooks still exist as reference material, but they are
+not the recommended deployment path for the application. Use `agent_app/` for
+active deployments.
 
 ---
 
@@ -180,8 +180,6 @@ the application. Use `agent_app/` for active deployments.
 
 ```text
 .
-├── databricks.yml                  # Legacy root bundle kept for reference during migration
-├── resources/                      # Legacy root bundle resources
 ├── etl/                            # Shared ETL notebooks synced by the app bundle
 ├── agent_app/                      # Canonical Databricks App + deployment bundle
 │   ├── databricks.yml              # Canonical app DAB
@@ -245,7 +243,6 @@ This repository now centers on one active deployment bundle plus local dev confi
 |--------------|-------|---------|
 | `agent_app/databricks.yml` | App bundle | Canonical Databricks App, ETL prep, and validation settings |
 | `agent_app/.env` | Local app dev | Local script configuration for auth, database, and MLflow |
-| `databricks.yml` | Repository root | Legacy reference bundle retained during migration |
 
 See [Configuration Guide](docs/CONFIGURATION.md) for more detail.
 
