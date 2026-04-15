@@ -203,7 +203,9 @@ verify_auth() {
 BUNDLE_VALIDATE_OUTPUT=""
 bundle_validate_output() {
   if [[ -z "$BUNDLE_VALIDATE_OUTPUT" ]]; then
-    BUNDLE_VALIDATE_OUTPUT="$(databricks bundle validate -t "$TARGET" "${PROFILE_ARGS[@]}" --output json)"
+    if ! BUNDLE_VALIDATE_OUTPUT="$(databricks bundle validate -t "$TARGET" "${PROFILE_ARGS[@]}" --output json)"; then
+      error "Bundle validation failed. See the Databricks CLI output above."
+    fi
   fi
   printf '%s\n' "$BUNDLE_VALIDATE_OUTPUT"
 }
