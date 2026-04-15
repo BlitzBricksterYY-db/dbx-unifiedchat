@@ -27,6 +27,7 @@ class NotebookDeployConfig:
     profile: str | None = None
     run_after: bool = False
     sync_first: bool = False
+    deploy_mode: str = "full-deploy"
     bundle_app_key: str = "agent_migration"
 
     @property
@@ -86,6 +87,18 @@ def resolve_bundle_var(project_dir: Path, target: str, var_name: str) -> str | N
     return str(value)
 
 
+def resolve_bundle_var_names(
+    project_dir: Path,
+    target: str,
+    *var_names: str,
+) -> str | None:
+    for var_name in var_names:
+        value = resolve_bundle_var(project_dir, target, var_name)
+        if value is not None:
+            return value
+    return None
+
+
 def bundle_settings(project_dir: Path, target: str) -> dict[str, str | None]:
     resolved = hydrate_config_from_bundle(
         PermissionGrantConfig(
@@ -96,11 +109,11 @@ def bundle_settings(project_dir: Path, target: str) -> dict[str, str | None]:
         )
     )
     return {
-        "catalog": resolved.catalog_name,
-        "schema": resolved.schema_name,
-        "data_catalog": resolved.data_catalog_name,
-        "data_schema": resolved.data_schema_name,
-        "warehouse_id": resolved.warehouse_id,
+        "catalog_name": resolved.catalog_name,
+        "schema_name": resolved.schema_name,
+        "data_catalog_name": resolved.data_catalog_name,
+        "data_schema_name": resolved.data_schema_name,
+        "sql_warehouse_id": resolved.warehouse_id,
         "lakebase_instance_name": resolved.instance_name,
         "database_name": resolved.database_name,
         "genie_space_ids": ",".join(resolved.genie_space_ids or []),
@@ -202,6 +215,7 @@ def print_preflight_report(config: NotebookDeployConfig, report: PreflightReport
     print(f"  profile: {config.profile or '<workspace auth>'}")
     print(f"  effective_profile: {report.effective_profile or '<workspace auth>'}")
     print(f"  app_name: {config.app_name}")
+    print(f"  deploy_mode: {config.deploy_mode}")
     print(f"  sync_first: {config.sync_first}")
     print(f"  run_after: {config.run_after}")
     print()
@@ -226,37 +240,27 @@ def print_preflight_report(config: NotebookDeployConfig, report: PreflightReport
             print(f"  - {warning}")
 
 
-def build_bundle_commands(config: NotebookDeployConfig) -> list[str]:
-    commands: list[list[str]] = []
+def build_deploy_command(config: NotebookDeployConfig) -> str:
+    command = ["./scripts/deploy.sh", "--target", config.target]
+    if config.profile:
+        command.extend(["--profile", config.profile])
     if config.sync_first:
-        commands.append(
-            ["databricks", "bundle", "sync", "-t", config.target, *_profile_args(config.profile)]
-        )
-    commands.append(
-        ["databricks", "bundle", "deploy", "-t", config.target, *_profile_args(config.profile)]
-    )
+        command.append("--sync")
+    if config.deploy_mode == "prep-only":
+        command.append("--prep-only")
+    elif config.deploy_mode == "full-deploy":
+        command.append("--full-deploy")
     if config.run_after:
-        commands.append(
-            [
-                "databricks",
-                "bundle",
-                "run",
-                config.bundle_app_key,
-                "-t",
-                config.target,
-                *_profile_args(config.profile),
-            ]
-        )
-    return [_render_command(command) for command in commands]
+        command.append("--run")
+    return _render_command(command)
 
 
 def print_terminal_handoff(config: NotebookDeployConfig) -> None:
     print("Run these commands in the Databricks web terminal")
     print(f"  cd {shlex.quote(str(config.project_dir))}")
-    for command in build_bundle_commands(config):
-        print(f"  {command}")
+    print(f"  {build_deploy_command(config)}")
     print()
-    print("After the terminal commands finish, rerun the bootstrap and verification cells.")
+    print("After the terminal command finishes, rerun the verification cells.")
 
 
 def bootstrap_lakebase_role(
@@ -334,6 +338,13 @@ def verify_deployment(config: NotebookDeployConfig) -> None:
     print("Post-deploy verification")
     print(f"  app_exists: {app_exists}")
     print(f"  service_principal_client_id: {sp_client_id or '<not available yet>'}")
+    if app_exists:
+        app = _workspace_client(effective_profile).apps.get(config.app_name)
+        print(f"  url: {getattr(app, 'url', None) or '<not available yet>'}")
+        print(
+            "  compute_status: "
+            f"{getattr(app, 'compute_status', None) or '<not available yet>'}"
+        )
     if MANUAL_GRANT_NOTES:
         print()
         print("Manual follow-up")

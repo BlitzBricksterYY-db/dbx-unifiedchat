@@ -113,42 +113,40 @@ cd dbx-unifiedchat
 
 ### Recommended Workflow
 
-#### 1. Deploy metadata prerequisites from the root bundle
+#### 1. Use the canonical app bundle in `agent_app`
 
-Deploy the root-level Databricks Asset Bundle first, then run the ETL job defined in `resources/etl_pipeline.yml`. This is the prerequisite for both local testing and deployed app environments because it creates the metadata artifacts and vector index the agent relies on.
+The supported deployment surface is the Databricks App bundle under `agent_app/`.
+It now owns:
 
-```bash
-databricks bundle validate
-databricks bundle deploy
-databricks bundle run etl_pipeline
-```
+* app deployment
+* ETL preparation
+* shared Lakebase / Unity Catalog bootstrap
+* deployment validation
 
-Use `-t prod` for the production target when needed.
-
-#### 2. Deploy the app and agent from `agent_app`
-
-The active deployment path is now the Databricks App in `agent_app/`.
-
-Before running `agent_app/scripts/deploy.sh`, make sure you have:
-
-* Databricks CLI installed, authenticated, and able to run `databricks bundle deploy` / `databricks bundle run`
-* A Databricks CLI profile available via `--profile <profile>` or `DATABRICKS_CONFIG_PROFILE` in `agent_app/.env`
-* `uv` installed locally, because the deploy script uses `uv run` for Lakebase permission bootstrapping
-* Python 3.10+ with `PyYAML` available locally, because the script reads `agent_app/databricks.yml` via `import yaml`
-* Permission in the target workspace to deploy Databricks Apps / Asset Bundles and access the configured Lakebase, SQL warehouse, catalogs, and schemas
-
-`Node.js`, `npm`, and `jq` are used by the local development workflows, but are not required just to run `agent_app/scripts/deploy.sh`.
+From a local terminal or CI runner:
 
 ```bash
 cd agent_app
-./scripts/deploy.sh --run
+./scripts/deploy.sh --target dev --full-deploy --run
 ```
 
-Useful options:
+Useful variations:
 
-* `./scripts/deploy.sh --target prod --run`
-* `./scripts/deploy.sh --profile <profile> --run`
-* `./scripts/deploy.sh --sync --run`
+* `./scripts/deploy.sh --target prod --full-deploy --run`
+* `./scripts/deploy.sh --prep-only`
+* `./scripts/deploy.sh --sync --full-deploy --run`
+* `./scripts/deploy.sh --target prod --full-deploy --ci --skip-bootstrap`
+
+The deploy script validates the bundle, deploys the app resources, runs the prep or
+full deployment job graph, and can optionally start the app.
+
+#### 2. Workspace-native operator flow
+
+If you prefer to operate entirely inside Databricks, open
+`agent_app/scripts/deploy_notebook.py` and use it as a guided handoff to the
+Databricks web terminal. That notebook resolves the active target, prints the
+exact `./scripts/deploy.sh ...` command to run, and provides post-deploy
+verification.
 
 #### 3. Local app development in `agent_app`
 
@@ -170,9 +168,11 @@ Useful options:
 * `./scripts/dev-local-hot-reload.sh --profile <profile>`
 * `./scripts/dev-local-hot-reload.sh --skip-migrate`
 
-#### 4. Legacy model serving path
+#### 4. Legacy root bundle and Model Serving path
 
-The old Model Serving agent flow is deprecated. The related code still exists in the repo for now, but the supported deployment model is the Databricks App under `agent_app/`.
+The repository-root bundle and the legacy Model Serving notebooks still exist as
+reference material, but they are no longer the recommended deployment path for
+the application. Use `agent_app/` for active deployments.
 
 ---
 
@@ -180,18 +180,19 @@ The old Model Serving agent flow is deprecated. The related code still exists in
 
 ```text
 .
-├── databricks.yml                  # Root DAB for shared metadata resources
-├── resources/
-│   └── etl_pipeline.yml            # Job that exports Genie metadata and builds the VS index
-├── etl/                            # ETL notebooks used by the root bundle job
-├── agent_app/                      # Active Databricks App + agent implementation
-│   ├── databricks.yml              # App DAB
+├── databricks.yml                  # Legacy root bundle kept for reference during migration
+├── resources/                      # Legacy root bundle resources
+├── etl/                            # Shared ETL notebooks synced by the app bundle
+├── agent_app/                      # Canonical Databricks App + deployment bundle
+│   ├── databricks.yml              # Canonical app DAB
 │   ├── agent_server/               # Multi-agent backend
 │   ├── e2e-chatbot-app-next/       # Frontend and app backend
+│   ├── workflows/                  # App prep / validation notebook tasks
 │   ├── scripts/
-│   │   ├── deploy.sh               # Deploy app bundle
+│   │   ├── deploy.sh               # Canonical local / CI deploy entrypoint
 │   │   ├── dev-local.sh            # One-time local bootstrap/build
 │   │   └── dev-local-hot-reload.sh # Local hot-reload workflow
+│   ├── resources/                  # App resources + prep/full deployment jobs
 │   └── tests/                      # App-specific unit tests
 ├── tests/                          # Root integration and end-to-end tests
 ├── docs/                           # Project documentation
@@ -205,7 +206,7 @@ The old Model Serving agent flow is deprecated. The related code still exists in
 ### Getting Started
 
 * [**Development Guide**](docs/DEVELOPMENT_GUIDE.md) - Project setup and workflow overview
-* [**ETL Guide**](docs/ETL_GUIDE.md) - Root bundle ETL and metadata indexing workflow
+* [**ETL Guide**](docs/ETL_GUIDE.md) - Metadata indexing workflow used by the app bundle
 * [**Local Development Guide**](docs/LOCAL_DEVELOPMENT.md) - Local environment notes
 * [**Configuration Reference**](docs/CONFIGURATION.md) - Configuration details across environments
 
@@ -215,7 +216,8 @@ The old Model Serving agent flow is deprecated. The related code still exists in
 * [**API Reference**](docs/API.md) - Agent APIs and interfaces
 * [**Testing Guide**](tests/README.md) - Run tests and write new tests
 * [**Contributing**](CONTRIBUTING.md) - Contribution guidelines
-* `agent_app/scripts/deploy.sh` - Current app deployment entry point
+* `agent_app/scripts/deploy.sh` - Canonical local and CI deployment entry point
+* `agent_app/scripts/deploy_notebook.py` - Workspace-native operator handoff
 * `agent_app/scripts/dev-local.sh` - Current local bootstrap/build entry point
 * `agent_app/scripts/dev-local-hot-reload.sh` - Current hot-reload development entry point
 
@@ -237,14 +239,13 @@ See [Testing Guide](tests/README.md) for detailed testing documentation.
 
 ## Configuration
 
-This repository now centers on two active configuration layers plus one legacy path:
+This repository now centers on one active deployment bundle plus local dev config:
 
 | Configuration | Scope | Purpose |
 |--------------|-------|---------|
-| `databricks.yml` | Repository root | Shared metadata resources and ETL pipeline deployment |
-| `agent_app/databricks.yml` | App bundle | Databricks App deployment and runtime settings |
+| `agent_app/databricks.yml` | App bundle | Canonical Databricks App, ETL prep, and validation settings |
 | `agent_app/.env` | Local app dev | Local script configuration for auth, database, and MLflow |
-| Legacy model serving config | Deprecated | Older serving-based flow still present in repo |
+| `databricks.yml` | Repository root | Legacy reference bundle retained during migration |
 
 See [Configuration Guide](docs/CONFIGURATION.md) for more detail.
 
@@ -252,19 +253,11 @@ See [Configuration Guide](docs/CONFIGURATION.md) for more detail.
 
 ## Examples
 
-### Metadata Setup
-
-```bash
-# Deploy shared metadata resources and build the index
-databricks bundle deploy
-databricks bundle run etl_pipeline
-```
-
 ### App Deployment
 
 ```bash
 cd agent_app
-./scripts/deploy.sh --run
+./scripts/deploy.sh --full-deploy --run
 ```
 
 ### Local Development
@@ -284,8 +277,8 @@ cd agent_app
 | **Multi-Agent System** | LangGraph-based agent orchestration with specialized agents |
 | **Genie Integration** | Native integration with Databricks Genie spaces |
 | **Vector Search** | Semantic routing and metadata retrieval |
-| **ETL Pipeline** | Metadata enrichment and index building |
-| **Deployment Tools** | Notebooks and scripts for Databricks deployment |
+| **ETL Pipeline** | Metadata export, enrichment, and vector index build driven from the app bundle |
+| **Deployment Tools** | One canonical shell entrypoint plus a guided Databricks notebook handoff |
 | **Test Suite** | Comprehensive unit, integration, and E2E tests |
 
 ---

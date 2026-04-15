@@ -1,0 +1,105 @@
+resources:
+  jobs:
+    agent_app_preps_job:
+      name: "multi-agent-genie-app-prep-${bundle.target}"
+      description: >-
+        Prepare the app deployment surface by exporting Genie metadata, enriching
+        tables, building the vector index, and bootstrapping shared runtime access.
+      max_concurrent_runs: 1
+      tags:
+        project: multi_agent_genie_app
+        pipeline: prep
+
+      tasks:
+        - task_key: export_genie_spaces
+          notebook_task:
+            notebook_path: ../../etl/01_export_genie_spaces.py
+            source: WORKSPACE
+            base_parameters:
+              catalog_name: ${var.catalog_name}
+              schema_name: ${var.schema_name}
+              volume_name: ${var.volume_name}
+              genie_space_ids: ${var.genie_space_ids}
+              databricks_host: ""
+              databricks_token: ""
+          timeout_seconds: 3600
+
+        - task_key: enrich_table_metadata
+          depends_on:
+            - task_key: export_genie_spaces
+          notebook_task:
+            notebook_path: ../../etl/02_enrich_table_metadata.py
+            source: WORKSPACE
+            base_parameters:
+              catalog_name: ${var.catalog_name}
+              schema_name: ${var.schema_name}
+              volume_name: ${var.volume_name}
+              enriched_docs_table: ${var.enriched_docs_table}
+              llm_endpoint: ${var.llm_endpoint}
+              sample_size: ${var.sample_size}
+              max_unique_values: ${var.max_unique_values}
+          timeout_seconds: 7200
+
+        - task_key: build_vector_search_index
+          depends_on:
+            - task_key: enrich_table_metadata
+          notebook_task:
+            notebook_path: ../../etl/03_build_vector_search_index.py
+            source: WORKSPACE
+            base_parameters:
+              catalog_name: ${var.catalog_name}
+              schema_name: ${var.schema_name}
+              source_table: ${var.source_table}
+              vs_endpoint_name: ${var.vs_endpoint_name}
+              embedding_model: ${var.embedding_model}
+              pipeline_type: ${var.pipeline_type}
+          timeout_seconds: 3600
+
+        - task_key: prepare_shared_infra
+          depends_on:
+            - task_key: build_vector_search_index
+          notebook_task:
+            notebook_path: ../workflows/04_prepare_shared_infra.py
+            source: WORKSPACE
+            base_parameters:
+              app_name: "dbx-unifiedchat-app-${bundle.target}"
+              target: ${bundle.target}
+              catalog_name: ${var.catalog_name}
+              schema_name: ${var.schema_name}
+              data_catalog_name: ${var.data_catalog_name}
+              data_schema_name: ${var.data_schema_name}
+              sql_warehouse_id: ${var.sql_warehouse_id}
+              lakebase_instance_name: ${var.lakebase_instance_name}
+              experiment_id: ${var.experiment_id}
+          timeout_seconds: 1800
+
+    agent_app_full_deploy_job:
+      name: "multi-agent-genie-app-full-deploy-${bundle.target}"
+      description: >-
+        Run the app prep flow and then validate that the deployed Databricks App
+        surface is present and reachable for follow-up startup.
+      max_concurrent_runs: 1
+      tags:
+        project: multi_agent_genie_app
+        pipeline: full-deploy
+
+      tasks:
+        - task_key: prep
+          run_job_task:
+            job_id: ${resources.jobs.agent_app_preps_job.id}
+
+        - task_key: validate_app
+          depends_on:
+            - task_key: prep
+          notebook_task:
+            notebook_path: ../workflows/05_validate_app_deployment.py
+            source: WORKSPACE
+            base_parameters:
+              app_name: "dbx-unifiedchat-app-${bundle.target}"
+              target: ${bundle.target}
+              catalog_name: ${var.catalog_name}
+              schema_name: ${var.schema_name}
+              sql_warehouse_id: ${var.sql_warehouse_id}
+              lakebase_instance_name: ${var.lakebase_instance_name}
+              experiment_id: ${var.experiment_id}
+          timeout_seconds: 1200

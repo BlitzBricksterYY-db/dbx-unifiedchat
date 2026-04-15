@@ -10,13 +10,13 @@ resources:
           - name: CHAT_PROXY_TIMEOUT_SECONDS
             value: ${var.chat_proxy_timeout_seconds}
           - name: CATALOG_NAME
-            value: ${var.catalog}
+            value: ${var.catalog_name}
           - name: SCHEMA_NAME
-            value: ${var.schema}
+            value: ${var.schema_name}
           - name: DATA_CATALOG_NAME
-            value: ${var.data_catalog}
+            value: ${var.data_catalog_name}
           - name: DATA_SCHEMA_NAME
-            value: ${var.data_schema}
+            value: ${var.data_schema_name}
           - name: UC_FUNCTION_NAMES
             value: ${var.uc_function_names}
           - name: LLM_ENDPOINT
@@ -50,7 +50,7 @@ resources:
           - name: SOURCE_TABLE
             value: ${var.source_table}
           - name: SQL_WAREHOUSE_ID
-            value: ${var.warehouse_id}
+            value: ${var.sql_warehouse_id}
           - name: GENIE_SPACE_IDS
             value: ${var.genie_space_ids}
           - name: LAKEBASE_INSTANCE_NAME
@@ -82,7 +82,7 @@ resources:
         - name: 'trace-volume'
           uc_securable:
             securable_type: 'VOLUME'
-            securable_full_name: ${var.catalog}.${var.schema}.${var.volume_name}
+            securable_full_name: ${var.catalog_name}.${var.schema_name}.${var.volume_name}
             permission: 'WRITE_VOLUME'
         
 
@@ -103,7 +103,7 @@ resources:
         # SQL warehouse
         - name: 'sql-warehouse'
           sql_warehouse:
-            id: ${var.warehouse_id}
+            id: ${var.sql_warehouse_id}
             permission: 'CAN_USE'
 
 

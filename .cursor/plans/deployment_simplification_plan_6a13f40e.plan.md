@@ -4,16 +4,16 @@ overview: Make deployment easier by converging on one canonical deploy surface f
 todos:
   - id: canon-agent-app
     content: Define `agent_app` as the only supported app deployment bundle and normalize shared variable names.
-    status: pending
+    status: completed
   - id: unify-job-graph
     content: Move ETL, prep, deploy, and validation stages under `agent_app` jobs so shell and notebook flows share one execution graph.
-    status: pending
+    status: completed
   - id: harden-deploy-entrypoint
     content: Upgrade `agent_app/scripts/deploy.sh` with preflight checks, stage selection, and smoke validation.
-    status: pending
+    status: completed
   - id: align-ci-and-docs
     content: Make CI and documentation follow the same canonical deployment path and separate demo guidance from legacy/prod references.
-    status: pending
+    status: completed
 isProject: false
 ---
 

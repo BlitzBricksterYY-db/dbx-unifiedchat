@@ -135,6 +135,18 @@ def _resolve_bundle_variable(bundle_config: dict, target: str | None, variable_n
     return value
 
 
+def _resolve_first_bundle_variable(
+    bundle_config: dict,
+    target: str | None,
+    *variable_names: str,
+):
+    for variable_name in variable_names:
+        value = _resolve_bundle_variable(bundle_config, target, variable_name)
+        if value is not None:
+            return value
+    return None
+
+
 def hydrate_config_from_bundle(config: PermissionGrantConfig) -> PermissionGrantConfig:
     bundle_config = _load_bundle_config(config.bundle_config_path)
     if not bundle_config:
@@ -148,12 +160,37 @@ def hydrate_config_from_bundle(config: PermissionGrantConfig) -> PermissionGrant
     if not config.profile and target:
         config.profile = (((bundle_config.get("targets") or {}).get(target) or {}).get("workspace") or {}).get("profile")
 
-    config.catalog_name = config.catalog_name or _resolve_bundle_variable(bundle_config, target, "catalog")
-    config.schema_name = config.schema_name or _resolve_bundle_variable(bundle_config, target, "schema")
-    config.data_catalog_name = config.data_catalog_name or _resolve_bundle_variable(bundle_config, target, "data_catalog")
-    config.data_schema_name = config.data_schema_name or _resolve_bundle_variable(bundle_config, target, "data_schema")
+    config.catalog_name = config.catalog_name or _resolve_first_bundle_variable(
+        bundle_config,
+        target,
+        "catalog_name",
+        "catalog",
+    )
+    config.schema_name = config.schema_name or _resolve_first_bundle_variable(
+        bundle_config,
+        target,
+        "schema_name",
+        "schema",
+    )
+    config.data_catalog_name = config.data_catalog_name or _resolve_first_bundle_variable(
+        bundle_config,
+        target,
+        "data_catalog_name",
+        "data_catalog",
+    )
+    config.data_schema_name = config.data_schema_name or _resolve_first_bundle_variable(
+        bundle_config,
+        target,
+        "data_schema_name",
+        "data_schema",
+    )
     config.instance_name = config.instance_name or _resolve_bundle_variable(bundle_config, target, "lakebase_instance_name")
-    config.warehouse_id = config.warehouse_id or _resolve_bundle_variable(bundle_config, target, "warehouse_id")
+    config.warehouse_id = config.warehouse_id or _resolve_first_bundle_variable(
+        bundle_config,
+        target,
+        "sql_warehouse_id",
+        "warehouse_id",
+    )
     config.database_name = config.database_name or DEFAULT_DATABASE_NAME
 
     if not config.genie_space_ids:

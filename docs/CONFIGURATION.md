@@ -1,265 +1,142 @@
 # Configuration Guide
 
-This repository uses three different configuration systems depending on your workflow.
+This repository now has one active deployment configuration source of truth:
 
-## Three Configuration Systems
+- `agent_app/databricks.yml` for Databricks deployment targets and bundle variables
 
-### 1. Local Development: `config.py` + `.env`
+Local development still uses:
 
-**Used by**: Local development and testing
-**Purpose**: Quick iteration with local Python environment
+- `agent_app/.env` for local-only runtime settings
 
-**Setup**:
-```bash
-# 1. Copy template
-cp .env.example .env
+The repository-root `databricks.yml` remains in the repo as migration/reference
+material and should not be treated as the primary app deployment config.
 
-# 2. Edit .env with your credentials
-# DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
-# DATABRICKS_TOKEN=your-token
-# CATALOG_NAME=your_catalog
-# SCHEMA_NAME=your_schema
-# ...
+## Active Configuration Layers
 
-# 3. Run locally
-python -m src.multi_agent.main --query "test"
-```
+| Layer | File | Purpose |
+|------|------|---------|
+| Bundle deploy | `agent_app/databricks.yml` | Canonical dev/prod targets, ETL settings, app settings, Lakebase, warehouse, and Genie IDs |
+| Local runtime | `agent_app/.env` | Local development auth, ports, PG connection, and app runtime overrides |
+| Legacy reference | `databricks.yml` | Historical root bundle configuration retained during migration |
 
-**How it works**:
-- `config.py` loads environment variables from `.env`
-- Provides Python dataclasses for type-safe configuration
-- Used by CLI and local testing
+## Canonical Bundle Variables
 
-**Pros**:
-- ✅ Fast iteration (no Databricks needed)
-- ✅ Keep secrets in .env (gitignored)
-- ✅ Type-safe with Python classes
+`agent_app/databricks.yml` now uses canonical deployment variable names for the
+shared app + ETL flow:
 
-**Cons**:
-- ❌ Can't test Databricks-specific services locally
+- `catalog_name`
+- `schema_name`
+- `data_catalog_name`
+- `data_schema_name`
+- `sql_warehouse_id`
+- `genie_space_ids`
+- `lakebase_instance_name`
+- `experiment_id`
+- `vs_endpoint_name`
+- `embedding_model`
+- `pipeline_type`
 
----
+Compatibility aliases such as `catalog`, `schema`, and `warehouse_id` remain in
+the bundle for older scripts, but new deployment logic should prefer the canonical names.
 
-### 2. Databricks Testing: `dev_config.yaml`
+## Targets
 
-**Used by**: Testing in Databricks notebooks
-**Purpose**: Test with real Databricks services before deploying
+The app bundle defines `dev` and `prod` targets under `agent_app/databricks.yml`.
 
-**Setup**:
-```yaml
-# dev_config.yaml (at repo root)
-catalog_name: your_catalog
-schema_name: your_schema
-llm_endpoint: databricks-claude-sonnet-4-5
-genie_space_ids:
-  - space_id_1
-  - space_id_2
-sql_warehouse_id: your_warehouse_id
-# ...
-```
+Target responsibilities:
 
-**How it works**:
-- Loaded by `notebooks/test_agent_databricks.py`
-- Provides configuration for Databricks testing
-- Same format as production config (easy to compare)
+- workspace profile selection
+- environment-specific catalog/schema overrides
+- workspace-specific warehouse and Genie IDs
+- app-specific Lakebase and MLflow experiment settings
 
-**Pros**:
-- ✅ Test with real Genie spaces, Vector Search, Lakebase
-- ✅ Catch environment-specific issues before deploying
-- ✅ Faster than deploying to Model Serving
+Default behavior:
 
-**Cons**:
-- ⚠️ Requires syncing code to Databricks
+- `dev` is the default target for the app bundle
+- `prod` must be selected explicitly with `--target prod`
 
----
+## Local Development Config
 
-### 3. Production Deployment: `prod_config.yaml`
+For local development:
 
-**Used by**: Model Serving deployment
-**Purpose**: Production configuration packaged with model
+1. copy `agent_app/.env.example` to `agent_app/.env`
+2. run `agent_app/scripts/dev-local.sh` or `agent_app/scripts/dev-local-hot-reload.sh`
+3. let those scripts backfill bundle-managed values from `agent_app/databricks.yml`
 
-**Setup**:
-```yaml
-# prod_config.yaml (at repo root)
-catalog_name: prod_catalog
-schema_name: prod_schema
-llm_endpoint: databricks-claude-sonnet-4-5
-genie_space_ids:
-  - prod_space_id_1
-  - prod_space_id_2
-sql_warehouse_id: prod_warehouse_id
-# ...
-```
+Important distinction:
 
-**How it works**:
-- Referenced by `notebooks/deploy_agent.py` (line ~5637)
-- Packaged with model via `model_config` parameter
-- Loaded at runtime by deployed model
+- deployment settings belong in `agent_app/databricks.yml`
+- machine/user-specific local settings belong in `agent_app/.env`
 
-**Pros**:
-- ✅ Configuration versioned with model
-- ✅ No environment variables needed in Model Serving
-- ✅ Type-safe and structured
-- ✅ Easy to test different configs
+## How Deploy Scripts Resolve Config
 
-**Cons**:
-- ⚠️ Must redeploy to change configuration
+### `agent_app/scripts/deploy.sh`
 
----
+Reads from:
 
-## Configuration Comparison
+- bundle target passed by `--target`
+- bundle profile passed by `--profile` or target workspace profile
+- `agent_app/databricks.yml`
 
-| Feature | Local (.env) | Databricks Test (YAML) | Production (YAML) |
-|---------|--------------|------------------------|-------------------|
-| **Code Location** | Local machine | Databricks workspace | Model Serving |
-| **Config File** | `.env` | `dev_config.yaml` | `prod_config.yaml` |
-| **Config Loader** | `config.py` | `dev_config.yaml` | `prod_config.yaml` |
-| **Agent Code** | `src/multi_agent/` | `src/multi_agent/` | `src/multi_agent/` |
-| **Real Services** | ❌ (can mock) | ✅ Yes | ✅ Yes |
-| **Use Case** | Development | Testing | Production |
+Does not read:
 
-**Key Insight**: All three use the **same agent code** from `src/multi_agent/`!
+- `agent_app/.env`
 
-## Configuration Values
+### `agent_app/scripts/deploy_notebook.py`
 
-### Required Values
+Reads from:
 
-All configuration systems need these values:
+- notebook widgets
+- `agent_app/databricks.yml`
 
-**Databricks Connection**:
-- `DATABRICKS_HOST` / `databricks_host`: Your Databricks workspace URL
-- `DATABRICKS_TOKEN` / `databricks_token`: Authentication token
+It prints the canonical `./scripts/deploy.sh ...` command and should be treated
+as a workspace operator control plane, not a second config system.
 
-**Unity Catalog**:
-- `CATALOG_NAME` / `catalog_name`: Unity Catalog catalog name
-- `SCHEMA_NAME` / `schema_name`: Schema name for tables
+### Local dev scripts
 
-**LLM Endpoints** (agent-specific for optimal performance):
-- `llm_endpoint_clarification`: Fast model for clarification
-- `llm_endpoint_planning`: Smart model for planning
-- `llm_endpoint_sql_synthesis_table`: Smart model for SQL synthesis
-- `llm_endpoint_sql_synthesis_genie`: Smart model for Genie queries
-- `llm_endpoint_execution`: Fast model for execution
-- `llm_endpoint_summarize`: Fast model for summarization
+`dev-local.sh` and `dev-local-hot-reload.sh` read:
 
-**Genie & SQL**:
-- `genie_space_ids`: List of Genie space IDs to query
-- `sql_warehouse_id`: SQL Warehouse ID for queries
+- `agent_app/databricks.yml` for bundle defaults
+- `agent_app/.env` for local runtime values
 
-**Vector Search**:
-- `vs_endpoint_name`: Vector Search endpoint name
-- `embedding_model`: Embedding model for vector search
+## Industry-Friendly Defaults
 
-**Lakebase** (for state management):
-- `lakebase_instance_name`: Lakebase instance name
-- `lakebase_embedding_endpoint`: Embedding endpoint
-- `lakebase_embedding_dims`: Embedding dimensions
+The deployment simplification work is opinionated in a few ways:
 
-### Optional Values
+- the app bundle, not the root bundle, is the deployment center
+- target defaults are portable and no longer tied to a single user-specific workspace path
+- CI and local operators use the same deploy contract
+- ETL and app prep settings live next to the app deploy bundle
 
-- `sample_size`: Number of samples for enrichment (default: 100)
-- `max_unique_values`: Max unique values to capture (default: 50)
+## Security Notes
 
-## Switching Between Configurations
-
-### Scenario 1: Local Development → Databricks Testing
-
-```bash
-# 1. Develop locally with .env
-python -m src.multi_agent.main --query "test"
-
-# 2. Sync code to Databricks
-databricks workspace import-dir src/multi_agent /Workspace/src/multi_agent
-
-# 3. Open notebooks/test_agent_databricks.py in Databricks
-# (Uses dev_config.yaml automatically)
-```
-
-### Scenario 2: Databricks Testing → Production
-
-```bash
-# 1. Test with dev_config.yaml
-# Run notebooks/test_agent_databricks.py
-
-# 2. Update prod_config.yaml if needed
-# Compare with dev_config.yaml, adjust for production
-
-# 3. Deploy with prod_config.yaml
-# Run notebooks/deploy_agent.py
-# (References prod_config.yaml at line ~5637)
-```
-
-## Environment-Specific Configuration
-
-### Development Environment
-
-Use smaller/cheaper resources:
-- Smaller LLM models (e.g., Haiku for more agents)
-- Small sample sizes for testing
-- Test Genie spaces
-
-### Production Environment
-
-Use production resources:
-- Optimal LLM models (e.g., Sonnet for critical agents)
-- Full data processing
-- Production Genie spaces
-- Appropriate workload size and scaling
-
-## Security Best Practices
-
-1. **Never commit `.env` files**
-   - Already in `.gitignore`
-   - Contains sensitive credentials
-
-2. **Use secrets for YAML configs**
-   - For production: Use Databricks secrets
-   - Reference in YAML: `{{secrets/scope/key}}`
-
-3. **Rotate tokens regularly**
-   - Update `.env` and YAML configs
-   - Redeploy if production config changes
-
-4. **Separate dev and prod**
-   - Use different catalogs/schemas
-   - Different Genie spaces
-   - Prevents accidental production impact
+- keep secrets out of `agent_app/databricks.yml`
+- prefer Databricks auth via profiles or CI environment variables
+- keep `agent_app/.env` uncommitted
+- separate `dev` and `prod` values for warehouses, Genie spaces, and catalogs
 
 ## Troubleshooting
 
-### Issue: Configuration not loading
+### Bundle variables look wrong
 
-**Symptom**: `FileNotFoundError` or `KeyError`
+- run `cd agent_app && databricks bundle validate -t <target>`
+- check the target overrides in `agent_app/databricks.yml`
+- confirm you are not assuming the root `databricks.yml` is active
 
-**Solutions**:
-- **Local**: Check `.env` file exists and has all required values
-- **Databricks**: Check YAML file is at repo root
-- Verify file names match exactly
+### Local app uses stale values
 
-### Issue: Wrong configuration being used
+- inspect `agent_app/.env`
+- rerun `agent_app/scripts/dev-local.sh` so bundle values are rehydrated
+- verify the target/profile you are using matches the bundle target you expect
 
-**Symptom**: Using dev config in production
+### CI deploys a different shape than local
 
-**Solutions**:
-- Check `model_config` parameter in `deploy_agent.py`
-- Verify it points to correct YAML file
-- Review MLflow logs for loaded config
-
-### Issue: Can't connect to Databricks
-
-**Symptom**: Authentication errors
-
-**Solutions**:
-- Verify `DATABRICKS_HOST` includes `https://`
-- Check token hasn't expired
-- Verify workspace access
+- it should not anymore
+- check `.github/workflows/ci-cd.yml` and confirm it runs from `agent_app/`
+- compare the flags passed to `agent_app/scripts/deploy.sh`
 
 ## See Also
 
-- [Local Development Guide](LOCAL_DEVELOPMENT.md)
 - [Deployment Guide](DEPLOYMENT.md)
-- [ETL Configuration](../etl/README.md)
-
----
-
-**Questions?** See full guide at [docs/](.) or ask in discussions!
+- [Local Development Guide](LOCAL_DEVELOPMENT.md)
+- [Architecture](ARCHITECTURE.md)

@@ -138,16 +138,24 @@ def resolve_bundle_var(name: str) -> str:
         value = value.replace("${bundle.target}", resolved_target)
     return "" if value is None else str(value)
 
+
+def resolve_bundle_var_alias(*names: str) -> str:
+    for name in names:
+        value = resolve_bundle_var(name)
+        if value:
+            return value
+    return ""
+
 context = {
     "RESOLVED_TARGET": resolved_target,
     "RESOLVED_PROFILE": resolved_profile,
     "BUNDLE_LAKEBASE_INSTANCE": resolve_bundle_var("lakebase_instance_name"),
-    "BUNDLE_CATALOG_NAME": resolve_bundle_var("catalog"),
-    "BUNDLE_SCHEMA_NAME": resolve_bundle_var("schema"),
-    "BUNDLE_DATA_CATALOG_NAME": resolve_bundle_var("data_catalog"),
-    "BUNDLE_DATA_SCHEMA_NAME": resolve_bundle_var("data_schema"),
+    "BUNDLE_CATALOG_NAME": resolve_bundle_var_alias("catalog_name", "catalog"),
+    "BUNDLE_SCHEMA_NAME": resolve_bundle_var_alias("schema_name", "schema"),
+    "BUNDLE_DATA_CATALOG_NAME": resolve_bundle_var_alias("data_catalog_name", "data_catalog"),
+    "BUNDLE_DATA_SCHEMA_NAME": resolve_bundle_var_alias("data_schema_name", "data_schema"),
     "BUNDLE_UC_FUNCTION_NAMES": resolve_bundle_var("uc_function_names"),
-    "BUNDLE_SQL_WAREHOUSE_ID": resolve_bundle_var("warehouse_id"),
+    "BUNDLE_SQL_WAREHOUSE_ID": resolve_bundle_var_alias("sql_warehouse_id", "warehouse_id"),
     "BUNDLE_GENIE_SPACE_IDS": resolve_bundle_var("genie_space_ids"),
     "BUNDLE_EXPERIMENT_ID": resolve_bundle_var("experiment_id"),
 }

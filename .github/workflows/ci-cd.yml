@@ -26,13 +26,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: Install Databricks CLI
-        run: pip install databricks-cli
-      - name: Validate DAB
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - uses: databricks/setup-cli@main
+      - name: Validate app bundle
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-        run: databricks bundle validate
+        working-directory: agent_app
+        run: databricks bundle validate -t dev
 
   deploy-dev:
     needs: validate-bundle
@@ -40,14 +43,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: Deploy to Dev
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - uses: databricks/setup-cli@main
+      - name: Deploy app bundle to Dev
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-        run: |
-          pip install databricks-cli
-          databricks bundle deploy -t dev
-          databricks bundle run agent_integration_test -t dev
+        working-directory: agent_app
+        run: ./scripts/deploy.sh --target dev --full-deploy --run --ci --skip-bootstrap
 
   deploy-prod:
     needs: validate-bundle
@@ -55,11 +60,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: Deploy to Production
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - uses: databricks/setup-cli@main
+      - name: Deploy app bundle to Production
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_PROD_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_PROD_TOKEN }}
-        run: |
-          pip install databricks-cli
-          databricks bundle deploy -t prod
-          databricks bundle run agent_deploy -t prod
+        working-directory: agent_app
+        run: ./scripts/deploy.sh --target prod --full-deploy --run --ci --skip-bootstrap

@@ -1,8 +1,8 @@
 resources:
   schemas:
     multi_agent_genie_schema:
-      name: ${var.schema}
-      catalog_name: ${var.catalog}
+      name: ${var.schema_name}
+      catalog_name: ${var.catalog_name}
       grants:
         - principal: ${resources.apps.agent_migration.service_principal_client_id}
           privileges:
