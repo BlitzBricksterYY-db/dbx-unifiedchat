@@ -4,6 +4,7 @@ This directory includes the Databricks-native operator companion for the canonic
 deployment flow:
 
 - `deploy.sh`: canonical local / CI deployment entrypoint
+- `destroy.sh`: explicit bundle teardown entrypoint
 - `deploy_notebook.py`: workspace-side operator handoff
 - `notebook_deploy_lib.py`: shared preflight and verification helpers
 
@@ -38,6 +39,27 @@ It is intentionally not a second deployment system.
 - deployment settings come from `agent_app/databricks.yml`
 - the notebook does not read `.env`
 - `deploy.sh` remains the supported execution entrypoint
+
+## Operational Jobs
+
+The bundle exposes split operational jobs so metadata refresh, shared infra,
+and validation can be run independently:
+
+- `agent_app_metadata_refresh_job`
+  - runs ETL `01` -> `02` -> `03`
+  - use this when source metadata changes and you need to rebuild the retrieval surface
+- `agent_app_shared_infra_job`
+  - runs workflow `04`
+  - use this when app-facing infra, permissions, UC functions, or experiment wiring needs to be reconciled
+- `agent_app_validate_app_job`
+  - runs workflow `05`
+  - use this to smoke-check the deployed app surface without rerunning ETL
+- `agent_app_preps_job`
+  - wrapper job that runs metadata refresh and then shared infra setup
+  - this remains the target behind `./scripts/deploy.sh --prep-only`
+- `agent_app_full_deploy_job`
+  - wrapper job that runs prep and then validation
+  - this remains the target behind `./scripts/deploy.sh --full-deploy`
 
 ## Prerequisites
 

@@ -1,14 +1,14 @@
 resources:
   jobs:
-    agent_app_preps_job:
-      name: "multi-agent-genie-app-prep-${bundle.target}"
+    agent_app_metadata_refresh_job:
+      name: "multi-agent-genie-app-metadata-refresh-${bundle.target}"
       description: >-
-        Prepare the app deployment surface by exporting Genie metadata, enriching
-        tables, building the vector index, and bootstrapping shared runtime access.
+        Export Genie metadata, enrich table documentation, and rebuild the
+        vector search index without touching shared app infrastructure.
       max_concurrent_runs: 1
       tags:
         project: multi_agent_genie_app
-        pipeline: prep
+        pipeline: metadata-refresh
 
       tasks:
         - task_key: export_genie_spaces
@@ -55,9 +55,18 @@ resources:
               pipeline_type: ${var.pipeline_type}
           timeout_seconds: 3600
 
+    agent_app_shared_infra_job:
+      name: "multi-agent-genie-app-shared-infra-${bundle.target}"
+      description: >-
+        Ensure shared runtime infrastructure exists for the deployed app,
+        including Lakebase access, UC grants, UC functions, and MLflow experiment access.
+      max_concurrent_runs: 1
+      tags:
+        project: multi_agent_genie_app
+        pipeline: shared-infra
+
+      tasks:
         - task_key: prepare_shared_infra
-          depends_on:
-            - task_key: build_vector_search_index
           notebook_task:
             notebook_path: ../workflows/04_prepare_shared_infra.py
             source: WORKSPACE
@@ -75,11 +84,56 @@ resources:
               experiment_id: ${var.experiment_id}
           timeout_seconds: 1800
 
+    agent_app_preps_job:
+      name: "multi-agent-genie-app-prep-${bundle.target}"
+      description: >-
+        Run metadata refresh and then shared runtime preparation for the app deployment surface.
+      max_concurrent_runs: 1
+      tags:
+        project: multi_agent_genie_app
+        pipeline: prep
+
+      tasks:
+        - task_key: refresh_metadata
+          run_job_task:
+            job_id: ${resources.jobs.agent_app_metadata_refresh_job.id}
+
+        - task_key: prepare_shared_infra
+          depends_on:
+            - task_key: refresh_metadata
+          run_job_task:
+            job_id: ${resources.jobs.agent_app_shared_infra_job.id}
+
+    agent_app_validate_app_job:
+      name: "multi-agent-genie-app-validate-app-${bundle.target}"
+      description: >-
+        Smoke-validate the deployed Databricks App surface and confirm the
+        configured MLflow experiment is available.
+      max_concurrent_runs: 1
+      tags:
+        project: multi_agent_genie_app
+        pipeline: validate-app
+
+      tasks:
+        - task_key: validate_app
+          notebook_task:
+            notebook_path: ../workflows/05_validate_app_deployment.py
+            source: WORKSPACE
+            base_parameters:
+              app_name: ${resources.apps.agent_migration.name}
+              target: ${bundle.target}
+              catalog_name: ${var.catalog_name}
+              schema_name: ${var.schema_name}
+              sql_warehouse_id: ${var.sql_warehouse_id}
+              lakebase_instance_name: ${var.lakebase_instance_name}
+              experiment_id: ${var.experiment_id}
+          timeout_seconds: 1200
+
     agent_app_full_deploy_job:
       name: "multi-agent-genie-app-full-deploy-${bundle.target}"
       description: >-
-        Run the app prep flow and then validate that the deployed Databricks App
-        surface is present and reachable for follow-up startup.
+        Run metadata refresh, shared infrastructure setup, and app validation
+        for the deployed Databricks App surface.
       max_concurrent_runs: 1
       tags:
         project: multi_agent_genie_app
@@ -93,15 +147,5 @@ resources:
         - task_key: validate_app
           depends_on:
             - task_key: prep
-          notebook_task:
-            notebook_path: ../workflows/05_validate_app_deployment.py
-            source: WORKSPACE
-            base_parameters:
-              app_name: ${resources.apps.agent_migration.name}
-              target: ${bundle.target}
-              catalog_name: ${var.catalog_name}
-              schema_name: ${var.schema_name}
-              sql_warehouse_id: ${var.sql_warehouse_id}
-              lakebase_instance_name: ${var.lakebase_instance_name}
-              experiment_id: ${var.experiment_id}
-          timeout_seconds: 1200
+          run_job_task:
+            job_id: ${resources.jobs.agent_app_validate_app_job.id}
