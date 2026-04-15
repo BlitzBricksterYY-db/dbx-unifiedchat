@@ -234,7 +234,8 @@ for key, value in {
 PY
 }
 
-eval "$(resolve_bundle_metadata | python3 - <<'PY'
+load_bundle_metadata() {
+  eval "$(resolve_bundle_metadata | python3 - <<'PY'
 import json
 import shlex
 import sys
@@ -245,7 +246,8 @@ for line in sys.stdin:
 PY
 )"
 
-[[ -z "${APP_KEY:-}" || -z "${APP_NAME:-}" ]] && error "Failed to resolve app metadata from bundle validate output."
+  [[ -z "${APP_KEY:-}" || -z "${APP_NAME:-}" ]] && error "Failed to resolve app metadata from bundle validate output."
+}
 
 run_bundle_job_if_requested() {
   case "$DEPLOY_MODE" in
@@ -291,13 +293,6 @@ PY
   success "App smoke verification passed"
 }
 
-section "Deployment context"
-info "App     : $APP_NAME"
-info "Target  : $TARGET"
-info "Profile : ${PROFILE:-<ambient auth>}"
-info "Mode    : $DEPLOY_MODE"
-info "Run app : $RUN_AFTER"
-
 section "Checking prerequisites"
 require_command python3
 require_command databricks
@@ -319,6 +314,14 @@ fi
 section "Validating bundle"
 bundle_validate_output >/dev/null
 success "Bundle validation passed"
+load_bundle_metadata
+
+section "Deployment context"
+info "App     : $APP_NAME"
+info "Target  : $TARGET"
+info "Profile : ${PROFILE:-<ambient auth>}"
+info "Mode    : $DEPLOY_MODE"
+info "Run app : $RUN_AFTER"
 
 section "Deploying bundle"
 databricks bundle deploy -t "$TARGET" "${PROFILE_ARGS[@]}"
