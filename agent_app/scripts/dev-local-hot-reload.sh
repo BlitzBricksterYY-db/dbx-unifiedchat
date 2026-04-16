@@ -28,6 +28,7 @@ BACKEND_PORT="3001"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="$APP_DIR/.env"
+VENV_PYTHON="$APP_DIR/.venv/bin/python"
 
 SKIP_MIGRATE=false
 TARGET=""
@@ -83,12 +84,21 @@ free_port() {
   fi
 }
 
+require_local_venv() {
+  if [[ -x "$VENV_PYTHON" ]]; then
+    info "Using project virtualenv at $APP_DIR/.venv"
+    return 0
+  fi
+
+  error "Project virtualenv not found at '$APP_DIR/.venv'. Run ./scripts/deploy.sh first to bootstrap the local uv environment."
+}
+
 resolve_bundle_context() {
   local env_target env_profile
   env_target="$(read_env_value "LOCAL_DATABRICKS_TARGET" | tr -d '[:space:]')"
   env_profile="$(read_env_value "DATABRICKS_CONFIG_PROFILE" | tr -d '[:space:]')"
 
-  python - "$APP_DIR" "${TARGET:-}" "${PROFILE:-}" "${env_target:-}" "${env_profile:-}" <<'PY'
+  "$VENV_PYTHON" - "$APP_DIR" "${TARGET:-}" "${PROFILE:-}" "${env_target:-}" "${env_profile:-}" <<'PY'
 import pathlib
 import shlex
 import sys
@@ -157,6 +167,7 @@ for key, value in context.items():
 PY
 }
 
+require_local_venv
 eval "$(resolve_bundle_context)"
 
 [[ -z "$RESOLVED_TARGET" ]] && error "Unable to resolve bundle target from databricks.yml."

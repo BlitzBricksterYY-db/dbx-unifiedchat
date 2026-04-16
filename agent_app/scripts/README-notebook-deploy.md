@@ -41,6 +41,22 @@ It is intentionally not a second deployment system.
 - the notebook does not read `.env`
 - `deploy.sh` remains the supported execution entrypoint
 
+## Ways To Deploy
+
+Use one of these entrypoints depending on where you are operating:
+
+- local terminal
+  - run `./scripts/deploy.sh ...` from `agent_app`
+  - this is the normal first-run path because it bootstraps `agent_app/.venv`
+- Databricks web terminal
+  - use the command printed by `scripts/deploy_notebook.py`
+  - this path usually includes `--skip-bootstrap` because the workspace-side
+    handoff is for an already prepared terminal environment
+- CI
+  - run `./scripts/deploy.sh ... --ci`
+  - add `--skip-bootstrap` only when the runner was already prepared earlier in
+    the job
+
 ## Operational Jobs
 
 The bundle exposes split operational jobs so metadata refresh, shared infra,
@@ -78,17 +94,43 @@ For profile-based auth, a typical setup step is:
 databricks auth login --profile prod
 ```
 
-You do not need to manually create `agent_app/.venv` for the normal deploy path.
-`deploy.sh` creates or reuses the project virtual environment with `uv sync --dev`
-unless you explicitly use `--skip-bootstrap` or `--ci`.
+You do not need to manually create `agent_app/.venv` for the normal local deploy
+path. `deploy.sh` creates or reuses the project virtual environment with
+`uv sync --dev` unless you explicitly use `--skip-bootstrap` or `--ci`.
+
+Recommended first local command:
+
+```bash
+cd agent_app
+./scripts/deploy.sh --target dev --prep-only
+```
 
 Fresh terminal example:
 
 ```bash
-cd agent_app/scripts
+cd agent_app
 databricks auth login --profile prod
-./deploy.sh --target prod --skip-bootstrap --full-deploy --run
+./scripts/deploy.sh --target prod --skip-bootstrap --full-deploy --run
 ```
+
+## Local Development Best Practice
+
+After `./scripts/deploy.sh` has created `agent_app/.venv`, use one of the local
+development entrypoints:
+
+- `./scripts/dev-local.sh`
+  - standard local startup
+  - good for normal validation and less chatty workflows
+- `./scripts/dev-local-hot-reload.sh`
+  - watch-mode local development
+  - preferred when actively editing backend or frontend code
+
+You do not need to run `dev-local.sh` before `dev-local-hot-reload.sh`.
+They are alternative standalone entrypoints.
+
+Both local dev scripts now assume the project virtualenv already exists. If
+`.venv` is missing, they stop early and print an actionable message telling you
+to run `./scripts/deploy.sh` first.
 
 ## How To Use
 
