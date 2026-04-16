@@ -78,6 +78,12 @@ resources:
             experiment_id: ${var.experiment_id}
             permission: 'CAN_MANAGE'
 
+        - name: 'database'
+          database:
+            instance_name: ${var.lakebase_instance_name}
+            database_name: databricks_postgres
+            permission: 'CAN_CONNECT_AND_CREATE'
+
         # # UC Volume for MLflow trace artifacts
         # - name: 'trace-volume'
         #   uc_securable:

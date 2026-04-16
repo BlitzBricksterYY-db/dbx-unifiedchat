@@ -40,6 +40,8 @@ It is intentionally not a second deployment system.
 - deployment settings come from `agent_app/databricks.yml`
 - the notebook does not read `.env`
 - `deploy.sh` remains the supported execution entrypoint
+- `agent_app/app.yaml` is intentionally kept empty/commented because direct
+  Databricks Apps deploy or App UI Deploy is not the recommended path for this repo
 
 ## Ways To Deploy
 
@@ -111,6 +113,11 @@ databricks auth login --profile prod
 You do not need to manually create `agent_app/.venv` for the normal local deploy
 path. `deploy.sh` creates or reuses the project virtual environment with
 `uv sync --dev` unless you explicitly use `--skip-bootstrap` or `--ci`.
+
+After each bundle redeploy, `deploy.sh` also runs the shared infra
+reconciliation job by default so the app service principal keeps the expected
+Lakebase and related runtime permissions. Use `--skip-shared-infra` only when
+you intentionally need to bypass that automatic reconciliation step.
 
 Recommended first local command:
 

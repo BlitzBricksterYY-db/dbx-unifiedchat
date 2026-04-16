@@ -44,6 +44,12 @@ own.
 
 Use `--skip-bootstrap` only when the local environment is already prepared.
 
+After every bundle redeploy, `deploy.sh` now runs the shared infra reconciliation
+job by default so the Databricks App service principal keeps the expected
+Lakebase, Unity Catalog, and related runtime permissions. Use
+`--skip-shared-infra` only when you intentionally want to bypass that automatic
+reconciliation step.
+
 ## Ways To Deploy
 
 - Local terminal: run `./scripts/deploy.sh ...` from `agent_app`
@@ -56,6 +62,11 @@ The bundle source of truth is:
 
 - `databricks.yml`
 - `resources/*.yml`
+
+`app.yaml` is intentionally kept empty/commented and is not a maintained deploy
+manifest for this project. Direct Databricks Apps deployment via `databricks apps deploy`
+or the App UI Deploy button is not the recommended deployment path here; use the
+bundle-driven `./scripts/deploy.sh` flow instead.
 
 ## Local Development Best Practice
 

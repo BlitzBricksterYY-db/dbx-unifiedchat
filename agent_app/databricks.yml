@@ -32,7 +32,7 @@ variables:
 
   # MLflow experiment
   experiment_id:
-    default: "1430933840630413"
+    default: "3893426908922910"
 
   # LLM endpoints
   llm_endpoint:
@@ -124,7 +124,7 @@ targets:
     variables:
       catalog_name: "serverless_dbx_unifiedchat_catalog"
       schema_name: "multi_agent_genie"
-      experiment_id: "2377237249204444"
+      experiment_id: "3893426908922910"
       agent_keep_warm_interval_seconds: "600"
       # sql_warehouse_id: "<prod-warehouse-id>"
       # Override these per-environment as needed:

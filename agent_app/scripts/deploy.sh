@@ -27,6 +27,8 @@
 #   --sync-workspace     Sync local bundle files to the workspace bundle folder
 #                        for workspace-side development. This does not change
 #                        deployment behavior on its own.
+#   --skip-shared-infra  Skip the automatic shared-infra reconciliation job that
+#                        normally runs after deploy.
 #   --list-jobs          List available bundle jobs and their purpose, then exit.
 #   --run-job <prep|full|job_key>
 #                        Run one post-deploy bundle job. Use `prep`, `full`, or
@@ -47,6 +49,7 @@ TARGET=""
 PROFILE=""
 START_APP=false
 SYNC_WORKSPACE=false
+SKIP_SHARED_INFRA=false
 LIST_JOBS_ONLY=false
 POST_DEPLOY_JOB=""
 CI_MODE=false
@@ -105,6 +108,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --sync-workspace)    SYNC_WORKSPACE=true; shift ;;
+    --skip-shared-infra) SKIP_SHARED_INFRA=true; shift ;;
     --list-jobs)         LIST_JOBS_ONLY=true; shift ;;
     --run-job)
       require_value "$1" "${2:-}"
@@ -334,6 +338,9 @@ for job_key, job_config in sorted(jobs.items()):
 for key, value in {
     "APP_KEY": app_key,
     "APP_NAME": app_name,
+    "SHARED_INFRA_JOB_KEY": "agent_app_shared_infra_job" if "agent_app_shared_infra_job" in jobs else "",
+    "PREP_JOB_KEY": "agent_app_preps_job" if "agent_app_preps_job" in jobs else "",
+    "FULL_JOB_KEY": "agent_app_full_deploy_job" if "agent_app_full_deploy_job" in jobs else "",
     "RESOLVED_POST_DEPLOY_JOB": resolved_post_deploy_job,
     "JOB_SUMMARIES_JSON": json.dumps(job_summaries),
 }.items():
@@ -369,6 +376,42 @@ run_bundle_job_if_requested() {
   section "Running post-deploy job: $requested_label"
   databricks bundle run "$RESOLVED_POST_DEPLOY_JOB" -t "$TARGET" "${PROFILE_ARGS[@]}"
   success "Post-deploy job completed: $requested_label"
+}
+
+should_run_shared_infra_job() {
+  if [[ "$SKIP_SHARED_INFRA" == true ]]; then
+    return 1
+  fi
+
+  [[ -n "${SHARED_INFRA_JOB_KEY:-}" ]] || error "Shared infra job key not found in bundle resources. Use --skip-shared-infra to bypass."
+
+  if [[ -z "${RESOLVED_POST_DEPLOY_JOB:-}" ]]; then
+    return 0
+  fi
+
+  if [[ "$RESOLVED_POST_DEPLOY_JOB" == "$SHARED_INFRA_JOB_KEY" ]]; then
+    return 1
+  fi
+
+  if [[ -n "${PREP_JOB_KEY:-}" && "$RESOLVED_POST_DEPLOY_JOB" == "$PREP_JOB_KEY" ]]; then
+    return 1
+  fi
+
+  if [[ -n "${FULL_JOB_KEY:-}" && "$RESOLVED_POST_DEPLOY_JOB" == "$FULL_JOB_KEY" ]]; then
+    return 1
+  fi
+
+  return 0
+}
+
+run_shared_infra_if_needed() {
+  if ! should_run_shared_infra_job; then
+    return 0
+  fi
+
+  section "Running automatic shared-infra reconciliation"
+  databricks bundle run "$SHARED_INFRA_JOB_KEY" -t "$TARGET" "${PROFILE_ARGS[@]}"
+  success "Shared infra reconciliation completed"
 }
 
 list_bundle_jobs() {
@@ -461,21 +504,29 @@ info "App        : $APP_NAME"
 info "Target     : $TARGET"
 info "Profile    : ${PROFILE:-<ambient auth>}"
 info "Sync       : $SYNC_WORKSPACE"
-info "Post job   : ${POST_DEPLOY_JOB:-<none>}"
+info "Shared infra permissions grant to app SP after deploy : $([[ "$SKIP_SHARED_INFRA" == true ]] && echo "disabled" || echo "enabled")"
+info "Requested job to run after deploy : ${POST_DEPLOY_JOB:-<none>}"
 info "Start app  : $START_APP"
 
 section "Deploying bundle"
 databricks bundle deploy -t "$TARGET" "${PROFILE_ARGS[@]}"
 success "Bundle deploy complete"
 
+# it is important to run the shared infra job after every deploy bundle so the app can use the shared 
+# infra (granted permissions for resources can exceed 20 resources here, which is super nice to have!)
+run_shared_infra_if_needed
+
+# run other bundle jobs if requested
 run_bundle_job_if_requested
 
+# start the app if requested
 if [[ "$START_APP" == true ]]; then
   section "Starting app"
   databricks bundle run "$APP_KEY" -t "$TARGET" "${PROFILE_ARGS[@]}"
   success "App start command completed"
 fi
 
+# smoke verify the app status if requested
 smoke_verify_app
 
 echo
