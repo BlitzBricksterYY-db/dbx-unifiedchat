@@ -26,7 +26,7 @@ variables:
 
   # Lakebase
   lakebase_instance_name:
-    default: "multi-agent-genie-system-state-db-${bundle.target}"
+    default: "dbx-unifiedchat-state-db-${bundle.target}"
   lakebase_capacity:
     default: "CU_1"
 

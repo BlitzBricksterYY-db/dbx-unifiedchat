@@ -1,16 +1,19 @@
-resources:
-  schemas:
-    multi_agent_genie_schema:
-      name: ${var.schema_name}
-      catalog_name: ${var.catalog_name}
-      grants:
-        - principal: ${resources.apps.agent_migration.service_principal_client_id}
-          privileges:
-            - USE_SCHEMA
-            - SELECT
-            - EXECUTE
-      lifecycle:
-        prevent_destroy: true
+# NOTE: Deprecated in favor of /agent_app/workflows/04_prepare_shared_infra.py for any schema creation and grant permissions
+
+
+# resources:
+#   schemas:
+#     multi_agent_genie_schema:
+#       name: ${var.schema_name}
+#       catalog_name: ${var.catalog_name}
+#       grants:
+#         - principal: ${resources.apps.agent_migration.service_principal_client_id}
+#           privileges:
+#             - USE_SCHEMA
+#             - SELECT
+#             - EXECUTE
+#       lifecycle:
+#         prevent_destroy: true
 
       # healthverity_claims_sample_patient_dataset_dev is a Delta Sharing catalog (read-only),
       # schema grants must be applied manually by the catalog owner:
