@@ -84,15 +84,17 @@ Our CI/CD pipeline automatically runs tests and deploys based on branch pushes.
 If you need to deploy manually using the Databricks Asset Bundle (DAB):
 
 ```bash
-# Validate the bundle
-databricks bundle validate
+cd agent_app
 
-# Test agent in Databricks (Dev)
-databricks bundle run agent_integration_test -t dev
+# Validate the canonical app bundle
+databricks bundle validate -t dev
 
-# Deploy to Dev
-databricks bundle run agent_deploy -t dev
+# Run prep-only flow
+./scripts/deploy.sh --target dev --prep-only
 
-# Deploy to Prod
-databricks bundle run agent_deploy -t prod
+# Full deploy to Dev
+./scripts/deploy.sh --target dev --full-deploy --run
+
+# Full deploy to Prod
+./scripts/deploy.sh --target prod --full-deploy --run
 ```

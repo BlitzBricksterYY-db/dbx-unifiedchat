@@ -88,7 +88,12 @@ def run_database_migrations():
     if not CHATBOT_DIR.exists():
         return
     _run(["npm", "install"], cwd=CHATBOT_DIR, label="npm install")
-    _run(["npm", "run", "db:migrate"], cwd=CHATBOT_DIR, label="db:migrate")
+    rc = _run(["npm", "run", "db:migrate"], cwd=CHATBOT_DIR, label="db:migrate", check=False)
+    if rc != 0:
+        print(
+            "WARNING: db:migrate did not complete successfully; continuing app startup. "
+            "Database-backed chat features may be degraded until permissions and migrations are fixed."
+        )
 
 
 def main():

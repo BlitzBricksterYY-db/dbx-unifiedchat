@@ -1,5 +1,7 @@
-resources:
-  database_instances:
-    app_state_db:
-      name: ${var.lakebase_instance_name}
-      capacity: ${var.lakebase_capacity}
+# NOTE: Deprecated in favor of /agent_app/workflows/04_prepare_shared_infra.py for Lakebase creation and grant permissions
+
+# resources:
+#   database_instances:
+#     app_state_db:
+#       name: ${var.lakebase_instance_name}
+#       capacity: ${var.lakebase_capacity}

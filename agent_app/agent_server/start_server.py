@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 app = agent_server.app  # noqa: F841
 setup_mlflow_git_based_version_tracking()
 
+# Mount the /api/rechart endpoint for the "Ask chart" UI feature
+from agent_server.rechart_api import router as rechart_router  # noqa: E402
+app.include_router(rechart_router)
+
 
 def main():
     try:

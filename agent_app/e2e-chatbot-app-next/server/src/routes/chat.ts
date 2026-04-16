@@ -126,6 +126,27 @@ function clearActiveTurnRequest(chatId: string): void {
   activeTurnRequests.delete(chatId);
 }
 
+const isPlaywrightMockMode =
+  process.env.PLAYWRIGHT === 'True' &&
+  process.env.DATABRICKS_HOST === 'mock-value';
+
+function getMockResponseText(message?: ChatMessage): string {
+  const prompt = message?.parts.find((part) => part.type === 'text')?.text ?? '';
+  if (!prompt) {
+    return 'Mock continuation response.';
+  }
+  if (/diagnosis|common/i.test(prompt)) {
+    return 'The most common diagnosis code in the mock dataset is I10.';
+  }
+  if (/enrollment/i.test(prompt)) {
+    return 'Mock enrollment trends are available by month.';
+  }
+  if (/tables?/i.test(prompt)) {
+    return 'Available mock tables include claims, members, and providers.';
+  }
+  return `Mock response for: ${prompt}`;
+}
+
 function createActiveTurnRequest({
   logicalRequestId,
   message,
@@ -467,6 +488,74 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
     let finalUsage: LanguageModelUsage | undefined;
     let traceId: string | null = null;
     let clarificationData: { reason: string; options: string[] } | null = null;
+
+    if (isPlaywrightMockMode) {
+      const mockTraceId = `tr-${id}`;
+      const mockText = getMockResponseText(message);
+      const stream = createUIMessageStream({
+        originalMessages: uiMessages,
+        generateId: generateUUID,
+        execute: async ({ writer }) => {
+          const messageId = generateUUID();
+          const textId = generateUUID();
+          writer.write({ type: 'start', messageId });
+          writer.write({ type: 'start-step' });
+          writer.write({ type: 'text-start', id: textId });
+          writer.write({ type: 'text-delta', id: textId, delta: mockText });
+          writer.write({ type: 'text-end', id: textId });
+          writer.write({ type: 'finish-step' });
+          writer.write({ type: 'data-traceId', data: mockTraceId });
+        },
+        onFinish: async ({ responseMessage }) => {
+          storeMessageMeta(responseMessage.id, id, mockTraceId);
+          try {
+            await saveMessages({
+              messages: [
+                {
+                  id: responseMessage.id,
+                  role: responseMessage.role,
+                  parts: responseMessage.parts,
+                  createdAt: new Date(),
+                  attachments: [],
+                  chatId: id,
+                  traceId: mockTraceId,
+                },
+              ],
+            });
+          } catch (err) {
+            console.error('[mock onFinish] Failed to save assistant message:', err);
+          }
+          streamCache.clearActiveStream(id);
+          if (
+            activeTurnRequest &&
+            activeTurnRequests.get(id)?.logicalRequestId ===
+              activeTurnRequest.logicalRequestId
+          ) {
+            clearActiveTurnRequest(id);
+          }
+        },
+      });
+
+      pipeUIMessageStreamToResponse({
+        stream,
+        response: res,
+        consumeSseStream({ stream }) {
+          streamCache.storeStream({
+            streamId,
+            chatId: id,
+            stream,
+          });
+          if (
+            activeTurnRequest &&
+            activeTurnRequests.get(id)?.logicalRequestId ===
+              activeTurnRequest.logicalRequestId
+          ) {
+            activeTurnRequest.resolveStreamReady();
+          }
+        },
+      });
+      return;
+    }
 
     const model = await myProvider.languageModel(selectedChatModel);
     const modelMessages = await convertToModelMessages(uiMessages);

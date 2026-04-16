@@ -304,12 +304,18 @@ def enhance_comments_with_llm(columns: List[Dict], llm_endpoint: str) -> List[Di
             for orig_col, enhanced_col in zip(batch, enhanced_cols):
                 if isinstance(enhanced_col, dict):
                     if 'enhanced_comment' in enhanced_col:
-                        orig_col['enhanced_comment'] = enhanced_col['enhanced_comment']
+                        orig_col['enhanced_comment'] = (
+                            enhanced_col.get('enhanced_comment')
+                            or orig_col.get('comment')
+                            or ''
+                        )
                     else:
                         orig_col['enhanced_comment'] = orig_col.get('comment', '')
 
                     if 'classification' in enhanced_col:
-                        orig_col['classification'] = enhanced_col['classification']
+                        orig_col['classification'] = (
+                            enhanced_col.get('classification') or ''
+                        )
                 else:
                     # Fallback to original comment
                     orig_col['enhanced_comment'] = orig_col.get('comment', '')
@@ -734,8 +740,8 @@ Metadata_json: {json.dumps(doc, default=json_serializer)}
             for col in columns:
                 col_name = col.get('column_name')
                 col_type = col.get('data_type')
-                enhanced_comment = col.get('enhanced_comment', col.get('comment', ''))
-                classification = col.get('classification', '')
+                enhanced_comment = col.get('enhanced_comment') or col.get('comment') or ''
+                classification = col.get('classification') or ''
 
                 # Truncate long descriptions for overview
                 if len(enhanced_comment) > 300:
@@ -789,12 +795,12 @@ Key Categorical Fields:
             for col in columns:
                 col_name = col.get('column_name')
                 col_type = col.get('data_type')
-                enhanced_comment = col.get('enhanced_comment', col.get('comment', ''))
+                enhanced_comment = col.get('enhanced_comment') or col.get('comment') or ''
                 sample_values = col.get('sample_values', [])
                 value_dict = col.get('value_dictionary', {})
                 
                 # Determine column characteristics
-                classification = col.get('classification', '').lower()
+                classification = (col.get('classification') or '').lower()
 
                 is_categorical = 'categorical' in classification if classification else len(value_dict) > 0
                 is_temporal = 'temporal' in classification if classification else any(t in col_type.lower() for t in ['date', 'time', 'timestamp'])

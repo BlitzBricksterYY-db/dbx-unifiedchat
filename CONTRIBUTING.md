@@ -4,15 +4,12 @@ Thank you for your interest in contributing to this project. Please use the work
 
 ## Current Asset Status
 
-This repository has three active workflows:
+This repository has two active workflows:
 
-1. Root Databricks Asset Bundle for shared metadata and ETL.
-   - In `dev`, deploy the root bundle and run the ETL pipeline to create the metadata artifacts and vector index.
-   - If your `dev` workspace already has a shared metadata/index setup, you can reuse that instead of rebuilding it.
-2. `agent_app/` Databricks Asset Bundle for the app and Lakebase-backed runtime.
+1. `agent_app/` Databricks Asset Bundle for the app, ETL preparation, and Lakebase-backed runtime.
    - This is the active deployment path for the agent application.
-   - You can point it at another Lakebase database when appropriate, as long as the schema and tables are kept separate.
-3. Local development in `agent_app/`.
+   - Use the prep or full-deploy modes depending on whether you need ETL/bootstrap only or the full app rollout.
+2. Local development in `agent_app/`.
    - Use the local bootstrap and hot-reload scripts for iterative development across the frontend, middleware, and backend.
 
 ## Development Setup
@@ -34,17 +31,16 @@ This repository has three active workflows:
 
 4. For app-specific work, use the `agent_app/` workflow described in the repository README.
 
-5. When you need to recreate the metadata index in `dev`, deploy the root bundle and run the ETL pipeline:
+5. When you need to recreate metadata and shared infra in `dev`, use the canonical app bundle in prep mode:
    ```bash
-   databricks bundle validate
-   databricks bundle deploy
-   databricks bundle run etl_pipeline
+   cd agent_app
+   ./scripts/deploy.sh --target dev --prep-only
    ```
 
 6. When you need to deploy the app stack with Lakebase, use the app bundle:
    ```bash
    cd agent_app
-   ./scripts/deploy.sh --run
+   ./scripts/deploy.sh --target dev --full-deploy --run
    ```
 
 7. For local development in `agent_app`, use the local bootstrap or hot-reload scripts:

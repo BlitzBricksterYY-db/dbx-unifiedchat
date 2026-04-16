@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion';
 import React, { memo, useState } from 'react';
+import { MessageIdContext } from './elements/message-context';
 import { AnimatedAssistantIcon } from './animation-assistant-icon';
 import { Response } from './elements/response';
 import { MessageContent } from './elements/message';
@@ -205,11 +206,13 @@ const PurePreviewMessage = ({
                           : undefined
                       }
                     >
-                      <Response
-                        isStreaming={isLoading && message.role === 'assistant'}
-                      >
-                        {sanitizeText(joinMessagePartSegments(parts))}
-                      </Response>
+                      <MessageIdContext.Provider value={message.id}>
+                        <Response
+                          isStreaming={isLoading && message.role === 'assistant'}
+                        >
+                          {sanitizeText(joinMessagePartSegments(parts))}
+                        </Response>
+                      </MessageIdContext.Provider>
                     </MessageContent>
                   </div>
                 );

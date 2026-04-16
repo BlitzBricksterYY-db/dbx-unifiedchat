@@ -19,9 +19,7 @@ export class ChatPage {
   }
 
   private agentSettingsPanel(): Locator {
-    return this.page
-      .getByTestId('agent-settings-panel')
-      .or(this.page.getByText('Agent Settings'));
+    return this.page.getByTestId('agent-settings-panel');
   }
 
   private executionModeSection(): Locator {
@@ -29,15 +27,11 @@ export class ChatPage {
   }
 
   private executionModeValue(): Locator {
-    return this.page
-      .getByTestId('execution-mode-value')
-      .or(this.executionModeSection().locator('span').last());
+    return this.page.getByTestId('execution-mode-value');
   }
 
   private executionModeToggle(): Locator {
-    return this.page
-      .getByTestId('execution-mode-toggle')
-      .or(this.executionModeSection().getByRole('button').first());
+    return this.page.getByTestId('execution-mode-toggle');
   }
 
   private synthesisRouteButton(route: SynthesisRoute): Locator {

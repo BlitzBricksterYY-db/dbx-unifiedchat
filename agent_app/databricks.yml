@@ -1,35 +1,38 @@
 bundle:
   name: multi_agent_genie_app
 
+workspace:
+  root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+
 include:
   - resources/*.yml
 
 variables:
-  # Unity Catalog
-  catalog:
+  # Canonical Unity Catalog settings
+  catalog_name:
     default: "serverless_dbx_unifiedchat_catalog"
-  schema:
+  schema_name:
     default: "multi_agent_genie"
-  data_catalog:
+  data_catalog_name:
     default: "healthverity_claims_sample_patient_dataset"
-  data_schema:
+  data_schema_name:
     default: "hv_claims_sample"
   uc_function_names:
     default: "get_space_summary,get_table_overview,get_column_detail,get_space_instructions,get_space_details"
 
-  # SQL warehouse
-  warehouse_id:
+  # Canonical SQL warehouse setting
+  sql_warehouse_id:
     default: "a4ed2ccbda385db9"
 
   # Lakebase
   lakebase_instance_name:
-    default: "multi-agent-genie-system-state-db-${bundle.target}"
+    default: "dbx-unifiedchat-state-db-${bundle.target}"
   lakebase_capacity:
     default: "CU_1"
 
   # MLflow experiment
   experiment_id:
-    default: "1430933840630413"
+    default: "2377237249204444"
 
   # LLM endpoints
   llm_endpoint:
@@ -56,6 +59,8 @@ variables:
     default: "1024"
   vs_endpoint_name:
     default: "genie_multi_agent_vs"
+  pipeline_type:
+    default: "TRIGGERED"
 
   # App runtime
   chat_proxy_timeout_seconds:
@@ -93,42 +98,42 @@ variables:
 
 targets:
   dev:
-    default: false
+    default: true
     mode: development
     workspace:
       profile: dev
-      root_path: /Workspace/Users/yang.yang@databricks.com/.bundle/${bundle.name}/${bundle.target}
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
     variables:
-      catalog: "serverless_dbx_unifiedchat_dev_catalog"
-      schema: "multi_agent_genie"
-      data_catalog: "healthverity_claims_sample_patient_dataset_dev"
-      data_schema: "hv_claims_sample"
+      catalog_name: "serverless_dbx_unifiedchat_dev_catalog"
+      schema_name: "multi_agent_genie"
+      data_catalog_name: "healthverity_claims_sample_patient_dataset_dev"
+      data_schema_name: "hv_claims_sample"
       uc_function_names: "get_space_summary,get_table_overview,get_column_detail,get_space_instructions,get_space_details"
       experiment_id: "4357851413903846"
       agent_keep_warm_interval_seconds: "600"
-      warehouse_id: "32f4d1aae5fcf8ca"
+      sql_warehouse_id: "32f4d1aae5fcf8ca"
       lakebase_instance_name: "multi-agent-genie-system-state-db-dev"
       lakebase_capacity: "CU_1"
       genie_space_ids: "01f11b27d1121e2bb00d6ecd846b1988,01f11b27d23a1ab195fa7ba8efc06d13,01f11b27d3ea149694cf608c3d278673"
 
   prod:
-    default: true
     mode: production
     workspace:
       profile: prod
-      root_path: /Workspace/Users/yang.yang@databricks.com/.bundle/${bundle.name}/${bundle.target}
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
     variables:
-      catalog: "serverless_dbx_unifiedchat_catalog"
+      catalog_name: "serverless_dbx_unifiedchat_catalog"
+      schema_name: "multi_agent_genie"
       experiment_id: "2377237249204444"
       agent_keep_warm_interval_seconds: "600"
+      # sql_warehouse_id: "<prod-warehouse-id>"
       # Override these per-environment as needed:
-      # warehouse_id: "<prod-warehouse-id>"
       # genie_space_id_1: "<prod-space-id>"
       # genie_space_id_2: "<prod-space-id>"
       # genie_space_id_3: "<prod-space-id>"
       # genie_space_ids: "<comma-separated-prod-ids>"
 
 sync:
-  exclude:
-    - ./.venv/**
-    - ./.databricks/**
+  paths:
+    - .
+    - ../etl
