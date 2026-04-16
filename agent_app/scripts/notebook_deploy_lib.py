@@ -16,7 +16,7 @@ from scripts.grant_lakebase_permissions import (
 
 
 MANUAL_GRANT_NOTES = (
-    "HealthVerity source tables still require manual SELECT grants after deploy.",
+    "",
 )
 
 
@@ -25,13 +25,18 @@ class NotebookDeployConfig:
     project_dir: Path
     target: str = "dev"
     profile: str | None = None
-    run_after: bool = False
-    sync_first: bool = False
+    start_app: bool = False
+    sync_workspace: bool = False
+    job_to_run: str | None = "full"
     bundle_app_key: str = "agent_migration"
 
     @property
     def app_name(self) -> str:
-        return f"multi-agent-genie-app-{self.target}"
+        return resolve_app_name(
+            self.project_dir,
+            target=self.target,
+            bundle_app_key=self.bundle_app_key,
+        )
 
 
 @dataclass
@@ -69,6 +74,19 @@ def load_app_resource(project_dir: Path) -> dict:
     return load_yaml(project_dir / "resources" / "app.yml")
 
 
+def resolve_app_name(project_dir: Path, *, target: str, bundle_app_key: str) -> str:
+    app_resource = load_app_resource(project_dir)
+    app_config = ((app_resource.get("resources") or {}).get("apps") or {}).get(
+        bundle_app_key
+    )
+    raw_name = (app_config or {}).get("name")
+    if not raw_name:
+        return f"dbx-unifiedchat-app-{target}"
+    if isinstance(raw_name, str):
+        return raw_name.replace("${bundle.target}", target)
+    return str(raw_name)
+
+
 def resolve_bundle_var(project_dir: Path, target: str, var_name: str) -> str | None:
     config = load_bundle_config(project_dir)
     variables = config.get("variables", {})
@@ -96,11 +114,11 @@ def bundle_settings(project_dir: Path, target: str) -> dict[str, str | None]:
         )
     )
     return {
-        "catalog": resolved.catalog_name,
-        "schema": resolved.schema_name,
-        "data_catalog": resolved.data_catalog_name,
-        "data_schema": resolved.data_schema_name,
-        "warehouse_id": resolved.warehouse_id,
+        "catalog_name": resolved.catalog_name,
+        "schema_name": resolved.schema_name,
+        "data_catalog_name": resolved.data_catalog_name,
+        "data_schema_name": resolved.data_schema_name,
+        "sql_warehouse_id": resolved.warehouse_id,
         "lakebase_instance_name": resolved.instance_name,
         "database_name": resolved.database_name,
         "genie_space_ids": ",".join(resolved.genie_space_ids or []),
@@ -202,8 +220,9 @@ def print_preflight_report(config: NotebookDeployConfig, report: PreflightReport
     print(f"  profile: {config.profile or '<workspace auth>'}")
     print(f"  effective_profile: {report.effective_profile or '<workspace auth>'}")
     print(f"  app_name: {config.app_name}")
-    print(f"  sync_first: {config.sync_first}")
-    print(f"  run_after: {config.run_after}")
+    print(f"  job_to_run: {config.job_to_run or '<none>'}")
+    print(f"  sync_workspace: {config.sync_workspace}")
+    print(f"  start_app: {config.start_app}")
     print()
 
     print("Resolved bundle settings")
@@ -226,37 +245,51 @@ def print_preflight_report(config: NotebookDeployConfig, report: PreflightReport
             print(f"  - {warning}")
 
 
-def build_bundle_commands(config: NotebookDeployConfig) -> list[str]:
-    commands: list[list[str]] = []
-    if config.sync_first:
-        commands.append(
-            ["databricks", "bundle", "sync", "-t", config.target, *_profile_args(config.profile)]
-        )
-    commands.append(
-        ["databricks", "bundle", "deploy", "-t", config.target, *_profile_args(config.profile)]
-    )
-    if config.run_after:
-        commands.append(
-            [
-                "databricks",
-                "bundle",
-                "run",
-                config.bundle_app_key,
-                "-t",
-                config.target,
-                *_profile_args(config.profile),
-            ]
-        )
-    return [_render_command(command) for command in commands]
+def build_deploy_command(config: NotebookDeployConfig) -> str:
+    command = ["./scripts/deploy.sh", "--target", config.target, "--skip-bootstrap"]
+    if config.profile:
+        command.extend(["--profile", config.profile])
+    if config.sync_workspace:
+        command.append("--sync-workspace")
+    if config.job_to_run:
+        command.extend(["--run-job", config.job_to_run])
+    if config.start_app:
+        command.append("--start-app")
+    return _render_command(command)
+
+
+def build_destroy_command(config: NotebookDeployConfig) -> str:
+    command = ["./scripts/destroy.sh", "--target", config.target]
+    if config.profile:
+        command.extend(["--profile", config.profile])
+    return _render_command(command)
 
 
 def print_terminal_handoff(config: NotebookDeployConfig) -> None:
-    print("Run these commands in the Databricks web terminal")
+    print("Deploy handoff")
     print(f"  cd {shlex.quote(str(config.project_dir))}")
-    for command in build_bundle_commands(config):
-        print(f"  {command}")
+    print(f"  {build_deploy_command(config)}")
     print()
-    print("After the terminal commands finish, rerun the bootstrap and verification cells.")
+    print("Notes")
+    print(f"  - job_to_run widget     -> {config.job_to_run or '<none>'}")
+    print(f"  - sync_workspace widget -> {config.sync_workspace}")
+    print(f"  - start_app widget      -> {config.start_app}")
+    print("  - --skip-bootstrap is included for the Databricks web terminal flow")
+    print("  - use `prep`, `full`, or a bundle job key for `job_to_run`")
+    print(
+        "  - discover raw job keys with: "
+        f"./scripts/deploy.sh --target {shlex.quote(config.target)} --skip-bootstrap --list-jobs"
+    )
+    print()
+    print("Destroy handoff")
+    print("  WARNING: This removes bundle-managed resources for the selected target.")
+    print("  WARNING: Review the target/profile carefully before running it.")
+    print("  Usage:")
+    print(f"    cd {shlex.quote(str(config.project_dir))}")
+    print(f"    {build_destroy_command(config)}")
+    print("  To skip the confirmation prompt only after review, add: --auto-approve")
+    print()
+    print("After the deploy terminal command finishes, rerun the verification cells.")
 
 
 def bootstrap_lakebase_role(
@@ -334,6 +367,13 @@ def verify_deployment(config: NotebookDeployConfig) -> None:
     print("Post-deploy verification")
     print(f"  app_exists: {app_exists}")
     print(f"  service_principal_client_id: {sp_client_id or '<not available yet>'}")
+    if app_exists:
+        app = _workspace_client(effective_profile).apps.get(config.app_name)
+        print(f"  url: {getattr(app, 'url', None) or '<not available yet>'}")
+        print(
+            "  compute_status: "
+            f"{getattr(app, 'compute_status', None) or '<not available yet>'}"
+        )
     if MANUAL_GRANT_NOTES:
         print()
         print("Manual follow-up")

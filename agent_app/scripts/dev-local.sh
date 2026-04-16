@@ -34,6 +34,7 @@ DEFAULT_PGPORT="5432"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="$APP_DIR/.env"
+VENV_PYTHON="$APP_DIR/.venv/bin/python"
 
 SKIP_MIGRATE=false
 TARGET=""
@@ -103,12 +104,21 @@ free_port() {
   fi
 }
 
+require_local_venv() {
+  if [[ -x "$VENV_PYTHON" ]]; then
+    info "Using project virtualenv at $APP_DIR/.venv"
+    return 0
+  fi
+
+  error "Project virtualenv not found at '$APP_DIR/.venv'. Run ./scripts/deploy.sh first to bootstrap the local uv environment."
+}
+
 resolve_bundle_context() {
   local env_target env_profile
   env_target="$(read_env_value "LOCAL_DATABRICKS_TARGET" | tr -d '[:space:]')"
   env_profile="$(read_env_value "DATABRICKS_CONFIG_PROFILE" | tr -d '[:space:]')"
 
-  python - "$APP_DIR" "${TARGET:-}" "${PROFILE:-}" "${env_target:-}" "${env_profile:-}" <<'PY'
+  "$VENV_PYTHON" - "$APP_DIR" "${TARGET:-}" "${PROFILE:-}" "${env_target:-}" "${env_profile:-}" <<'PY'
 import pathlib
 import shlex
 import sys
@@ -162,12 +172,12 @@ context = {
     "RESOLVED_TARGET": resolved_target,
     "RESOLVED_PROFILE": resolved_profile,
     "BUNDLE_LAKEBASE_INSTANCE": resolve_bundle_var("lakebase_instance_name"),
-    "BUNDLE_CATALOG_NAME": resolve_bundle_var("catalog"),
-    "BUNDLE_SCHEMA_NAME": resolve_bundle_var("schema"),
-    "BUNDLE_DATA_CATALOG_NAME": resolve_bundle_var("data_catalog"),
-    "BUNDLE_DATA_SCHEMA_NAME": resolve_bundle_var("data_schema"),
+    "BUNDLE_CATALOG_NAME": resolve_bundle_var("catalog_name"),
+    "BUNDLE_SCHEMA_NAME": resolve_bundle_var("schema_name"),
+    "BUNDLE_DATA_CATALOG_NAME": resolve_bundle_var("data_catalog_name"),
+    "BUNDLE_DATA_SCHEMA_NAME": resolve_bundle_var("data_schema_name"),
     "BUNDLE_UC_FUNCTION_NAMES": resolve_bundle_var("uc_function_names"),
-    "BUNDLE_SQL_WAREHOUSE_ID": resolve_bundle_var("warehouse_id"),
+    "BUNDLE_SQL_WAREHOUSE_ID": resolve_bundle_var("sql_warehouse_id"),
     "BUNDLE_GENIE_SPACE_IDS": resolve_bundle_var("genie_space_ids"),
     "BUNDLE_EXPERIMENT_ID": resolve_bundle_var("experiment_id"),
 }
@@ -177,6 +187,7 @@ for key, value in context.items():
 PY
 }
 
+require_local_venv
 eval "$(resolve_bundle_context)"
 
 [[ -z "$RESOLVED_TARGET" ]] && error "Unable to resolve bundle target from databricks.yml."

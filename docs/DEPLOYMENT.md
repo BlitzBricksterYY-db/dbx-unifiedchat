@@ -1,391 +1,119 @@
 # Deployment Guide
 
-Complete guide for deploying the multi-agent system to Databricks Model Serving.
+This repository now has one supported deployment surface for the application:
 
-## Overview
+- bundle root: `agent_app/`
+- canonical entrypoint: `agent_app/scripts/deploy.sh`
+- guided workspace/operator path: `agent_app/scripts/deploy_notebook.py`
 
-This guide covers deploying both the ETL pipeline and the agent system to Databricks.
+## Canonical Flow
 
-## Two-Phase Deployment
-
-### Phase 1: Deploy ETL Pipeline
-
-ETL must be deployed and run **before** deploying the agent system.
-
-**Options**:
-1. **Databricks Jobs** (Recommended for scheduled ETL)
-2. **Manual execution** (Run notebooks directly)
-3. **Databricks Workflows** (For complex orchestration)
-
-See [ETL Deployment](#etl-deployment) section below.
-
-### Phase 2: Deploy Agent System
-
-After ETL completes, deploy the agent to Model Serving.
-
-See [Agent Deployment](#agent-deployment) section below.
-
----
-
-## ETL Deployment
-
-### Option 1: Databricks Jobs (Recommended)
-
-**Setup**:
-```bash
-# 1. Upload ETL notebooks to Databricks workspace
-databricks workspace import-dir etl /Workspace/etl --overwrite
-
-# 2. Create job configuration
-# Use config/jobs/job_config_etl.json as template
-
-# 3. Create job via CLI or UI
-databricks jobs create --json-file config/jobs/job_config_etl.json
-
-# 4. Run job
-databricks jobs run-now --job-id <job-id>
-```
-
-**Job Configuration** (`config/jobs/job_config_etl.json`):
-```json
-{
-  "name": "Multi-Agent ETL Pipeline",
-  "tasks": [
-    {
-      "task_key": "export_genie_spaces",
-      "notebook_task": {
-        "notebook_path": "/Workspace/etl/01_export_genie_spaces"
-      }
-    },
-    {
-      "task_key": "enrich_metadata",
-      "depends_on": [{"task_key": "export_genie_spaces"}],
-      "notebook_task": {
-        "notebook_path": "/Workspace/etl/02_enrich_table_metadata"
-      }
-    },
-    {
-      "task_key": "build_vector_index",
-      "depends_on": [{"task_key": "enrich_metadata"}],
-      "notebook_task": {
-        "notebook_path": "/Workspace/etl/03_build_vector_search_index"
-      }
-    }
-  ]
-}
-```
-
-### Option 2: Manual Execution
-
-For one-time setup or testing:
-
-1. Upload notebooks to Databricks workspace
-2. Open each notebook in Databricks
-3. Run notebooks **in order**:
-   - `01_export_genie_spaces.py`
-   - `02_enrich_table_metadata.py`
-   - `03_build_vector_search_index.py`
-
-### ETL Verification
-
-After ETL completes, verify:
-
-```sql
--- Check enriched metadata table
-SELECT COUNT(*) FROM {catalog}.{schema}.enriched_genie_docs;
-
--- Check chunks table
-SELECT COUNT(*) FROM {catalog}.{schema}.enriched_genie_docs_chunks;
-
--- Check vector search index
--- Go to UI: Compute → Vector Search → Check index status
-```
-
----
-
-## Agent Deployment
-
-### Prerequisites
-
-Before deploying the agent:
-
-1. ✅ ETL pipeline has run successfully
-2. ✅ Enriched tables exist
-3. ✅ Vector search index is synced
-4. ✅ Agent code tested locally (see [LOCAL_DEVELOPMENT.md](LOCAL_DEVELOPMENT.md))
-5. ✅ Agent code tested in Databricks (see [../notebooks/README.md](../notebooks/README.md))
-
-### Deployment Steps
-
-#### Step 1: Prepare Code and Configuration
+Run deployments from `agent_app/`:
 
 ```bash
-# 1. Sync agent code to Databricks
-databricks workspace import-dir src/multi_agent /Workspace/src/multi_agent --overwrite
-
-# 2. Upload notebooks
-databricks workspace import notebooks/deploy_agent.py /Workspace/notebooks/deploy_agent
-databricks workspace import notebooks/agent.py /Workspace/notebooks/agent
-
-# 3. Update prod_config.yaml
-# Edit prod_config.yaml with production values:
-# - Production Genie space IDs
-# - Production SQL Warehouse ID
-# - Production Lakebase instance
-# - Production LLM endpoints
-
-# 4. Upload configuration
-databricks workspace upload prod_config.yaml /Workspace/prod_config.yaml
+cd agent_app
+./scripts/deploy.sh --target dev --full-deploy --run
 ```
 
-#### Step 2: Deploy via Databricks Notebook
+What this does:
 
-1. **Open `notebooks/deploy_agent.py` in Databricks**
+1. validates the app bundle
+2. deploys the Databricks App resources
+3. runs the shared prep or full-deploy job graph
+4. optionally starts the app
+5. smoke-checks the deployed app surface
 
-2. **Verify configuration** in the first few cells:
-   - Check `prod_config.yaml` path
-   - Verify all resources are accessible
+## Deployment Modes
 
-3. **Run deployment cells**:
+| Mode | Command | When to use it |
+|------|---------|----------------|
+| Deploy only | `./scripts/deploy.sh --target dev` | Update bundle-managed resources without running prep jobs |
+| Prep only | `./scripts/deploy.sh --target dev --prep-only` | Build metadata and bootstrap shared infra before app rollout |
+| Full deploy | `./scripts/deploy.sh --target dev --full-deploy` | Run prep plus deployment validation |
+| Full deploy + start | `./scripts/deploy.sh --target dev --full-deploy --run` | Standard end-to-end operator flow |
+| CI mode | `./scripts/deploy.sh --target prod --full-deploy --run --ci --skip-bootstrap` | Non-interactive runner with preinstalled tooling |
 
-The deployment notebook does:
-```python
-# Key deployment code (around line 5627)
-logged_agent_info = mlflow.pyfunc.log_model(
-    name="super_agent_hybrid_with_memory",
-    python_model="./agent.py",              # MLflow wrapper
-    code_paths=["../src/multi_agent"],      # 🎯 Packages modular code
-    input_example=input_example,
-    resources=resources,                     # All Databricks resources
-    model_config="../prod_config.yaml",      # Production config
-    pip_requirements=[...]
-)
+## What The Job Graph Runs
 
-# Register to Unity Catalog
-uc_model_info = mlflow.register_model(
-    model_uri=logged_agent_info.model_uri,
-    name=f"{catalog}.{schema}.super_agent_hybrid"
-)
+The `agent_app` bundle now owns the deployment execution graph:
 
-# Deploy to Model Serving
-deployment_info = agents.deploy(
-    f"{catalog}.{schema}.super_agent_hybrid",
-    uc_model_info.version,
-    scale_to_zero=True,
-    workload_size="Small"
-)
+```mermaid
+flowchart LR
+  exportGenie[ExportGenie] --> enrichMetadata[EnrichMetadata]
+  enrichMetadata --> buildVsIndex[BuildVectorIndex]
+  buildVsIndex --> prepareInfra[PrepareSharedInfra]
+  prepareInfra --> validateApp[ValidateApp]
 ```
 
-4. **Monitor deployment**:
-   - Check MLflow UI for model registration
-   - Check Model Serving UI for endpoint status
-   - Wait for endpoint to be ready (typically 5-10 minutes)
+Notes:
 
-#### Step 3: Verify Deployment
+- `databricks bundle deploy` still provisions the Databricks App resources.
+- The prep and full-deploy jobs handle metadata preparation and validation around that deploy.
+- `--run` starts the app resource after those stages complete.
 
-```bash
-# Test endpoint via CLI
-databricks serving-endpoints query \
-  --endpoint-name multi-agent-genie-endpoint \
-  --data '{
-    "input": [{"role": "user", "content": "Show me patient data"}],
-    "custom_inputs": {"thread_id": "test-123"}
-  }'
-```
+## Workspace-Native Operator Path
 
-Or test in AI Playground:
-- Go to Model Serving UI
-- Open your endpoint
-- Click "Query Endpoint" or "AI Playground"
-- Test with sample queries
+If you want a Databricks-native flow:
 
-### Deployment Resources
+1. Open `agent_app/scripts/deploy_notebook.py` in Databricks.
+2. Set `project_dir`, `target`, `deploy_mode`, `sync_first`, and `run_after`.
+3. Run the preflight cell.
+4. Copy the printed `./scripts/deploy.sh ...` command into the Databricks web terminal.
+5. Re-run the verification cell after the terminal command completes.
 
-The agent requires these Databricks resources (automatically logged):
+This path is meant to be the easiest operator experience inside Databricks while
+still using the same underlying deploy contract as local terminals and CI.
 
-- **LLM Endpoints**: Various Claude models for different agents
-- **Lakebase**: State management (short-term + long-term memory)
-- **Vector Search Index**: Semantic search for planning
-- **SQL Warehouse**: Query execution
-- **Genie Spaces**: Data source querying
-- **Unity Catalog Tables**: Enriched metadata
-- **UC Functions**: Metadata tools
+## Prerequisites
 
-All resources are declared in `deploy_agent.py` and logged with MLflow.
+For local terminal deploys:
 
-## Configuration: Three Systems
+- Databricks CLI with bundle support
+- Databricks auth via `--profile` or ambient credentials
+- Python 3.11+
+- `uv` if you want the script to bootstrap local Python dependencies
 
-### Development Testing (`dev_config.yaml`)
-- Development Genie spaces
-- Test data
-- Smaller/cheaper resources
-- Used by `notebooks/test_agent_databricks.py`
+For CI:
 
-### Production (`prod_config.yaml`)
-- Production Genie spaces
-- Full data
-- Production-grade resources
-- Used by `notebooks/deploy_agent.py`
+- modern Databricks CLI installed via `databricks/setup-cli`
+- workspace auth in environment variables
+- runner access to execute `agent_app/scripts/deploy.sh`
 
-### Local (`config.py` + `.env`)
-- Local development
-- Mock or real services
-- Not used for deployment
+## CI/CD
 
-See [CONFIGURATION.md](CONFIGURATION.md) for complete guide.
+GitHub Actions should deploy from the same place humans do:
 
-## Updating Deployed Agent
-
-### Option 1: New Version (Recommended)
-
-```python
-# In deploy_agent.py:
-# 1. Make code changes in src/multi_agent/
-# 2. Sync to Databricks
-# 3. Run deployment cells again
-# This creates a new model version
-```
-
-### Option 2: Update Configuration Only
-
-If only configuration changed:
-```yaml
-# 1. Edit prod_config.yaml
-# 2. Redeploy (creates new version with new config)
-```
-
-## Monitoring
-
-### Check Endpoint Status
-
-```bash
-# Get endpoint details
-databricks serving-endpoints get --name multi-agent-genie-endpoint
-
-# View logs
-databricks serving-endpoints logs --name multi-agent-genie-endpoint
-```
-
-### MLflow Tracking
-
-View in MLflow UI:
-- Model versions
-- Logged parameters (LLM endpoints, config version)
-- Metrics and traces
-- Deployment history
-
-### Inference Tables
-
-Check AI Gateway inference tables:
-```sql
-SELECT * FROM system.ai_gateway.inference_logs
-WHERE endpoint_name = 'multi-agent-genie-endpoint'
-ORDER BY timestamp DESC
-LIMIT 100;
-```
-
-## Rollback
-
-### Rollback to Previous Version
-
-```python
-from databricks import agents
-
-# List versions
-# Find previous working version
-
-# Deploy previous version
-agents.deploy(
-    "catalog.schema.super_agent_hybrid",
-    previous_version_number,
-    scale_to_zero=True,
-    workload_size="Small"
-)
-```
+- validate: `cd agent_app && databricks bundle validate -t dev`
+- deploy dev: `./scripts/deploy.sh --target dev --full-deploy --run --ci --skip-bootstrap`
+- deploy prod: `./scripts/deploy.sh --target prod --full-deploy --run --ci --skip-bootstrap`
 
 ## Troubleshooting
 
-### Deployment Fails: Resource Not Found
+### Bundle validation fails
 
-**Problem**: `ResourceNotFound: Genie space not found`
+- Run `cd agent_app && databricks bundle validate -t <target>`.
+- Confirm the target profile or ambient auth points at the intended workspace.
+- Check that ETL paths are available through `sync.paths`.
 
-**Solution**:
-- Verify all Genie space IDs in `prod_config.yaml` exist
-- Check you have access to all resources
-- Review resource list in `deploy_agent.py`
+### Prep job fails
 
-### Deployment Fails: Import Error
+- Re-run with `--prep-only` to isolate ETL and shared infra issues.
+- Check the Databricks job run output for the failing task.
+- Confirm Genie space IDs, SQL warehouse, UC schema, and Lakebase instance are correct for the target.
 
-**Problem**: `ModuleNotFoundError: No module named 'multi_agent'`
+### App deploy succeeds but app is unusable
 
-**Solution**:
-- Verify `code_paths=["../src/multi_agent"]` in `deploy_agent.py`
-- Check `src/multi_agent/` was synced to Databricks
-- Verify path is correct relative to notebooks/
+- Re-run with `--full-deploy --run` so prep, validation, and startup all happen in order.
+- Use `databricks apps get <app-name>` and `databricks apps logs <app-name>` to inspect runtime state.
+- Check that the app service principal has the expected schema, volume, warehouse, and Lakebase access.
 
-### Endpoint Not Responding
+### Notebook operator flow is confusing
 
-**Problem**: Endpoint returns errors or timeouts
+- Use `deploy_mode=full-deploy` unless you intentionally want a narrower step.
+- Keep `project_dir` pointed at `agent_app`.
+- Treat the notebook as a control plane only; run the printed deploy command in the web terminal.
 
-**Solution**:
-- Check endpoint logs in Model Serving UI
-- Verify all resources are accessible
-- Check Lakebase connection
-- Increase workload size if needed
+## Legacy Notes
 
-### Configuration Not Loading
-
-**Problem**: Agent using wrong configuration
-
-**Solution**:
-- Verify `model_config="../prod_config.yaml"` path
-- Check YAML file exists at repo root
-- Review MLflow logs for loaded config
-
-## Scaling and Performance
-
-### Workload Sizing
-
-Start with `Small` and scale up based on usage:
-- `Small`: Development/testing, low traffic
-- `Medium`: Moderate traffic
-- `Large`: High traffic, complex queries
-
-### Auto-scaling
-
-Enable with `scale_to_zero=True`:
-- Saves costs when not in use
-- Automatically scales based on traffic
-- Cold start: ~1-2 minutes
-
-### Performance Optimization
-
-- Use appropriate LLM models per agent (balance speed/accuracy)
-- Monitor inference latency
-- Optimize vector search queries
-- Cache frequently used data
-
-## Cost Management
-
-### Development
-- Use `dev_config.yaml` with smaller models
-- Enable scale-to-zero
-- Use Small workload size
-- Limit testing Genie spaces
-
-### Production
-- Use `prod_config.yaml` with optimal models
-- Monitor costs in Databricks UI
-- Set up alerts for unexpected spikes
-- Consider reserved capacity for predictable workloads
-
-## See Also
-
-- [Local Development Guide](LOCAL_DEVELOPMENT.md)
-- [Configuration Guide](CONFIGURATION.md)
-- [Architecture](ARCHITECTURE.md)
-- [Databricks Testing Guide](../notebooks/README.md)
-
----
-
-**Ready to deploy?** Follow the steps above and monitor your deployment! 🚀
+The older Model Serving deployment materials remain as historical reference only.
+They are not part of the supported app deployment path.
