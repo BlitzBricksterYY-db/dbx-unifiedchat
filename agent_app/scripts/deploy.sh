@@ -6,22 +6,33 @@
 #   web-terminal handoff printed by `scripts/deploy_notebook.py`.
 #
 # Recommended usage:
-#   ./scripts/deploy.sh --target dev --full-deploy --run
-#     Validate, deploy, run the prep + validation job graph, then start the app.
+#   ./scripts/deploy.sh --target dev --run-job full --start-app
+#     Validate, deploy, run the full post-deploy job graph, then start the app.
 #
-#   ./scripts/deploy.sh --target dev --prep-only
-#     Validate, deploy, then run only the shared data / infra prep job.
+#   ./scripts/deploy.sh --target dev --run-job prep
+#     Validate, deploy, then run the prep post-deploy job graph.
 #
-#   ./scripts/deploy.sh --target prod --full-deploy --ci --skip-bootstrap
+#   ./scripts/deploy.sh --target dev --list-jobs
+#     Show bundle job keys and descriptions for the selected target, then exit.
+#
+#   ./scripts/deploy.sh --target dev --run-job agent_app_validate_app_job
+#     Validate, deploy, then run one specific bundle job by key.
+#
+#   ./scripts/deploy.sh --target prod --sync-workspace --run-job full --ci --skip-bootstrap
 #     CI-friendly deploy using an already prepared runner.
 #
 # Flags:
 #   --target, -t         Bundle target. Defaults to the bundle default target.
 #   --profile, -p        Databricks CLI profile override.
-#   --sync               Run `databricks bundle sync` before deploy.
-#   --run                Start the app resource after deploy / job execution.
-#   --prep-only          Run the prep job graph after deploy.
-#   --full-deploy        Run the full deploy validation job graph after deploy.
+#   --sync-workspace     Sync local bundle files to the workspace bundle folder
+#                        for workspace-side development. This does not change
+#                        deployment behavior on its own.
+#   --list-jobs          List available bundle jobs and their purpose, then exit.
+#   --run-job <prep|full|job_key>
+#                        Run one post-deploy bundle job. Use `prep`, `full`, or
+#                        a bundle job key.
+#   --start-app          Start the deployed app after deploy and any optional
+#                        post-deploy job.
 #   --bootstrap-local    Ensure local Python tooling is ready via `uv sync --dev`.
 #   --skip-bootstrap     Skip local bootstrap checks and dependency sync.
 #   --ci                 Non-interactive CI mode; implies no opportunistic bootstrap.
@@ -34,12 +45,14 @@ APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 TARGET=""
 PROFILE=""
-RUN_AFTER=false
-SYNC_FIRST=false
-DEPLOY_MODE="deploy-only"
+START_APP=false
+SYNC_WORKSPACE=false
+LIST_JOBS_ONLY=false
+POST_DEPLOY_JOB=""
 CI_MODE=false
 SKIP_BOOTSTRAP=false
 FORCE_BOOTSTRAP=false
+DEPRECATION_WARNINGS=()
 
 print_help() {
   awk '
@@ -59,14 +72,72 @@ warn()    { echo "⚠️  $*"; }
 error()   { echo "❌ $*" >&2; exit 1; }
 section() { echo; echo "=== $* ==="; }
 
+set_post_deploy_job() {
+  local next_job="$1"
+  if [[ -n "$POST_DEPLOY_JOB" ]]; then
+    error "Choose only one of --run-job, --prep-only, --full-deploy, or --job."
+  fi
+  POST_DEPLOY_JOB="$next_job"
+}
+
+record_deprecation() {
+  local old_flag="$1"
+  local new_flag="$2"
+  DEPRECATION_WARNINGS+=("$old_flag is deprecated; use $new_flag instead.")
+}
+
+require_value() {
+  local flag="$1"
+  local value="${2:-}"
+  [[ -n "$value" ]] || error "$flag requires a value."
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --target|-t)         TARGET="$2"; shift 2 ;;
-    --profile|-p)        PROFILE="$2"; shift 2 ;;
-    --run)               RUN_AFTER=true; shift ;;
-    --sync)              SYNC_FIRST=true; shift ;;
-    --prep-only)         DEPLOY_MODE="prep-only"; shift ;;
-    --full-deploy)       DEPLOY_MODE="full-deploy"; shift ;;
+    --target|-t)
+      require_value "$1" "${2:-}"
+      TARGET="$2"
+      shift 2
+      ;;
+    --profile|-p)
+      require_value "$1" "${2:-}"
+      PROFILE="$2"
+      shift 2
+      ;;
+    --sync-workspace)    SYNC_WORKSPACE=true; shift ;;
+    --list-jobs)         LIST_JOBS_ONLY=true; shift ;;
+    --run-job)
+      require_value "$1" "${2:-}"
+      set_post_deploy_job "$2"
+      shift 2
+      ;;
+    --start-app)         START_APP=true; shift ;;
+    --run)
+      START_APP=true
+      record_deprecation "--run" "--start-app"
+      shift
+      ;;
+    --sync)
+      SYNC_WORKSPACE=true
+      record_deprecation "--sync" "--sync-workspace"
+      shift
+      ;;
+    --prep-only)
+      set_post_deploy_job "prep"
+      record_deprecation "--prep-only" "--run-job prep"
+      shift
+      ;;
+    --full-deploy)
+      set_post_deploy_job "full"
+      record_deprecation "--full-deploy" "--run-job full"
+      shift
+      ;;
+    --job|-j)
+      require_value "$1" "${2:-}"
+      set_post_deploy_job "$2"
+      record_deprecation "--job" "--run-job $2"
+      shift 2
+      ;;
     --bootstrap-local)   FORCE_BOOTSTRAP=true; shift ;;
     --skip-bootstrap)    SKIP_BOOTSTRAP=true; shift ;;
     --ci)                CI_MODE=true; shift ;;
@@ -74,6 +145,12 @@ while [[ $# -gt 0 ]]; do
     *)                   error "Unknown argument: $1" ;;
   esac
 done
+
+if [[ "$LIST_JOBS_ONLY" == true ]]; then
+  if [[ -n "$POST_DEPLOY_JOB" || "$START_APP" == true || "$SYNC_WORKSPACE" == true ]]; then
+    error "--list-jobs cannot be combined with --run-job, --start-app, or --sync-workspace."
+  fi
+fi
 
 resolve_bundle_context() {
   python3 - "$APP_DIR" "${TARGET:-}" "${PROFILE:-}" <<'PY'
@@ -131,6 +208,9 @@ fi
 cd "$APP_DIR"
 
 should_bootstrap_local() {
+  if [[ "$LIST_JOBS_ONLY" == true ]]; then
+    return 1
+  fi
   if [[ "$SKIP_BOOTSTRAP" == true ]]; then
     return 1
   fi
@@ -214,25 +294,48 @@ bundle_validate_output() {
 }
 
 resolve_bundle_metadata() {
-  BUNDLE_VALIDATE_JSON="$(bundle_validate_output)" python3 - <<'PY'
+  BUNDLE_VALIDATE_JSON="$(bundle_validate_output)" POST_DEPLOY_JOB_REQUESTED="$POST_DEPLOY_JOB" python3 - <<'PY'
 import json
 import os
-import sys
 
 config = json.loads(os.environ["BUNDLE_VALIDATE_JSON"])
 apps = (config.get("resources") or {}).get("apps") or {}
 jobs = (config.get("resources") or {}).get("jobs") or {}
+post_deploy_job_requested = os.environ.get("POST_DEPLOY_JOB_REQUESTED", "").strip()
+job_aliases = {
+    "prep": "agent_app_preps_job",
+    "full": "agent_app_full_deploy_job",
+}
 
 app_key = next(iter(apps.keys()), "")
 app_name = ""
 if app_key:
     app_name = (apps.get(app_key) or {}).get("name") or ""
 
+resolved_post_deploy_job = job_aliases.get(post_deploy_job_requested, post_deploy_job_requested)
+if resolved_post_deploy_job and resolved_post_deploy_job not in jobs:
+    available = ", ".join(sorted(jobs)) or "<none>"
+    raise SystemExit(
+        f"Bundle job key '{resolved_post_deploy_job}' not found. "
+        f"Available job keys: {available}"
+    )
+
+job_summaries = []
+for job_key, job_config in sorted(jobs.items()):
+    description = (job_config or {}).get("description") or ""
+    job_summaries.append(
+        {
+            "key": job_key,
+            "name": (job_config or {}).get("name") or "",
+            "description": " ".join(str(description).split()),
+        }
+    )
+
 for key, value in {
     "APP_KEY": app_key,
     "APP_NAME": app_name,
-    "PREP_JOB_KEY": "agent_app_preps_job" if "agent_app_preps_job" in jobs else "",
-    "FULL_JOB_KEY": "agent_app_full_deploy_job" if "agent_app_full_deploy_job" in jobs else "",
+    "RESOLVED_POST_DEPLOY_JOB": resolved_post_deploy_job,
+    "JOB_SUMMARIES_JSON": json.dumps(job_summaries),
 }.items():
     print(f"{key}={json.dumps(value)}")
 PY
@@ -243,7 +346,6 @@ load_bundle_metadata() {
 import json
 import os
 import shlex
-import sys
 
 for line in os.environ["RESOLVED_METADATA"].splitlines():
     key, raw = line.rstrip("\n").split("=", 1)
@@ -257,20 +359,39 @@ PY
 }
 
 run_bundle_job_if_requested() {
-  case "$DEPLOY_MODE" in
-    prep-only)
-      [[ -z "${PREP_JOB_KEY:-}" ]] && error "Prep job key not found in bundle resources."
-      section "Running prep job graph"
-      databricks bundle run "$PREP_JOB_KEY" -t "$TARGET" "${PROFILE_ARGS[@]}"
-      success "Prep job graph completed"
-      ;;
-    full-deploy)
-      [[ -z "${FULL_JOB_KEY:-}" ]] && error "Full deploy job key not found in bundle resources."
-      section "Running full deploy job graph"
-      databricks bundle run "$FULL_JOB_KEY" -t "$TARGET" "${PROFILE_ARGS[@]}"
-      success "Full deploy job graph completed"
-      ;;
-  esac
+  [[ -z "${RESOLVED_POST_DEPLOY_JOB:-}" ]] && return 0
+
+  local requested_label="$POST_DEPLOY_JOB"
+  if [[ "$POST_DEPLOY_JOB" == "prep" || "$POST_DEPLOY_JOB" == "full" ]]; then
+    requested_label="$POST_DEPLOY_JOB ($RESOLVED_POST_DEPLOY_JOB)"
+  fi
+
+  section "Running post-deploy job: $requested_label"
+  databricks bundle run "$RESOLVED_POST_DEPLOY_JOB" -t "$TARGET" "${PROFILE_ARGS[@]}"
+  success "Post-deploy job completed: $requested_label"
+}
+
+list_bundle_jobs() {
+  JOB_SUMMARIES_JSON="${JOB_SUMMARIES_JSON:-[]}" TARGET="$TARGET" python3 - <<'PY'
+import json
+import os
+
+target = os.environ["TARGET"]
+job_summaries = json.loads(os.environ["JOB_SUMMARIES_JSON"])
+
+print(f"Bundle jobs for target '{target}':")
+print("  Aliases:")
+print("    prep -> agent_app_preps_job")
+print("    full -> agent_app_full_deploy_job")
+print()
+print("  Job keys:")
+for job in job_summaries:
+    name = job.get("name") or "<unnamed>"
+    description = job.get("description") or "<no description>"
+    print(f"    {job['key']}")
+    print(f"      name: {name}")
+    print(f"      description: {description}")
+PY
 }
 
 smoke_verify_app() {
@@ -280,7 +401,6 @@ smoke_verify_app() {
   APP_JSON="$app_json" python3 - <<'PY'
 import json
 import os
-import sys
 
 app = json.loads(os.environ["APP_JSON"])
 sp_id = app.get("service_principal_client_id") or ""
@@ -313,7 +433,11 @@ fi
 
 verify_auth
 
-if [[ "$SYNC_FIRST" == true ]]; then
+for warning_message in "${DEPRECATION_WARNINGS[@]:-}"; do
+  [[ -n "$warning_message" ]] && warn "$warning_message"
+done
+
+if [[ "$SYNC_WORKSPACE" == true ]]; then
   section "Syncing workspace files"
   databricks bundle sync -t "$TARGET" "${PROFILE_ARGS[@]}"
   success "Workspace sync complete"
@@ -324,12 +448,21 @@ bundle_validate_output >/dev/null
 success "Bundle validation passed"
 load_bundle_metadata
 
+if [[ "$LIST_JOBS_ONLY" == true ]]; then
+  section "Available bundle jobs"
+  list_bundle_jobs
+  echo
+  echo "=== Done ==="
+  exit 0
+fi
+
 section "Deployment context"
-info "App     : $APP_NAME"
-info "Target  : $TARGET"
-info "Profile : ${PROFILE:-<ambient auth>}"
-info "Mode    : $DEPLOY_MODE"
-info "Run app : $RUN_AFTER"
+info "App        : $APP_NAME"
+info "Target     : $TARGET"
+info "Profile    : ${PROFILE:-<ambient auth>}"
+info "Sync       : $SYNC_WORKSPACE"
+info "Post job   : ${POST_DEPLOY_JOB:-<none>}"
+info "Start app  : $START_APP"
 
 section "Deploying bundle"
 databricks bundle deploy -t "$TARGET" "${PROFILE_ARGS[@]}"
@@ -337,7 +470,7 @@ success "Bundle deploy complete"
 
 run_bundle_job_if_requested
 
-if [[ "$RUN_AFTER" == true ]]; then
+if [[ "$START_APP" == true ]]; then
   section "Starting app"
   databricks bundle run "$APP_KEY" -t "$TARGET" "${PROFILE_ARGS[@]}"
   success "App start command completed"

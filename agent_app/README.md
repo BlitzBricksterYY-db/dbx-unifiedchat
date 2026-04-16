@@ -15,13 +15,32 @@ Typical local bootstrap / deploy examples:
 
 ```bash
 cd agent_app
-./scripts/deploy.sh --target dev --prep-only
+./scripts/deploy.sh --target dev --run-job prep
 ```
 
 ```bash
 cd agent_app
-./scripts/deploy.sh --target dev --full-deploy --run
+./scripts/deploy.sh --target dev --run-job full --start-app
 ```
+
+To discover available raw job keys:
+
+```bash
+cd agent_app
+./scripts/deploy.sh --target dev --list-jobs
+```
+
+To refresh the workspace bundle folder before a normal deploy, add:
+
+```bash
+cd agent_app
+./scripts/deploy.sh --target dev --sync-workspace --run-job prep
+```
+
+`--sync-workspace` only syncs local bundle files into the Databricks workspace
+bundle folder before the normal deploy flow continues. It is useful for
+workspace-side development, but it does not change deployment behavior on its
+own.
 
 Use `--skip-bootstrap` only when the local environment is already prepared.
 

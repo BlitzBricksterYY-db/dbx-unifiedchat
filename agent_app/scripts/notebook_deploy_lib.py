@@ -25,9 +25,9 @@ class NotebookDeployConfig:
     project_dir: Path
     target: str = "dev"
     profile: str | None = None
-    run_after: bool = False
-    sync_first: bool = False
-    deploy_mode: str = "full-deploy"
+    start_app: bool = False
+    sync_workspace: bool = False
+    job_to_run: str | None = "full"
     bundle_app_key: str = "agent_migration"
 
     @property
@@ -220,9 +220,9 @@ def print_preflight_report(config: NotebookDeployConfig, report: PreflightReport
     print(f"  profile: {config.profile or '<workspace auth>'}")
     print(f"  effective_profile: {report.effective_profile or '<workspace auth>'}")
     print(f"  app_name: {config.app_name}")
-    print(f"  deploy_mode: {config.deploy_mode}")
-    print(f"  sync_first: {config.sync_first}")
-    print(f"  run_after: {config.run_after}")
+    print(f"  job_to_run: {config.job_to_run or '<none>'}")
+    print(f"  sync_workspace: {config.sync_workspace}")
+    print(f"  start_app: {config.start_app}")
     print()
 
     print("Resolved bundle settings")
@@ -249,14 +249,12 @@ def build_deploy_command(config: NotebookDeployConfig) -> str:
     command = ["./scripts/deploy.sh", "--target", config.target, "--skip-bootstrap"]
     if config.profile:
         command.extend(["--profile", config.profile])
-    if config.sync_first:
-        command.append("--sync")
-    if config.deploy_mode == "prep-only":
-        command.append("--prep-only")
-    elif config.deploy_mode == "full-deploy":
-        command.append("--full-deploy")
-    if config.run_after:
-        command.append("--run")
+    if config.sync_workspace:
+        command.append("--sync-workspace")
+    if config.job_to_run:
+        command.extend(["--run-job", config.job_to_run])
+    if config.start_app:
+        command.append("--start-app")
     return _render_command(command)
 
 
@@ -273,10 +271,15 @@ def print_terminal_handoff(config: NotebookDeployConfig) -> None:
     print(f"  {build_deploy_command(config)}")
     print()
     print("Notes")
-    print(f"  - deploy_mode widget -> {config.deploy_mode}")
-    print(f"  - sync_first widget  -> {config.sync_first}")
-    print(f"  - run_after widget   -> {config.run_after}")
+    print(f"  - job_to_run widget     -> {config.job_to_run or '<none>'}")
+    print(f"  - sync_workspace widget -> {config.sync_workspace}")
+    print(f"  - start_app widget      -> {config.start_app}")
     print("  - --skip-bootstrap is included for the Databricks web terminal flow")
+    print("  - use `prep`, `full`, or a bundle job key for `job_to_run`")
+    print(
+        "  - discover raw job keys with: "
+        f"./scripts/deploy.sh --target {shlex.quote(config.target)} --skip-bootstrap --list-jobs"
+    )
     print()
     print("Destroy handoff")
     print("  WARNING: This removes bundle-managed resources for the selected target.")

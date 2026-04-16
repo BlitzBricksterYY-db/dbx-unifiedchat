@@ -26,7 +26,7 @@ It is intentionally not a second deployment system.
 
 - `scripts/deploy_notebook.py`
   - repo-backed Databricks notebook source
-  - provides widgets for `project_dir`, `target`, `deploy_mode`, `sync_first`, and `run_after`
+  - provides widgets for `project_dir`, `target`, `job_to_run`, `sync_workspace`, and `start_app`
   - organized into preflight, terminal handoff, and verification sections
   - prints both a deploy handoff and a separate destroy handoff
 
@@ -73,10 +73,24 @@ and validation can be run independently:
   - use this to smoke-check the deployed app surface without rerunning ETL
 - `agent_app_preps_job`
   - wrapper job that runs metadata refresh and then shared infra setup
-  - this remains the target behind `./scripts/deploy.sh --prep-only`
+  - this remains the `prep` alias behind `./scripts/deploy.sh --run-job prep`
 - `agent_app_full_deploy_job`
   - wrapper job that runs prep and then validation
-  - this remains the target behind `./scripts/deploy.sh --full-deploy`
+  - this remains the `full` alias behind `./scripts/deploy.sh --run-job full`
+
+Discover available job keys through the canonical entrypoint:
+
+```bash
+./scripts/deploy.sh --target dev --list-jobs
+```
+
+You can also run any one of those bundle jobs through the canonical entrypoint:
+
+```bash
+./scripts/deploy.sh --target dev --run-job agent_app_validate_app_job
+```
+
+The `--run-job` flag accepts `prep`, `full`, or a bundle job key from `--list-jobs`.
 
 ## Prerequisites
 
@@ -102,7 +116,14 @@ Recommended first local command:
 
 ```bash
 cd agent_app
-./scripts/deploy.sh --target dev --prep-only
+./scripts/deploy.sh --target dev --run-job prep
+```
+
+Specific job example:
+
+```bash
+cd agent_app
+./scripts/deploy.sh --target dev --run-job agent_app_metadata_refresh_job
 ```
 
 Fresh terminal example:
@@ -110,7 +131,7 @@ Fresh terminal example:
 ```bash
 cd agent_app
 databricks auth login --profile prod
-./scripts/deploy.sh --target prod --skip-bootstrap --full-deploy --run
+./scripts/deploy.sh --target prod --skip-bootstrap --run-job full --start-app
 ```
 
 ## Local Development Best Practice
@@ -139,9 +160,9 @@ to run `./scripts/deploy.sh` first.
    - `project_dir`: path to the `agent_app` folder
    - `target`: `dev` or `prod`
    - `profile`: optional Databricks CLI profile override
-   - `deploy_mode`: `deploy-only`, `prep-only`, or `full-deploy`
-   - `sync_first`: `true` or `false`
-   - `run_after`: `true` or `false`
+   - `job_to_run`: blank for deploy-only, `prep`, `full`, or a bundle job key
+   - `sync_workspace`: `true` or `false`
+   - `start_app`: `true` or `false`
 3. Run the preflight cell.
 4. Copy the printed deploy handoff into the Databricks web terminal and run it from the `agent_app` directory.
 5. Re-run the verification cell after the command completes.
@@ -155,10 +176,17 @@ Example deploy handoff:
 
 ```bash
 cd /Workspace/Users/you@example.com/path/to/agent_app
-./scripts/deploy.sh --target prod --skip-bootstrap --profile prod --full-deploy --run
+./scripts/deploy.sh --target prod --skip-bootstrap --profile prod --run-job full --start-app
 ```
 
-If `sync_first=true`, the handoff also includes `--sync`.
+If `sync_workspace=true`, the handoff also includes `--sync-workspace`.
+
+If you need to discover raw job keys first:
+
+```bash
+cd /Workspace/Users/you@example.com/path/to/agent_app
+./scripts/deploy.sh --target prod --skip-bootstrap --profile prod --list-jobs
+```
 
 The notebook also prints a separate destroy handoff for teardown:
 

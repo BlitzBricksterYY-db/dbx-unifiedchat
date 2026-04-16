@@ -50,18 +50,28 @@ def _widget(name: str, default: str, *, choices: list[str] | None = None) -> str
     return dbutils.widgets.get(name)
 
 
+def _remove_widget(name: str) -> None:
+    if "dbutils" not in globals():
+        return
+    try:
+        dbutils.widgets.remove(name)
+    except Exception:
+        pass
+
+
 initial_project_dir = Path(os.getcwd()).expanduser().resolve().parent
+for legacy_widget in ("deploy_mode", "run_after", "sync_first"):
+    _remove_widget(legacy_widget)
+
 project_dir_value = _widget("project_dir", str(initial_project_dir))
 project_dir = Path(project_dir_value).expanduser().resolve()
 target = _widget("target", "dev", choices=["dev", "prod"])
 profile = _widget("profile", "")
-deploy_mode = _widget(
-    "deploy_mode",
-    "full-deploy",
-    choices=["deploy-only", "prep-only", "full-deploy"],
+job_to_run = _widget("job_to_run", "full").strip() or None
+start_app = _widget("start_app", "false", choices=["false", "true"]) == "true"
+sync_workspace = (
+    _widget("sync_workspace", "false", choices=["false", "true"]) == "true"
 )
-run_after = _widget("run_after", "false", choices=["false", "true"]) == "true"
-sync_first = _widget("sync_first", "false", choices=["false", "true"]) == "true"
 
 if str(project_dir) not in sys.path:
     sys.path.insert(0, str(project_dir))
@@ -85,9 +95,9 @@ config = NotebookDeployConfig(
     project_dir=project_dir,
     target=target,
     profile=profile or None,
-    run_after=run_after,
-    sync_first=sync_first,
-    deploy_mode=deploy_mode,
+    start_app=start_app,
+    sync_workspace=sync_workspace,
+    job_to_run=job_to_run,
 )
 
 # COMMAND ----------
