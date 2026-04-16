@@ -78,27 +78,27 @@ resources:
             experiment_id: ${var.experiment_id}
             permission: 'CAN_MANAGE'
 
-        # UC Volume for MLflow trace artifacts
-        - name: 'trace-volume'
-          uc_securable:
-            securable_type: 'VOLUME'
-            securable_full_name: ${var.catalog_name}.${var.schema_name}.${var.volume_name}
-            permission: 'WRITE_VOLUME'
+        # # UC Volume for MLflow trace artifacts
+        # - name: 'trace-volume'
+        #   uc_securable:
+        #     securable_type: 'VOLUME'
+        #     securable_full_name: ${var.catalog_name}.${var.schema_name}.${var.volume_name}
+        #     permission: 'WRITE_VOLUME'
         
 
-        # Serving endpoints (LLM + embedding)
-        - name: 'serving-endpoint-sonnet'
-          serving_endpoint:
-            name: ${var.llm_endpoint}
-            permission: 'CAN_QUERY'
-        - name: 'serving-endpoint-haiku'
-          serving_endpoint:
-            name: ${var.llm_endpoint_clarification}
-            permission: 'CAN_QUERY'
-        - name: 'serving-endpoint-embedding'
-          serving_endpoint:
-            name: ${var.embedding_model}
-            permission: 'CAN_QUERY'
+        # # Serving endpoints (LLM + embedding)
+        # - name: 'serving-endpoint-sonnet'
+        #   serving_endpoint:
+        #     name: ${var.llm_endpoint}
+        #     permission: 'CAN_QUERY'
+        # - name: 'serving-endpoint-haiku'
+        #   serving_endpoint:
+        #     name: ${var.llm_endpoint_clarification}
+        #     permission: 'CAN_QUERY'
+        # - name: 'serving-endpoint-embedding'
+        #   serving_endpoint:
+        #     name: ${var.embedding_model}
+        #     permission: 'CAN_QUERY'
 
         # SQL warehouse
         - name: 'sql-warehouse'

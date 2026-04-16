@@ -111,6 +111,10 @@ confirm_destroy() {
     return 0
   fi
 
+  if [[ ! -t 0 ]]; then
+    error "This terminal is non-interactive. Re-run with --auto-approve after reviewing the destroy target."
+  fi
+
   echo
   read -r -p "Type the bundle target '$TARGET' to confirm destroy: " CONFIRM_TARGET
   [[ "$CONFIRM_TARGET" == "$TARGET" ]] || error "Destroy cancelled."
@@ -144,9 +148,12 @@ info "Profile : ${PROFILE:-<ambient auth>}"
 confirm_destroy
 
 section "Destroying bundle"
-DESTROY_ARGS=()
-if [[ "$AUTO_APPROVE" == true ]]; then
-  DESTROY_ARGS+=("--auto-approve")
+DESTROY_CMD=(databricks bundle destroy -t "$TARGET")
+if [[ -n "$PROFILE" ]]; then
+  DESTROY_CMD+=("--profile" "$PROFILE")
 fi
-databricks bundle destroy -t "$TARGET" "${PROFILE_ARGS[@]}" "${DESTROY_ARGS[@]}"
+if [[ "$AUTO_APPROVE" == true ]]; then
+  DESTROY_CMD+=("--auto-approve")
+fi
+"${DESTROY_CMD[@]}"
 success "Bundle destroy complete"
