@@ -84,12 +84,12 @@ resources:
             database_name: databricks_postgres
             permission: 'CAN_CONNECT_AND_CREATE'
 
-        # # UC Volume for MLflow trace artifacts
-        # - name: 'trace-volume'
-        #   uc_securable:
-        #     securable_type: 'VOLUME'
-        #     securable_full_name: ${var.catalog_name}.${var.schema_name}.${var.volume_name}
-        #     permission: 'WRITE_VOLUME'
+        # UC Volume for MLflow trace artifacts
+        - name: 'trace-volume'
+          uc_securable:
+            securable_type: 'VOLUME'
+            securable_full_name: ${var.catalog_name}.${var.schema_name}.${var.volume_name}
+            permission: 'WRITE_VOLUME'
         
 
         # # Serving endpoints (LLM + embedding)
