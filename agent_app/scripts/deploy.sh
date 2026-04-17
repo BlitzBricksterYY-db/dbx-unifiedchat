@@ -436,16 +436,12 @@ job_aliases = json.loads(os.environ["JOB_ALIASES_JSON"])
 job_summaries = json.loads(os.environ["JOB_SUMMARIES_JSON"])
 
 
-def display_job_key(job_key: str) -> str:
-    return job_key.removeprefix("agent_app_")
-
-
 print(f"Bundle jobs for target '{target}':")
 print()
 
 print("Aliases:")
 for alias in job_aliases:
-    print(f"- {alias['alias']}: {display_job_key(alias['key'])}")
+    print(f"- {alias['alias']}: {alias['key']}")
 
 print()
 print("Jobs:")
@@ -453,8 +449,7 @@ for job in job_summaries:
     job_key = job["key"]
     name = job.get("name") or "<unnamed>"
     description = job.get("description") or "<no description>"
-    print(f"job key/param: {display_job_key(job_key)}")
-    print(f"- actual_job_key: {job_key}")
+    print(f"job_key: {job_key}")
     print(f"- job_name: {name}")
     print("- description:")
     print(textwrap.fill(description, width=76, initial_indent="  ", subsequent_indent="  "))
