@@ -89,3 +89,7 @@ assets/
 mlflow.db
 src/mlflow.db
 .langgraph_api/
+
+# AI tooling metadata
+.cursor/
+.claude/
