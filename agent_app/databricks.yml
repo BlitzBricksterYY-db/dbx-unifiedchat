@@ -63,6 +63,8 @@ variables:
     default: "TRIGGERED"
 
   # App runtime
+  app_name:
+    default: "dbx-unifiedchat-app-${bundle.target}"
   chat_proxy_timeout_seconds:
     default: "300"
   sample_size:
