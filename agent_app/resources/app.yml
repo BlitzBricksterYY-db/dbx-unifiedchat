@@ -1,7 +1,7 @@
 resources:
   apps:
     agent_migration:
-      name: "dbx-unifiedchat-app-${bundle.target}"
+      name: ${var.app_name}
       description: "Multi-agent Genie system on Databricks Apps"
       source_code_path: ../
       config:
@@ -78,19 +78,20 @@ resources:
             experiment_id: ${var.experiment_id}
             permission: 'CAN_MANAGE'
 
-        - name: 'database'
-          database:
-            instance_name: ${var.lakebase_instance_name}
-            database_name: databricks_postgres
-            permission: 'CAN_CONNECT_AND_CREATE'
+        # lakebase database access is granted post-deploy by shared-infra bootstrap.        # - name: 'database'
+        # - name: 'database'
+        #   database:
+        #     instance_name: ${var.lakebase_instance_name}
+        #     database_name: databricks_postgres
+        #     permission: 'CAN_CONNECT_AND_CREATE'
 
+        # UC volume access is granted post-deploy by shared-infra bootstrap.        # - name: 'database'
         # UC Volume for MLflow trace artifacts
-        - name: 'trace-volume'
-          uc_securable:
-            securable_type: 'VOLUME'
-            securable_full_name: ${var.catalog_name}.${var.schema_name}.${var.volume_name}
-            permission: 'WRITE_VOLUME'
-        
+        # - name: 'trace-volume'
+        #   uc_securable:
+        #     securable_type: 'VOLUME'
+        #     securable_full_name: ${var.catalog_name}.${var.schema_name}.${var.volume_name}
+        #     permission: 'WRITE_VOLUME'
 
         # # Serving endpoints (LLM + embedding)
         # - name: 'serving-endpoint-sonnet'

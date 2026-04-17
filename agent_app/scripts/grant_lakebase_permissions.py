@@ -74,6 +74,7 @@ class PermissionGrantConfig:
     schema_name: str | None = None
     data_catalog_name: str | None = None
     data_schema_name: str | None = None
+    volume_name: str | None = None
     instance_name: str | None = None
     database_name: str | None = None
     genie_space_ids: list[str] | None = None
@@ -159,6 +160,9 @@ def hydrate_config_from_bundle(config: PermissionGrantConfig) -> PermissionGrant
     )
     config.data_schema_name = config.data_schema_name or _resolve_bundle_variable(
         bundle_config, target, "data_schema_name"
+    )
+    config.volume_name = config.volume_name or _resolve_bundle_variable(
+        bundle_config, target, "volume_name"
     )
     config.instance_name = config.instance_name or _resolve_bundle_variable(bundle_config, target, "lakebase_instance_name")
     config.warehouse_id = config.warehouse_id or _resolve_bundle_variable(
@@ -389,22 +393,42 @@ def validate_permission_config(config: PermissionGrantConfig) -> None:
             "Provide both data_catalog_name and data_schema_name together, or omit both."
         )
 
+    if config.volume_name and not (config.catalog_name and config.schema_name):
+        raise ValueError(
+            "Provide catalog_name and schema_name when volume_name is configured."
+        )
+
 
 def sync_app_resource_permissions(config: PermissionGrantConfig, workspace_client) -> None:
     from databricks.sdk.service import apps as apps_service
 
     if not config.app_name:
-        print("App resource grants require --app-name; skipping database and Genie resource sync.")
+        print(
+            "App resource grants require --app-name; "
+            "skipping database, volume, and Genie resource sync."
+        )
         return
 
     current_app = workspace_client.apps.get(config.app_name)
     resources = list(current_app.resources or [])
     updated_resources: list[apps_service.AppResource] = []
+    volume_full_name = None
+    if config.catalog_name and config.schema_name and config.volume_name:
+        volume_full_name = f"{config.catalog_name}.{config.schema_name}.{config.volume_name}"
 
     for resource in resources:
         if config.instance_name and resource.name == "database":
             continue
         if config.genie_space_ids and getattr(resource, "genie_space", None) is not None:
+            continue
+        uc_securable = getattr(resource, "uc_securable", None)
+        if (
+            volume_full_name
+            and uc_securable is not None
+            and getattr(uc_securable, "securable_type", None)
+            == apps_service.AppResourceUcSecurableUcSecurableType.VOLUME
+            and getattr(uc_securable, "securable_full_name", None) == volume_full_name
+        ):
             continue
         updated_resources.append(resource)
 
@@ -438,6 +462,22 @@ def sync_app_resource_permissions(config: PermissionGrantConfig, workspace_clien
                     ),
                 )
             )
+
+    if volume_full_name:
+        print(
+            "Ensuring app UC volume resource grants "
+            f"WRITE_VOLUME on {volume_full_name}..."
+        )
+        updated_resources.append(
+            apps_service.AppResource(
+                name="trace-volume-write",
+                uc_securable=apps_service.AppResourceUcSecurable(
+                    securable_full_name=volume_full_name,
+                    securable_type=apps_service.AppResourceUcSecurableUcSecurableType.VOLUME,
+                    permission=apps_service.AppResourceUcSecurableUcSecurablePermission.WRITE_VOLUME,
+                ),
+            )
+        )
 
     workspace_client.apps.update(
         config.app_name,
@@ -491,6 +531,10 @@ def apply_permission_grants(
         print(f"Unity Catalog target: {config.catalog_name}.{config.schema_name}")
     else:
         print("Unity Catalog target: not provided, skipping UC grants")
+    if config.volume_name:
+        print(f"Unity Catalog volume target: {config.volume_name}")
+    else:
+        print("Unity Catalog volume target: not provided, skipping volume grants")
     if config.data_catalog_name and config.data_schema_name:
         print(
             f"Source data Unity Catalog target: "
@@ -598,7 +642,6 @@ def apply_permission_grants(
             ],
             warehouse_id=config.warehouse_id,
         )
-
     if config.data_catalog_name and config.data_schema_name:
         if (
             config.data_catalog_name == config.catalog_name
@@ -641,6 +684,7 @@ def _build_config_from_args(args) -> PermissionGrantConfig:
         schema_name=args.schema_name,
         data_catalog_name=args.data_catalog_name,
         data_schema_name=args.data_schema_name,
+        volume_name=args.volume_name,
         instance_name=args.instance_name,
         database_name=args.database_name,
         genie_space_ids=_parse_csv(args.genie_space_ids),
@@ -695,6 +739,10 @@ def main():
     parser.add_argument(
         "--data-schema-name",
         help="Optional second Unity Catalog schema name for source data access.",
+    )
+    parser.add_argument(
+        "--volume-name",
+        help="Optional Unity Catalog volume name for app trace artifact access.",
     )
     parser.add_argument(
         "--memory-type",
