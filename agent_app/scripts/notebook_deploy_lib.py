@@ -27,7 +27,7 @@ class NotebookDeployConfig:
     profile: str | None = None
     start_app: bool = False
     sync_workspace: bool = False
-    job_to_run: str | None = "full"
+    run_job: str | None = "full"
     bundle_app_key: str = "agent_migration"
 
     @property
@@ -220,7 +220,7 @@ def print_preflight_report(config: NotebookDeployConfig, report: PreflightReport
     print(f"  profile: {config.profile or '<workspace auth>'}")
     print(f"  effective_profile: {report.effective_profile or '<workspace auth>'}")
     print(f"  app_name: {config.app_name}")
-    print(f"  job_to_run: {config.job_to_run or '<none>'}")
+    print(f"  run_job: {config.run_job or '<none>'}")
     print(f"  sync_workspace: {config.sync_workspace}")
     print(f"  start_app: {config.start_app}")
     print()
@@ -251,8 +251,8 @@ def build_deploy_command(config: NotebookDeployConfig) -> str:
         command.extend(["--profile", config.profile])
     if config.sync_workspace:
         command.append("--sync-workspace")
-    if config.job_to_run:
-        command.extend(["--run-job", config.job_to_run])
+    if config.run_job:
+        command.extend(["--run-job", config.run_job])
     if config.start_app:
         command.append("--start-app")
     return _render_command(command)
@@ -271,13 +271,13 @@ def print_terminal_handoff(config: NotebookDeployConfig) -> None:
     print(f"  {build_deploy_command(config)}")
     print()
     print("Notes")
-    print(f"  - job_to_run widget     -> {config.job_to_run or '<none>'}")
+    print(f"  - run_job widget        -> {config.run_job or '<none>'}")
     print(f"  - sync_workspace widget -> {config.sync_workspace}")
     print(f"  - start_app widget      -> {config.start_app}")
     print("  - --skip-bootstrap is included for the Databricks web terminal flow")
-    print("  - use `prep`, `full`, or a bundle job key for `job_to_run`")
+    print("  - use `meta`, `infra`, `prep`, `val`, or `full` for `run_job`")
     print(
-        "  - discover raw job keys with: "
+        "  - discover exact job keys and descriptions with: "
         f"./scripts/deploy.sh --target {shlex.quote(config.target)} --skip-bootstrap --list-jobs"
     )
     print()

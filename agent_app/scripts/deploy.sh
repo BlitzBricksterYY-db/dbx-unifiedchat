@@ -15,8 +15,8 @@
 #   ./scripts/deploy.sh --target dev --list-jobs
 #     Show bundle job keys and descriptions for the selected target, then exit.
 #
-#   ./scripts/deploy.sh --target dev --run-job agent_app_validate_app_job
-#     Validate, deploy, then run one specific bundle job by key.
+#   ./scripts/deploy.sh --target dev --run-job val
+#     Validate, deploy, then run the app validation job alias.
 #
 #   ./scripts/deploy.sh --target prod --sync-workspace --run-job full --ci --skip-bootstrap
 #     CI-friendly deploy using an already prepared runner.
@@ -30,9 +30,9 @@
 #   --skip-shared-infra  Skip the automatic shared-infra reconciliation job that
 #                        normally runs after deploy.
 #   --list-jobs          List available bundle jobs and their purpose, then exit.
-#   --run-job <prep|full|job_key>
-#                        Run one post-deploy bundle job. Use `prep`, `full`, or
-#                        a bundle job key.
+#   --run-job <meta|infra|prep|val|full|job_key>
+#                        Run one post-deploy bundle job. Use a short alias or
+#                        a bundle job key from `--list-jobs`.
 #   --start-app          Start the deployed app after deploy and any optional
 #                        post-deploy job.
 #   --bootstrap-local    Ensure local Python tooling is ready via `uv sync --dev`.
@@ -307,7 +307,10 @@ apps = (config.get("resources") or {}).get("apps") or {}
 jobs = (config.get("resources") or {}).get("jobs") or {}
 post_deploy_job_requested = os.environ.get("POST_DEPLOY_JOB_REQUESTED", "").strip()
 job_aliases = {
+    "meta": "agent_app_metadata_refresh_job",
+    "infra": "agent_app_shared_infra_job",
     "prep": "agent_app_preps_job",
+    "val": "agent_app_validate_app_job",
     "full": "agent_app_full_deploy_job",
 }
 
@@ -335,6 +338,13 @@ for job_key, job_config in sorted(jobs.items()):
         }
     )
 
+
+job_alias_summaries = [
+    {"alias": alias, "key": key}
+    for alias, key in job_aliases.items()
+    if key in jobs
+]
+
 for key, value in {
     "APP_KEY": app_key,
     "APP_NAME": app_name,
@@ -342,6 +352,7 @@ for key, value in {
     "PREP_JOB_KEY": "agent_app_preps_job" if "agent_app_preps_job" in jobs else "",
     "FULL_JOB_KEY": "agent_app_full_deploy_job" if "agent_app_full_deploy_job" in jobs else "",
     "RESOLVED_POST_DEPLOY_JOB": resolved_post_deploy_job,
+    "JOB_ALIASES_JSON": json.dumps(job_alias_summaries),
     "JOB_SUMMARIES_JSON": json.dumps(job_summaries),
 }.items():
     print(f"{key}={json.dumps(value)}")
@@ -369,7 +380,7 @@ run_bundle_job_if_requested() {
   [[ -z "${RESOLVED_POST_DEPLOY_JOB:-}" ]] && return 0
 
   local requested_label="$POST_DEPLOY_JOB"
-  if [[ "$POST_DEPLOY_JOB" == "prep" || "$POST_DEPLOY_JOB" == "full" ]]; then
+  if [[ "$POST_DEPLOY_JOB" != "$RESOLVED_POST_DEPLOY_JOB" ]]; then
     requested_label="$POST_DEPLOY_JOB ($RESOLVED_POST_DEPLOY_JOB)"
   fi
 
@@ -415,25 +426,39 @@ run_shared_infra_if_needed() {
 }
 
 list_bundle_jobs() {
-  JOB_SUMMARIES_JSON="${JOB_SUMMARIES_JSON:-[]}" TARGET="$TARGET" python3 - <<'PY'
+  JOB_ALIASES_JSON="${JOB_ALIASES_JSON:-[]}" JOB_SUMMARIES_JSON="${JOB_SUMMARIES_JSON:-[]}" TARGET="$TARGET" python3 - <<'PY'
 import json
 import os
+import textwrap
 
 target = os.environ["TARGET"]
+job_aliases = json.loads(os.environ["JOB_ALIASES_JSON"])
 job_summaries = json.loads(os.environ["JOB_SUMMARIES_JSON"])
 
+
+def display_job_key(job_key: str) -> str:
+    return job_key.removeprefix("agent_app_")
+
+
 print(f"Bundle jobs for target '{target}':")
-print("  Aliases:")
-print("    prep -> agent_app_preps_job")
-print("    full -> agent_app_full_deploy_job")
 print()
-print("  Job keys:")
+
+print("Aliases:")
+for alias in job_aliases:
+    print(f"- {alias['alias']}: {display_job_key(alias['key'])}")
+
+print()
+print("Jobs:")
 for job in job_summaries:
+    job_key = job["key"]
     name = job.get("name") or "<unnamed>"
     description = job.get("description") or "<no description>"
-    print(f"    {job['key']}")
-    print(f"      name: {name}")
-    print(f"      description: {description}")
+    print(f"job key/param: {display_job_key(job_key)}")
+    print(f"- actual_job_key: {job_key}")
+    print(f"- job_name: {name}")
+    print("- description:")
+    print(textwrap.fill(description, width=76, initial_indent="  ", subsequent_indent="  "))
+    print()
 PY
 }
 

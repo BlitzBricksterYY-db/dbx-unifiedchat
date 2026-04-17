@@ -60,14 +60,18 @@ def _remove_widget(name: str) -> None:
 
 
 initial_project_dir = Path(os.getcwd()).expanduser().resolve().parent
-for legacy_widget in ("deploy_mode", "run_after", "sync_first"):
+for legacy_widget in ("deploy_mode", "run_after", "sync_first", "job_to_run"):
     _remove_widget(legacy_widget)
 
 project_dir_value = _widget("project_dir", str(initial_project_dir))
 project_dir = Path(project_dir_value).expanduser().resolve()
 target = _widget("target", "dev", choices=["dev", "prod"])
 profile = _widget("profile", "")
-job_to_run = _widget("job_to_run", default = "full", choices=["full", "prep", "agent_app_metadata_refresh_job", "agent_app_shared_infra_job", "agent_app_validate_app_job"]).strip() or None
+run_job = _widget(
+    "run_job",
+    default="full",
+    choices=["full", "prep", "meta", "infra", "val"],
+).strip() or None
 start_app = _widget("start_app", "false", choices=["false", "true"]) == "true"
 sync_workspace = (
     _widget("sync_workspace", "false", choices=["false", "true"]) == "true"
@@ -97,7 +101,7 @@ config = NotebookDeployConfig(
     profile=profile or None,
     start_app=start_app,
     sync_workspace=sync_workspace,
-    job_to_run=job_to_run,
+    run_job=run_job,
 )
 
 # COMMAND ----------

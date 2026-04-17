@@ -26,7 +26,7 @@ It is intentionally not a second deployment system.
 
 - `scripts/deploy_notebook.py`
   - repo-backed Databricks notebook source
-  - provides widgets for `project_dir`, `target`, `job_to_run`, `sync_workspace`, and `start_app`
+  - provides widgets for `project_dir`, `target`, `run_job`, `sync_workspace`, and `start_app`
   - organized into preflight, terminal handoff, and verification sections
   - prints both a deploy handoff and a separate destroy handoff
 
@@ -167,7 +167,7 @@ to run `./scripts/deploy.sh` first.
    - `project_dir`: path to the `agent_app` folder
    - `target`: `dev` or `prod`
    - `profile`: optional Databricks CLI profile override
-   - `job_to_run`: blank for deploy-only, `prep`, `full`, or a bundle job key
+   - `run_job`: blank for deploy-only, or one of `meta`, `infra`, `prep`, `val`, `full`
    - `sync_workspace`: `true` or `false`
    - `start_app`: `true` or `false`
 3. Run the preflight cell.
