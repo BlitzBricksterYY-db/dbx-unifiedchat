@@ -648,8 +648,10 @@ function ChartBuilderSheet({
   const ui = getChartBuilderUiConfig(builderState.chartType);
   const xAxisFields = ui.xAxisKind === 'numeric'
     ? numericFields
-    : (dimensionFields.length ? dimensionFields : numericFields);
+    : (dimensionFields.length ? [...dimensionFields, ...numericFields] : numericFields);
   const groupByFields = dimensionFields.filter((field) => field.name !== builderState.xAxisField);
+  const selectedXAxisField = fields.find((field) => field.name === builderState.xAxisField);
+  const showNumericBins = selectedXAxisField?.kind === 'numeric' && builderState.chartType !== 'scatter';
 
   const updateBuilder = <Key extends keyof ChartBuilderState>(
     key: Key,
@@ -657,7 +659,9 @@ function ChartBuilderSheet({
   ) => {
     setBuilderState((current) => {
       const next = { ...current, [key]: value };
-      return key === 'chartType' ? normalizeBuilderStateForChartType(next, fields) : next;
+      return key === 'chartType' || key === 'xAxisField'
+        ? normalizeBuilderStateForChartType(next, fields)
+        : next;
     });
   };
 
@@ -737,6 +741,20 @@ function ChartBuilderSheet({
                     fields={xAxisFields}
                   />
                 </BuilderRow>
+                {showNumericBins && (
+                <BuilderRow label="Numeric bins">
+                  <Input
+                    type="number"
+                    min={2}
+                    max={100}
+                    value={builderState.xAxisBinCount ?? ''}
+                    placeholder="No bucketing"
+                    onChange={(event) =>
+                      updateBuilder('xAxisBinCount', event.target.value ? Number(event.target.value) : null)
+                    }
+                  />
+                </BuilderRow>
+                )}
                 {ui.showYAxis && (
                 <BuilderRow label={ui.yAxisLabel}>
                   <FieldSelect

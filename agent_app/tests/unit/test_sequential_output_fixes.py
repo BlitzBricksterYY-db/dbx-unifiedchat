@@ -620,6 +620,43 @@ def test_chart_generator_histogram_builds_count_bins():
     assert sum(row["count"] for row in payload["chartData"]) == 7
 
 
+def test_chart_generator_llm_numeric_x_axis_is_bucketed_to_histogram():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "bar",
+          "title": "Age Spend",
+          "xAxisField": "age",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "transform": null
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["age", "paid_amount"],
+        data=[
+            {"age": 5, "paid_amount": 10},
+            {"age": 8, "paid_amount": 15},
+            {"age": 12, "paid_amount": 20},
+            {"age": 17, "paid_amount": 25},
+            {"age": 21, "paid_amount": 30},
+            {"age": 26, "paid_amount": 35},
+            {"age": 34, "paid_amount": 40},
+            {"age": 42, "paid_amount": 45},
+        ],
+        original_query="Show spend by age",
+    )
+
+    assert payload is not None
+    assert payload["config"]["chartType"] == "bar"
+    assert payload["config"]["transform"]["type"] == "histogram"
+    assert payload["config"]["xAxisField"] == "age"
+    assert payload["config"]["series"][0]["field"] == "count"
+
+
 def test_chart_generator_heatmap_builds_dense_matrix_cells():
     llm = StubLlm(
         """

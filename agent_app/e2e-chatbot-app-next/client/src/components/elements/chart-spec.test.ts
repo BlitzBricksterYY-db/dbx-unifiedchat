@@ -233,6 +233,65 @@ test('materializeChartSpecFromBuilder creates a normalized grouped chart from wo
   assert.match(spec.aggregationNote ?? '', /percent-of-total|Aggregated|Bucketed/i);
 });
 
+test('materializeChartSpecFromBuilder buckets numeric X axis into bins', () => {
+  const workspace = parseChartWorkspace({
+    workspaceId: 'query-ages',
+    title: 'Age Spend',
+    table: {
+      columns: ['age', 'paid_amount'],
+      rows: [
+        { age: 5, paid_amount: 10 },
+        { age: 8, paid_amount: 20 },
+        { age: 17, paid_amount: 30 },
+        { age: 24, paid_amount: 40 },
+        { age: 33, paid_amount: 50 },
+        { age: 41, paid_amount: 60 },
+      ],
+      totalRows: 6,
+      previewRowCount: 6,
+      isPreview: false,
+      title: 'Age Spend',
+    },
+    fields: [
+      { name: 'age', label: 'Age', kind: 'numeric', role: 'measure', format: 'number', uniqueCount: 6, uniqueRatio: 1 },
+      { name: 'paid_amount', label: 'Paid Amount', kind: 'numeric', role: 'currency', format: 'currency', uniqueCount: 6, uniqueRatio: 1 },
+    ],
+    charts: [
+      {
+        config: {
+          chartType: 'bar',
+          title: 'Age Spend',
+          xAxisField: 'age',
+          series: [{ field: 'paid_amount', name: 'Paid Amount', format: 'currency', axis: 'primary' }],
+          style: { palette: 'default' },
+        },
+        chartData: [{ age: 5, paid_amount: 10 }],
+      },
+    ],
+  });
+
+  assert.ok(workspace);
+  const builder = normalizeBuilderStateForChartType(
+    {
+      ...createBuilderStateFromChart(workspace!.charts[0], workspace!),
+      chartType: 'bar',
+      xAxisField: 'age',
+      xAxisBinCount: 4,
+      yAxisField: 'paid_amount',
+    },
+    workspace!.fields ?? [],
+  );
+  const validation = validateBuilderState(builder, workspace!);
+  assert.equal(validation.valid, true);
+
+  const spec = materializeChartSpecFromBuilder(workspace!, builder, workspace!.charts[0], 'manual');
+  assert.equal(spec.config.transform?.type, 'histogram');
+  assert.equal(spec.config.transform?.bins, 4);
+  assert.ok(spec.chartData.length <= 4);
+  assert.equal(typeof spec.chartData[0]?.age, 'string');
+  assert.match(spec.aggregationNote ?? '', /Bucketed Age into 4 bins/i);
+});
+
 test('getChartBuilderUiConfig adapts controls by chart type', () => {
   const scatter = getChartBuilderUiConfig('scatter');
   assert.equal(scatter.xAxisKind, 'numeric');

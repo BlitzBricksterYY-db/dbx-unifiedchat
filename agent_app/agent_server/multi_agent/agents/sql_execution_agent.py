@@ -153,7 +153,7 @@ class SQLExecutionAgent:
     def execute_sql(
         self, 
         sql_query: str, 
-        max_rows: int = 500,
+        max_rows: int = 1000,
         return_format: str = "dict"
     ) -> Dict[str, Any]:
         """
@@ -175,7 +175,7 @@ class SQLExecutionAgent:
             sql_query: Support two types: 
                 1) The result from invoke the SQL synthesis agent (dict with messages)
                 2) The SQL query string (can be raw SQL or contain markdown code blocks)
-            max_rows: Maximum number of rows to return (default: 100)
+            max_rows: Maximum number of rows to return (default: 1000)
             return_format: Format of the result - "dict", "json", or "markdown"
             
         Returns:
@@ -344,7 +344,7 @@ class SQLExecutionAgent:
     def execute_sql_parallel(
         self,
         sql_queries: List[str],
-        max_rows: int = 500,
+        max_rows: int = 1000,
         return_format: str = "dict",
         max_workers: int = 4
     ) -> List[Dict[str, Any]]:
@@ -361,7 +361,7 @@ class SQLExecutionAgent:
         
         Args:
             sql_queries: List of SQL query strings to execute
-            max_rows: Maximum rows per query (default: 100)
+            max_rows: Maximum rows per query (default: 1000)
             return_format: Result format - "dict", "json", or "markdown"
             max_workers: Maximum concurrent threads (default: 4, tune to warehouse concurrency)
         
@@ -412,6 +412,6 @@ class SQLExecutionAgent:
         
         return results
     
-    def __call__(self, sql_query: str, max_rows: int = 500, return_format: str = "dict") -> Dict[str, Any]:
+    def __call__(self, sql_query: str, max_rows: int = 1000, return_format: str = "dict") -> Dict[str, Any]:
         """Make agent callable."""
         return self.execute_sql(sql_query, max_rows, return_format)

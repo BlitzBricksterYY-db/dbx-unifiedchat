@@ -21,7 +21,7 @@ from langchain_core.runnables import Runnable
 
 logger = logging.getLogger(__name__)
 
-MAX_CHART_POINTS = 80
+MAX_CHART_POINTS = 500
 MAX_DOWNLOAD_ROWS = 1000
 MAX_JSON_BYTES = 200_000
 SAMPLE_ROWS_FOR_LLM = 50
@@ -83,6 +83,37 @@ _LOW_VALUE_NUMERIC_TOKENS = (
     "sequence",
     "zip",
     "postal",
+)
+_CONTINUOUS_NUMERIC_TOKENS = (
+    "age",
+    "length",
+    "duration",
+    "days",
+    "hours",
+    "minutes",
+    "score",
+    "value",
+    "amount",
+    "cost",
+    "paid",
+    "charge",
+    "price",
+    "spend",
+    "distance",
+    "weight",
+    "height",
+    "bmi",
+)
+_DISCRETE_NUMERIC_CATEGORY_TOKENS = (
+    "year",
+    "month",
+    "week",
+    "quarter",
+    "day_of_week",
+    "weekday",
+    "rank",
+    "level",
+    "tier",
 )
 
 CHART_CAPABILITY_MODEL: Dict[str, Dict[str, Any]] = {
@@ -501,6 +532,8 @@ Rules:
 - Keep total series to <=3
 - If two numeric fields exist and no date, strongly consider scatter or dualAxis
 - If a date field exists, prefer line, area, or stackedArea over bar
+- If the x-axis is a continuous numeric field such as age, cost, score, or length_of_stay, prefer histogram bins instead of plotting raw numeric values as categories
+- Do NOT use a high-cardinality numeric field as a categorical x-axis unless you are intentionally binning it with histogram
 - If <=6 categories with one metric, consider pie
 - If two categorical dimensions with a metric, consider heatmap
 - If you see period/year columns, consider rankingSlope or deltaComparison
@@ -782,6 +815,29 @@ Rules:
         if chart_type == "dualAxis" and len(series) < 2:
             chart_type = "bar"
             notes.append("Downgraded dualAxis to bar because fewer than two valid series remained")
+
+        if x_field and self._looks_like_identifier_field(x_field) and chart_type not in {"scatter", "dualAxis"} and series:
+            primary_metric = series[0]["field"]
+            if self._should_bucket_numeric_field(primary_metric, data):
+                x_field = primary_metric
+                group_field = None
+                layout = None
+                transform = self._build_histogram_transform(primary_metric, data)
+                chart_type = "bar"
+                notes.append(f"Swapped identifier x-axis for histogram on '{primary_metric}'")
+
+        if (
+            x_field
+            and chart_type not in {"scatter", "dualAxis", "rankingSlope", "deltaComparison"}
+            and self._should_bucket_numeric_field(x_field, data)
+        ):
+            transform_type = transform.get("type") if transform else None
+            if transform_type in {None, "topN", "frequency"}:
+                group_field = None
+                layout = None
+                transform = self._build_histogram_transform(x_field, data)
+                chart_type = "bar"
+                notes.append(f"Bucketed continuous numeric x-axis '{x_field}' into histogram bins")
 
         if chart_type == "pie":
             layout = None
@@ -1808,6 +1864,12 @@ Rules:
                         "otherLabel": "Other",
                     }
 
+        if x_field and self._should_bucket_numeric_field(x_field, data) and chart_type not in {"scatter", "dualAxis"}:
+            chart_type = "bar"
+            layout = None
+            group_field = None
+            transform = self._build_histogram_transform(x_field, data)
+
         series = [
             {
                 "field": primary_metric,
@@ -1846,6 +1908,52 @@ Rules:
     def _looks_like_identifier_field(self, field: str) -> bool:
         lowered = field.lower()
         return any(token in lowered for token in _ID_FIELD_TOKENS)
+
+    def _should_bucket_numeric_field(self, field: Optional[str], data: List[Dict[str, Any]]) -> bool:
+        if not field:
+            return False
+
+        lowered = field.lower()
+        if self._looks_like_identifier_field(field):
+            return False
+        if any(token in lowered for token in _DISCRETE_NUMERIC_CATEGORY_TOKENS):
+            return False
+
+        sample = data[: min(len(data), 100)]
+        values = [_numeric(row.get(field)) for row in sample if row.get(field) is not None]
+        finite_values = [value for value in values if math.isfinite(value)]
+        if len(finite_values) < 5:
+            return False
+
+        unique_count = len({round(value, 6) for value in finite_values})
+        unique_ratio = unique_count / len(finite_values)
+        if unique_count < 5:
+            return False
+
+        if any(token in lowered for token in _CONTINUOUS_NUMERIC_TOKENS):
+            return True
+
+        return unique_ratio >= 0.6 and unique_count >= 8
+
+    def _build_histogram_transform(self, field: str, data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        sample = data[: min(len(data), 200)]
+        values = [_numeric(row.get(field)) for row in sample if row.get(field) is not None]
+        unique_count = len({round(value, 6) for value in values if math.isfinite(value)})
+        bins = 12 if unique_count >= 20 else 10 if unique_count >= 10 else 8
+        return {
+            "type": "histogram",
+            "field": field,
+            "bins": bins,
+            "syntheticSeries": [
+                {
+                    "field": "count",
+                    "name": "Count",
+                    "format": "number",
+                    "chartType": None,
+                    "axis": "primary",
+                }
+            ],
+        }
 
     def _dimensions_are_redundant(
         self,

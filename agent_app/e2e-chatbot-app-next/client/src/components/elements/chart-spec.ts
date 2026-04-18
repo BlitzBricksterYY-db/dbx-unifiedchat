@@ -25,6 +25,8 @@ const seriesChartTypeSchema = z.enum(['bar', 'line', 'area']).optional().nullabl
 const seriesAxisSchema = z.enum(['primary', 'secondary']).optional().nullable();
 const fieldKindSchema = z.enum(fieldKinds);
 const fieldRoleSchema = z.enum(fieldRoles);
+const MAX_CHART_DATA_POINTS = 500;
+const MAX_NUMERIC_BINS = 100;
 
 const referenceLineSchema = z.object({
   value: z.number(),
@@ -114,7 +116,7 @@ const chartConfigSchema = z
 export const chartSpecSchema = z
   .object({
     config: chartConfigSchema,
-    chartData: z.array(z.record(z.string(), z.unknown())).max(400),
+    chartData: z.array(z.record(z.string(), z.unknown())).max(MAX_CHART_DATA_POINTS),
     downloadData: z.array(z.record(z.string(), z.unknown())).optional(),
     totalRows: z.number().optional(),
     aggregated: z.boolean().optional(),
@@ -178,6 +180,7 @@ export type ChartBuilderState = {
   description: string;
   chartType: ChartType;
   xAxisField: string;
+  xAxisBinCount: number | null;
   yAxisField: string;
   secondaryYAxisField: string;
   groupByField: string;
@@ -381,6 +384,7 @@ export function createBuilderStateFromChart(
     description: chart.config.description ?? '',
     chartType: chart.config.chartType,
     xAxisField: defaultX ?? '',
+    xAxisBinCount: resolveXAxisBinCount(chart.config.transform, defaultX ?? '', chart.config.chartType),
     yAxisField: primarySeries?.field ?? numericFields[0]?.name ?? '',
     secondaryYAxisField: secondarySeries?.field ?? '',
     groupByField: chart.config.groupByField ?? '',
@@ -418,6 +422,14 @@ export function validateBuilderState(
   const xField = fieldByName.get(state.xAxisField);
   const yField = fieldByName.get(state.yAxisField);
   const groupField = fieldByName.get(state.groupByField);
+  const numericBinningEnabled = shouldBucketNumeric(state, xField);
+
+  if (
+    state.xAxisBinCount !== null
+    && (!Number.isInteger(state.xAxisBinCount) || state.xAxisBinCount < 2 || state.xAxisBinCount > MAX_NUMERIC_BINS)
+  ) {
+    issues.push(`Numeric bins must be an integer between 2 and ${MAX_NUMERIC_BINS}.`);
+  }
 
   if (state.chartType === 'scatter') {
     if (xField?.kind !== 'numeric') issues.push('Scatter charts require a numeric X axis.');
@@ -430,7 +442,7 @@ export function validateBuilderState(
   }
 
   if (state.chartType === 'boxplot') {
-    if (xField?.kind === 'numeric') issues.push('Boxplots need a category or time field on the X axis.');
+    if (xField?.kind === 'numeric' && !numericBinningEnabled) issues.push('Boxplots need a category/time field on the X axis, or numeric bins.');
     if (yField?.kind !== 'numeric') issues.push('Boxplots require a numeric value field.');
   }
 
@@ -466,6 +478,7 @@ export function normalizeBuilderStateForChartType(
   const dimensionFields = fields.filter((field) => field.kind !== 'numeric' || field.role === 'time' || field.role === 'dimension');
   const isNumericField = (name: string) => numericFields.some((field) => field.name === name);
   const isDimensionField = (name: string) => dimensionFields.some((field) => field.name === name);
+  const isAllowedDimensionXAxisField = (name: string) => isDimensionField(name) || isNumericField(name);
   const pickDimension = () => dimensionFields[0]?.name ?? pickDefaultXField(fields);
   const pickNumeric = () => numericFields[0]?.name ?? pickDefaultYField(fields);
   const pickAlternateNumeric = (exclude?: string) =>
@@ -478,7 +491,7 @@ export function normalizeBuilderStateForChartType(
   if (ui.xAxisKind === 'numeric') {
     if (!isNumericField(next.xAxisField)) next.xAxisField = pickAlternateNumeric(next.yAxisField) || pickNumeric();
   } else if (ui.xAxisKind === 'dimension') {
-    if (!isDimensionField(next.xAxisField)) next.xAxisField = pickDimension() || next.xAxisField;
+    if (!isAllowedDimensionXAxisField(next.xAxisField)) next.xAxisField = pickDimension() || next.xAxisField;
   }
 
   if (ui.showYAxis) {
@@ -508,6 +521,7 @@ export function normalizeBuilderStateForChartType(
   if (!ui.showTimeBucket) next.timeBucket = 'none';
   if (!ui.showTopN) next.topN = null;
   if (!ui.showSort) next.sortDirection = 'asc';
+  if (ui.xAxisKind === 'numeric' || !isNumericField(next.xAxisField)) next.xAxisBinCount = null;
 
   return next;
 }
@@ -530,6 +544,7 @@ export function materializeChartSpecFromBuilder(
   const xMeta = fieldByName.get(xField);
   const yMeta = fieldByName.get(yField);
   const series = buildSeriesConfig(builder, fieldByName, yField, secondaryField);
+  const numericBinCount = resolveNumericBinCount(builder, xMeta);
 
   let chartData: Record<string, unknown>[] = [];
   let aggregated = false;
@@ -540,23 +555,36 @@ export function materializeChartSpecFromBuilder(
   if (chartType === 'scatter') {
     chartData = buildScatterChartData(rows, xField, yField, groupField, zField);
   } else if (chartType === 'heatmap') {
-    chartData = buildHeatmapChartData(rows, xField, groupField, yField, builder.aggregation);
+    chartData = buildHeatmapChartData(rows, xField, groupField, yField, builder.aggregation, numericBinCount);
     aggregated = true;
-    aggregationNote = `Aggregated ${prettifyLabel(yField)} by ${prettifyLabel(xField)} and ${prettifyLabel(groupField)}`;
-    transform = { type: 'heatmap' };
+    aggregationNote = numericBinCount
+      ? `Bucketed ${prettifyLabel(xField)} into ${numericBinCount} bins and aggregated ${prettifyLabel(yField)} by ${prettifyLabel(groupField)}`
+      : `Aggregated ${prettifyLabel(yField)} by ${prettifyLabel(xField)} and ${prettifyLabel(groupField)}`;
+    transform = numericBinCount
+      ? { type: 'histogram', field: xField, bins: numericBinCount, metric: yField, function: builder.aggregation }
+      : { type: 'heatmap' };
   } else if (chartType === 'boxplot') {
-    chartData = buildBoxplotChartData(rows, xField, yField);
+    chartData = buildBoxplotChartData(rows, xField, yField, numericBinCount);
     aggregated = true;
-    aggregationNote = `Summarized ${prettifyLabel(yField)} into boxplot statistics`;
-    transform = { type: 'boxplot', field: yField };
+    aggregationNote = numericBinCount
+      ? `Bucketed ${prettifyLabel(xField)} into ${numericBinCount} bins for boxplot statistics`
+      : `Summarized ${prettifyLabel(yField)} into boxplot statistics`;
+    transform = numericBinCount
+      ? { type: 'histogram', field: xField, bins: numericBinCount, metric: yField, function: builder.aggregation }
+      : { type: 'boxplot', field: yField };
   } else if (chartType === 'pie') {
-    chartData = buildAggregatedChartData(rows, xField, yField, '', builder);
+    chartData = buildAggregatedChartData(rows, xField, yField, '', builder, '', 'none', numericBinCount);
     chartData = applyTopN(chartData, xField, yField, Math.min(builder.topN ?? 6, 6));
     aggregated = true;
-    aggregationNote = `Aggregated ${prettifyLabel(yField)} by ${prettifyLabel(xField)}`;
+    aggregationNote = numericBinCount
+      ? `Bucketed ${prettifyLabel(xField)} into ${numericBinCount} bins and aggregated ${prettifyLabel(yField)}`
+      : `Aggregated ${prettifyLabel(yField)} by ${prettifyLabel(xField)}`;
+    if (numericBinCount) {
+      transform = { type: 'histogram', field: xField, bins: numericBinCount, metric: yField, function: builder.aggregation };
+    }
   } else {
     const bucket = shouldBucketTime(builder, xMeta) ? builder.timeBucket : 'none';
-    chartData = buildAggregatedChartData(rows, xField, yField, groupField, builder, secondaryField, bucket);
+    chartData = buildAggregatedChartData(rows, xField, yField, groupField, builder, secondaryField, bucket, numericBinCount);
     aggregated = chartData.length > 0;
     if (groupField && layout === 'normalized') {
       chartData = normalizeGroupedPercent(chartData, xField, groupField, [yField, secondaryField].filter(Boolean));
@@ -564,6 +592,9 @@ export function materializeChartSpecFromBuilder(
     } else if (bucket !== 'none') {
       aggregationNote = `Bucketed ${prettifyLabel(yField)} by ${bucket}`;
       transform = { type: 'timeBucket', field: xField, bucket, metric: yField, function: builder.aggregation };
+    } else if (numericBinCount) {
+      aggregationNote = `Bucketed ${prettifyLabel(xField)} into ${numericBinCount} bins and aggregated ${prettifyLabel(yField)}`;
+      transform = { type: 'histogram', field: xField, bins: numericBinCount, metric: yField, function: builder.aggregation };
     } else {
       aggregationNote = `Aggregated ${prettifyLabel(yField)} by ${prettifyLabel(xField)}`;
     }
@@ -613,7 +644,7 @@ export function materializeChartSpecFromBuilder(
         yAxisLabelRotation: builder.yAxisLabelRotation,
       },
     },
-    chartData: chartData.slice(0, 400),
+    chartData: chartData.slice(0, MAX_CHART_DATA_POINTS),
     downloadData: workspace.table.rows,
     totalRows: workspace.table.totalRows ?? workspace.table.rows.length,
     aggregated,
@@ -1348,15 +1379,19 @@ function buildAggregatedChartData(
   builder: ChartBuilderState,
   secondaryField = '',
   bucket: ChartBuilderState['timeBucket'] = 'none',
+  numericBinCount: number | null = null,
 ) {
-  const groups = new Map<string, { xValue: string; groupValue: string; yValues: number[]; secondaryValues: number[] }>();
+  const numericBinner = numericBinCount ? createNumericBinner(rows, xField, numericBinCount) : null;
+  const groups = new Map<string, { xValue: string; groupValue: string; yValues: number[]; secondaryValues: number[]; sortValue: unknown }>();
   for (const row of rows) {
     const rawX = row[xField];
-    const xValue = bucket !== 'none' ? bucketValue(rawX, bucket) : String(rawX ?? '');
+    const xAxisValue = numericBinner
+      ? numericBinner(rawX)
+      : { label: bucket !== 'none' ? bucketValue(rawX, bucket) : String(rawX ?? ''), sortValue: rawX };
     const groupedValue = groupField ? String(row[groupField] ?? '') : '';
-    const key = `${xValue}:::${groupedValue}`;
+    const key = `${xAxisValue.label}:::${groupedValue}`;
     if (!groups.has(key)) {
-      groups.set(key, { xValue, groupValue: groupedValue, yValues: [], secondaryValues: [] });
+      groups.set(key, { xValue: xAxisValue.label, groupValue: groupedValue, yValues: [], secondaryValues: [], sortValue: xAxisValue.sortValue });
     }
     const bucketRef = groups.get(key)!;
     bucketRef.yValues.push(numeric(row[yField]));
@@ -1368,10 +1403,11 @@ function buildAggregatedChartData(
     ...(groupField ? { [groupField]: entry.groupValue } : {}),
     [yField]: aggregate(entry.yValues, builder.aggregation),
     ...(secondaryField ? { [secondaryField]: aggregate(entry.secondaryValues, builder.aggregation) } : {}),
+    __sortValue: entry.sortValue,
   }));
 
-  chartData.sort((left, right) => compareAxisValues(left[xField], right[xField], builder.sortDirection));
-  return chartData;
+  chartData.sort((left, right) => compareAxisValues(left.__sortValue, right.__sortValue, builder.sortDirection));
+  return chartData.map(({ __sortValue, ...row }) => row);
 }
 
 function buildHeatmapChartData(
@@ -1380,44 +1416,56 @@ function buildHeatmapChartData(
   groupField: string,
   yField: string,
   aggregation: ChartBuilderState['aggregation'],
+  numericBinCount: number | null = null,
 ) {
-  const grouped = new Map<string, { xValue: string; groupValue: string; values: number[] }>();
+  const numericBinner = numericBinCount ? createNumericBinner(rows, xField, numericBinCount) : null;
+  const grouped = new Map<string, { xValue: string; groupValue: string; values: number[]; sortValue: unknown }>();
   for (const row of rows) {
-    const xValue = String(row[xField] ?? '');
+    const xAxisValue = numericBinner
+      ? numericBinner(row[xField])
+      : { label: String(row[xField] ?? ''), sortValue: row[xField] };
     const groupValue = String(row[groupField] ?? '');
-    const key = `${xValue}:::${groupValue}`;
-    if (!grouped.has(key)) grouped.set(key, { xValue, groupValue, values: [] });
+    const key = `${xAxisValue.label}:::${groupValue}`;
+    if (!grouped.has(key)) grouped.set(key, { xValue: xAxisValue.label, groupValue, values: [], sortValue: xAxisValue.sortValue });
     grouped.get(key)?.values.push(numeric(row[yField]));
   }
-  return Array.from(grouped.values()).map((entry) => ({
-    [xField]: entry.xValue,
-    [groupField]: entry.groupValue,
-    [yField]: aggregate(entry.values, aggregation),
-  }));
+  return Array.from(grouped.values())
+    .sort((left, right) => compareAxisValues(left.sortValue, right.sortValue, 'asc'))
+    .map((entry) => ({
+      [xField]: entry.xValue,
+      [groupField]: entry.groupValue,
+      [yField]: aggregate(entry.values, aggregation),
+    }));
 }
 
 function buildBoxplotChartData(
   rows: Array<Record<string, unknown>>,
   xField: string,
   yField: string,
+  numericBinCount: number | null = null,
 ) {
-  const grouped = new Map<string, number[]>();
+  const numericBinner = numericBinCount ? createNumericBinner(rows, xField, numericBinCount) : null;
+  const grouped = new Map<string, { values: number[]; sortValue: unknown }>();
   for (const row of rows) {
-    const key = String(row[xField] ?? '');
-    if (!grouped.has(key)) grouped.set(key, []);
-    grouped.get(key)?.push(numeric(row[yField]));
+    const xAxisValue = numericBinner
+      ? numericBinner(row[xField])
+      : { label: String(row[xField] ?? ''), sortValue: row[xField] };
+    if (!grouped.has(xAxisValue.label)) grouped.set(xAxisValue.label, { values: [], sortValue: xAxisValue.sortValue });
+    grouped.get(xAxisValue.label)?.values.push(numeric(row[yField]));
   }
-  return Array.from(grouped.entries()).map(([label, values]) => {
-    const sorted = values.filter((value) => !Number.isNaN(value)).sort((a, b) => a - b);
-    return {
-      [xField]: label,
-      min: sorted[0] ?? 0,
-      q1: quantile(sorted, 0.25),
-      median: quantile(sorted, 0.5),
-      q3: quantile(sorted, 0.75),
-      max: sorted[sorted.length - 1] ?? 0,
-    };
-  });
+  return Array.from(grouped.entries())
+    .sort((left, right) => compareAxisValues(left[1].sortValue, right[1].sortValue, 'asc'))
+    .map(([label, entry]) => {
+      const sorted = entry.values.filter((value) => !Number.isNaN(value)).sort((a, b) => a - b);
+      return {
+        [xField]: label,
+        min: sorted[0] ?? 0,
+        q1: quantile(sorted, 0.25),
+        median: quantile(sorted, 0.5),
+        q3: quantile(sorted, 0.75),
+        max: sorted[sorted.length - 1] ?? 0,
+      };
+    });
 }
 
 function normalizeGroupedPercent(
@@ -1533,6 +1581,29 @@ function shouldBucketTime(builder: ChartBuilderState, field?: ChartField) {
   return field?.kind === 'date' && builder.timeBucket !== 'none';
 }
 
+function resolveXAxisBinCount(
+  transform: ChartSpec['config']['transform'],
+  xField: string,
+  chartType?: ChartType,
+) {
+  if (chartType === 'scatter') return null;
+  if (transform?.type !== 'histogram') return null;
+  if (xField && transform?.field && String(transform.field) !== xField) return null;
+  const bins = Number(transform?.bins ?? 0);
+  return Number.isInteger(bins) && bins > 1 ? bins : null;
+}
+
+function resolveNumericBinCount(builder: ChartBuilderState, field?: ChartField) {
+  return shouldBucketNumeric(builder, field) ? builder.xAxisBinCount : null;
+}
+
+function shouldBucketNumeric(builder: ChartBuilderState, field?: ChartField) {
+  return field?.kind === 'numeric'
+    && builder.chartType !== 'scatter'
+    && Number.isInteger(builder.xAxisBinCount)
+    && Number(builder.xAxisBinCount) > 1;
+}
+
 function aggregate(values: number[], method: ChartBuilderState['aggregation']) {
   if (values.length === 0) return 0;
   if (method === 'count') return values.length;
@@ -1551,6 +1622,54 @@ function compareAxisValues(left: unknown, right: unknown, direction: 'asc' | 'de
   const rightNumeric = Number(right);
   if (!Number.isNaN(leftNumeric) && !Number.isNaN(rightNumeric)) return (leftNumeric - rightNumeric) * multiplier;
   return String(left ?? '').localeCompare(String(right ?? '')) * multiplier;
+}
+
+function createNumericBinner(
+  rows: Array<Record<string, unknown>>,
+  field: string,
+  requestedBins: number,
+) {
+  const values = rows
+    .map((row) => Number(row[field]))
+    .filter((value) => Number.isFinite(value));
+  if (values.length === 0) return null;
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const distinctCount = new Set(values.map((value) => String(value))).size;
+  const effectiveBins = Math.max(2, Math.min(requestedBins, distinctCount || requestedBins));
+  const useDecimals = values.some((value) => !Number.isInteger(value)) || (max - min) / effectiveBins < 1;
+
+  if (min === max) {
+    const label = formatNumericBinLabel(min, max, useDecimals);
+    return (value: unknown) => ({ label, sortValue: Number(value ?? min) });
+  }
+
+  const width = (max - min) / effectiveBins;
+  return (value: unknown) => {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) {
+      return { label: String(value ?? ''), sortValue: Number.POSITIVE_INFINITY };
+    }
+    const index = numericValue === max
+      ? effectiveBins - 1
+      : Math.max(0, Math.min(effectiveBins - 1, Math.floor((numericValue - min) / width)));
+    const start = min + (index * width);
+    const end = index === effectiveBins - 1 ? max : min + ((index + 1) * width);
+    return {
+      label: formatNumericBinLabel(start, end, useDecimals),
+      sortValue: start,
+    };
+  };
+}
+
+function formatNumericBinLabel(start: number, end: number, useDecimals: boolean) {
+  if (Math.abs(start - end) < Number.EPSILON) return formatNumericBinNumber(start, useDecimals);
+  return `${formatNumericBinNumber(start, useDecimals)}-${formatNumericBinNumber(end, useDecimals)}`;
+}
+
+function formatNumericBinNumber(value: number, useDecimals: boolean) {
+  return useDecimals ? value.toFixed(1) : value.toFixed(0);
 }
 
 function bucketValue(value: unknown, bucket: Exclude<ChartBuilderState['timeBucket'], 'none'>) {
