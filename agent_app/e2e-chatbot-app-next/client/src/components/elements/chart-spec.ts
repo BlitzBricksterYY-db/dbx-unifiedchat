@@ -375,7 +375,7 @@ export function createBuilderStateFromChart(
 ): ChartBuilderState {
   const fields = getWorkspaceFields(workspace);
   const numericFields = fields.filter((field) => field.kind === 'numeric' && field.role !== 'id');
-  const defaultX = chart.config.xAxisField ?? pickDefaultXField(fields);
+  const defaultX = resolveBuilderXAxisField(chart.config.transform, chart.config.xAxisField, fields);
   const primarySeries = chart.config.series[0];
   const secondarySeries = chart.config.series.find((series) => series.axis === 'secondary');
   return {
@@ -387,7 +387,9 @@ export function createBuilderStateFromChart(
     xAxisBinCount: resolveXAxisBinCount(chart.config.transform, defaultX ?? '', chart.config.chartType),
     yAxisField: primarySeries?.field ?? numericFields[0]?.name ?? '',
     secondaryYAxisField: secondarySeries?.field ?? '',
-    groupByField: chart.config.groupByField ?? '',
+    groupByField: chart.config.chartType === 'heatmap'
+      ? (chart.config.yAxisField ?? chart.config.groupByField ?? '')
+      : (chart.config.groupByField ?? ''),
     zAxisField: chart.config.zAxisField ?? '',
     aggregation: resolveAggregation(chart.config.transform),
     timeBucket: resolveTimeBucket(chart.config.transform),
@@ -422,6 +424,7 @@ export function validateBuilderState(
   const xField = fieldByName.get(state.xAxisField);
   const yField = fieldByName.get(state.yAxisField);
   const groupField = fieldByName.get(state.groupByField);
+  const zField = fieldByName.get(state.zAxisField);
   const numericBinningEnabled = shouldBucketNumeric(state, xField);
 
   if (
@@ -434,11 +437,16 @@ export function validateBuilderState(
   if (state.chartType === 'scatter') {
     if (xField?.kind !== 'numeric') issues.push('Scatter charts require a numeric X axis.');
     if (yField?.kind !== 'numeric') issues.push('Scatter charts require a numeric Y axis.');
+    if (state.zAxisField && zField?.kind !== 'numeric') issues.push('Scatter bubble size must use a numeric field.');
   }
 
   if (state.chartType === 'heatmap') {
     if (!state.groupByField) issues.push('Heatmaps require a Y-axis/category field.');
     if (yField?.kind !== 'numeric') issues.push('Heatmaps require a numeric cell value field.');
+  }
+
+  if (state.chartType === 'rankingSlope' || state.chartType === 'deltaComparison') {
+    if (!state.groupByField) issues.push('Ranking and delta comparison charts require a period field.');
   }
 
   if (state.chartType === 'boxplot') {
@@ -545,46 +553,75 @@ export function materializeChartSpecFromBuilder(
   const yMeta = fieldByName.get(yField);
   const series = buildSeriesConfig(builder, fieldByName, yField, secondaryField);
   const numericBinCount = resolveNumericBinCount(builder, xMeta);
+  const effectiveNumericBinCount = numericBinCount && createNumericBinner(rows, xField, numericBinCount) ? numericBinCount : null;
+  const existingConfig = (existing?.config ?? {}) as Record<string, unknown>;
+  const existingMeta = (existing?.meta ?? {}) as Record<string, unknown>;
 
   let chartData: Record<string, unknown>[] = [];
   let aggregated = false;
   let aggregationNote: string | null = null;
   let transform: Record<string, unknown> | null = null;
+  let compareLabels: string[] | null = existing?.config.compareLabels ?? null;
   let layout: ChartSpec['config']['layout'] = normalizeLayoutFromBuilder(builder);
+  const existingSortBy = ((existing?.config as { sortBy?: { field?: string; order?: 'asc' | 'desc' } } | undefined)?.sortBy) ?? null;
 
-  if (chartType === 'scatter') {
+  if (chartType === 'rankingSlope' || chartType === 'deltaComparison') {
+    const comparison = buildPeriodComparisonChartData(
+      rows,
+      xField,
+      groupField,
+      yField,
+      builder.aggregation,
+      chartType,
+      builder.topN,
+      existingSortBy,
+    );
+    chartData = comparison.chartData;
+    aggregated = true;
+    aggregationNote = comparison.aggregationNote;
+    compareLabels = comparison.compareLabels;
+    transform = {
+      type: chartType,
+      entityField: xField,
+      periodField: groupField,
+      ...(yField && yField !== 'count' ? { metric: yField } : {}),
+      function: builder.aggregation,
+      topN: builder.topN ?? 10,
+      compareLabels: comparison.compareLabels,
+    };
+  } else if (chartType === 'scatter') {
     chartData = buildScatterChartData(rows, xField, yField, groupField, zField);
   } else if (chartType === 'heatmap') {
-    chartData = buildHeatmapChartData(rows, xField, groupField, yField, builder.aggregation, numericBinCount);
+    chartData = buildHeatmapChartData(rows, xField, groupField, yField, builder.aggregation, effectiveNumericBinCount);
     aggregated = true;
-    aggregationNote = numericBinCount
-      ? `Bucketed ${prettifyLabel(xField)} into ${numericBinCount} bins and aggregated ${prettifyLabel(yField)} by ${prettifyLabel(groupField)}`
+    aggregationNote = effectiveNumericBinCount
+      ? `Bucketed ${prettifyLabel(xField)} into ${effectiveNumericBinCount} bins and aggregated ${prettifyLabel(yField)} by ${prettifyLabel(groupField)}`
       : `Aggregated ${prettifyLabel(yField)} by ${prettifyLabel(xField)} and ${prettifyLabel(groupField)}`;
-    transform = numericBinCount
-      ? { type: 'histogram', field: xField, bins: numericBinCount, metric: yField, function: builder.aggregation }
-      : { type: 'heatmap' };
+    transform = effectiveNumericBinCount
+      ? { type: 'histogram', field: xField, bins: effectiveNumericBinCount, metric: yField, function: builder.aggregation }
+      : { type: 'heatmap', xField, yField: groupField, metric: yField, function: builder.aggregation };
   } else if (chartType === 'boxplot') {
-    chartData = buildBoxplotChartData(rows, xField, yField, numericBinCount);
+    chartData = buildBoxplotChartData(rows, xField, yField, effectiveNumericBinCount);
     aggregated = true;
-    aggregationNote = numericBinCount
-      ? `Bucketed ${prettifyLabel(xField)} into ${numericBinCount} bins for boxplot statistics`
+    aggregationNote = effectiveNumericBinCount
+      ? `Bucketed ${prettifyLabel(xField)} into ${effectiveNumericBinCount} bins for boxplot statistics`
       : `Summarized ${prettifyLabel(yField)} into boxplot statistics`;
-    transform = numericBinCount
-      ? { type: 'histogram', field: xField, bins: numericBinCount, metric: yField, function: builder.aggregation }
+    transform = effectiveNumericBinCount
+      ? { type: 'histogram', field: xField, bins: effectiveNumericBinCount, metric: yField, function: builder.aggregation }
       : { type: 'boxplot', field: yField };
   } else if (chartType === 'pie') {
-    chartData = buildAggregatedChartData(rows, xField, yField, '', builder, '', 'none', numericBinCount);
+    chartData = buildAggregatedChartData(rows, xField, yField, '', builder, '', 'none', effectiveNumericBinCount);
     chartData = applyTopN(chartData, xField, yField, Math.min(builder.topN ?? 6, 6));
     aggregated = true;
-    aggregationNote = numericBinCount
-      ? `Bucketed ${prettifyLabel(xField)} into ${numericBinCount} bins and aggregated ${prettifyLabel(yField)}`
+    aggregationNote = effectiveNumericBinCount
+      ? `Bucketed ${prettifyLabel(xField)} into ${effectiveNumericBinCount} bins and aggregated ${prettifyLabel(yField)}`
       : `Aggregated ${prettifyLabel(yField)} by ${prettifyLabel(xField)}`;
-    if (numericBinCount) {
-      transform = { type: 'histogram', field: xField, bins: numericBinCount, metric: yField, function: builder.aggregation };
+    if (effectiveNumericBinCount) {
+      transform = { type: 'histogram', field: xField, bins: effectiveNumericBinCount, metric: yField, function: builder.aggregation };
     }
   } else {
     const bucket = shouldBucketTime(builder, xMeta) ? builder.timeBucket : 'none';
-    chartData = buildAggregatedChartData(rows, xField, yField, groupField, builder, secondaryField, bucket, numericBinCount);
+    chartData = buildAggregatedChartData(rows, xField, yField, groupField, builder, secondaryField, bucket, effectiveNumericBinCount);
     aggregated = chartData.length > 0;
     if (groupField && layout === 'normalized') {
       chartData = normalizeGroupedPercent(chartData, xField, groupField, [yField, secondaryField].filter(Boolean));
@@ -592,16 +629,18 @@ export function materializeChartSpecFromBuilder(
     } else if (bucket !== 'none') {
       aggregationNote = `Bucketed ${prettifyLabel(yField)} by ${bucket}`;
       transform = { type: 'timeBucket', field: xField, bucket, metric: yField, function: builder.aggregation };
-    } else if (numericBinCount) {
-      aggregationNote = `Bucketed ${prettifyLabel(xField)} into ${numericBinCount} bins and aggregated ${prettifyLabel(yField)}`;
-      transform = { type: 'histogram', field: xField, bins: numericBinCount, metric: yField, function: builder.aggregation };
+    } else if (effectiveNumericBinCount) {
+      aggregationNote = `Bucketed ${prettifyLabel(xField)} into ${effectiveNumericBinCount} bins and aggregated ${prettifyLabel(yField)}`;
+      transform = { type: 'histogram', field: xField, bins: effectiveNumericBinCount, metric: yField, function: builder.aggregation };
     } else {
       aggregationNote = `Aggregated ${prettifyLabel(yField)} by ${prettifyLabel(xField)}`;
     }
-    if (builder.topN && xMeta?.kind === 'text' && chartData.length > builder.topN) {
+    if (builder.topN && xMeta?.kind !== 'numeric' && chartData.length > builder.topN) {
       chartData = applyTopN(chartData, xField, yField, builder.topN, groupField, secondaryField || undefined);
       aggregationNote = `${aggregationNote} • Top ${builder.topN} categories`;
-      transform = { ...(transform ?? {}), type: 'topN', metric: yField, n: builder.topN };
+      transform = transform
+        ? { ...transform, topN: builder.topN }
+        : { type: 'topN', metric: yField, n: builder.topN };
     }
   }
 
@@ -613,15 +652,16 @@ export function materializeChartSpecFromBuilder(
       .filter(Boolean)
       .join(' • ');
 
-  const supportedChartTypes = getSupportedTypesFromBuilder(builder, xMeta?.kind);
+  const supportedChartTypes = getSupportedTypesFromBuilder(builder, xMeta?.kind, effectiveNumericBinCount);
 
   return {
     config: {
+      ...existingConfig,
       chartType,
       title: builder.title.trim() || workspace.title,
       description: description || undefined,
       xAxisField: xField,
-      yAxisField: chartType === 'heatmap' ? yField : null,
+      yAxisField: chartType === 'heatmap' ? (groupField || null) : null,
       zAxisField: zField || null,
       groupByField: groupField || null,
       layout,
@@ -629,7 +669,8 @@ export function materializeChartSpecFromBuilder(
       toolbox: true,
       supportedChartTypes,
       referenceLines: existing?.config.referenceLines ?? [],
-      compareLabels: existing?.config.compareLabels ?? null,
+      compareLabels,
+      sortBy: existingConfig.sortBy ?? null,
       transform,
       style: {
         palette: builder.palette,
@@ -650,6 +691,7 @@ export function materializeChartSpecFromBuilder(
     aggregated,
     aggregationNote,
     meta: {
+      ...existingMeta,
       chartId: existing?.meta?.chartId ?? `${workspace.workspaceId}-${cryptoSafeId()}`,
       sourceTableId: workspace.workspaceId,
       source,
@@ -743,23 +785,29 @@ function buildHeatmapOption(spec: ChartSpec): EChartsOption {
     yValues.indexOf(String(row[yField] ?? '')),
     Number(row[valueField] ?? 0),
   ]);
-  const maxValue = Math.max(0, ...values.map((item) => Number(item[2])));
+  const numericValues = values.map((item) => Number(item[2])).filter((value) => Number.isFinite(value));
+  const rawMin = numericValues.length > 0 ? Math.min(...numericValues) : 0;
+  const rawMax = numericValues.length > 0 ? Math.max(...numericValues) : 0;
+  const visualMin = rawMin < 0 ? rawMin : 0;
+  const visualMax = rawMax > 0 ? rawMax : 0;
 
   return {
     color: resolvePalette(spec),
     title: buildTitleConfig(spec),
     tooltip: {
       formatter: (params: any) => {
-        const value = Array.isArray(params.value) ? params.value[2] : 0;
-        return `${xValues[params.value[0]]} / ${yValues[params.value[1]]}: ${formatValue(value, spec.config.series[0]?.format)}`;
+        const [xIndex, yIndex, cellValue] = Array.isArray(params.value) ? params.value : [-1, -1, 0];
+        const xLabel = xValues[Number(xIndex)] ?? '';
+        const yLabel = yValues[Number(yIndex)] ?? '';
+        return `${xLabel} / ${yLabel}: ${formatValue(Number(cellValue ?? 0), spec.config.series[0]?.format)}`;
       },
     },
     grid: { left: '8%', right: '8%', top: titleTop(spec), bottom: '18%', containLabel: true },
     xAxis: { type: 'category', data: xValues, splitArea: { show: true } },
     yAxis: { type: 'category', data: yValues, splitArea: { show: true } },
     visualMap: {
-      min: 0,
-      max: maxValue,
+      min: visualMin,
+      max: visualMax,
       calculable: true,
       orient: 'horizontal',
       left: 'center',
@@ -890,9 +938,10 @@ function buildScatterOption(spec: ChartSpec): EChartsOption {
   const yField = spec.config.series[0]?.field ?? '';
   const sizeField = spec.config.zAxisField ?? '';
   const groupField = spec.config.groupByField ?? '';
-  const groups = groupField
+  const requestedGroups = groupField
     ? uniqueStrings(spec.chartData.map((row) => String(row[groupField] ?? ''))).filter(Boolean)
-    : ['All rows'];
+    : [];
+  const groups = requestedGroups.length > 0 ? requestedGroups : ['All rows'];
 
   return {
     color: resolvePalette(spec),
@@ -902,10 +951,10 @@ function buildScatterOption(spec: ChartSpec): EChartsOption {
       formatter: (params: any) => {
         const point = Array.isArray(params.value) ? params.value : [];
         return [
-          params.seriesName,
-          `${prettifyLabel(xField)}: ${formatValue(Number(point[0] ?? 0), 'number')}`,
-          `${prettifyLabel(yField)}: ${formatValue(Number(point[1] ?? 0), spec.config.series[0]?.format)}`,
-          sizeField ? `${prettifyLabel(sizeField)}: ${formatValue(Number(point[2] ?? 0), 'number')}` : '',
+          escapeHtml(String(params.seriesName ?? '')),
+          `${escapeHtml(prettifyLabel(xField))}: ${formatValue(Number(point[0] ?? 0), 'number')}`,
+          `${escapeHtml(prettifyLabel(yField))}: ${formatValue(Number(point[1] ?? 0), spec.config.series[0]?.format)}`,
+          sizeField ? `${escapeHtml(prettifyLabel(sizeField))}: ${formatValue(Number(point[2] ?? 0), 'number')}` : '',
         ]
           .filter(Boolean)
           .join('<br/>');
@@ -926,10 +975,12 @@ function buildScatterOption(spec: ChartSpec): EChartsOption {
       splitLine: { show: spec.config.style?.showGridLines ?? true },
     },
     series: groups.map((group) => {
-      const groupRows = groupField
+      const groupRows = requestedGroups.length > 0 && groupField
         ? spec.chartData.filter((row) => String(row[groupField] ?? '') === group)
         : spec.chartData;
-      const sizeValues = groupRows.map((row) => Number(row[sizeField] ?? 0));
+      const sizeValues = groupRows
+        .map((row) => Number(row[sizeField] ?? 0))
+        .filter((value) => Number.isFinite(value));
       const maxSize = Math.max(...sizeValues, 1);
       return {
         type: 'scatter',
@@ -941,11 +992,16 @@ function buildScatterOption(spec: ChartSpec): EChartsOption {
         },
         label: { show: spec.config.style?.showLabels ?? false },
         itemStyle: spec.config.style?.color ? { color: spec.config.style.color } : undefined,
-        data: groupRows.map((row) => [
-          Number(row[xField] ?? 0),
-          Number(row[yField] ?? 0),
-          Number(row[sizeField] ?? 0),
-        ]),
+        data: groupRows.map((row) => (sizeField
+          ? [
+              Number(row[xField] ?? 0),
+              Number(row[yField] ?? 0),
+              Number.isFinite(Number(row[sizeField] ?? 0)) ? Number(row[sizeField] ?? 0) : 0,
+            ]
+          : [
+              Number(row[xField] ?? 0),
+              Number(row[yField] ?? 0),
+            ])),
       };
     }),
   };
@@ -1165,7 +1221,7 @@ function formatCartesianTooltip(spec: ChartSpec, rawParams: unknown) {
     const seriesLabel = match?.[2] ?? metricLabel;
     const format = spec.config.series.find((series) => series.name === metricLabel)?.format ?? inferTooltipFormat(spec, Number(item.value ?? item.data ?? 0));
     const value = tooltipNumber(item.value ?? item.data);
-    if (Math.abs(value) < 1e-9) continue;
+    if (!Number.isFinite(value)) continue;
     const existing = groups.get(metricLabel) ?? [];
     existing.push({
       label: seriesLabel,
@@ -1176,25 +1232,34 @@ function formatCartesianTooltip(spec: ChartSpec, rawParams: unknown) {
     groups.set(metricLabel, existing);
   }
 
-  const lines = [`<strong>${axisLabel}</strong>`];
+  const lines = [`<strong>${escapeHtml(axisLabel)}</strong>`];
   for (const [metricLabel, entries] of groups.entries()) {
     const sorted = entries.sort((left, right) => Math.abs(right.value) - Math.abs(left.value));
     const displayed = sorted.slice(0, 6);
-    lines.push(`<br/><span style="opacity:.8">${metricLabel}</span>`);
+    lines.push(`<br/><span style="opacity:.8">${escapeHtml(metricLabel)}</span>`);
     for (const entry of displayed) {
-      lines.push(`<br/>${entry.marker}${entry.label}: ${formatValue(entry.value, entry.format)}`);
+      lines.push(`<br/>${entry.marker}${escapeHtml(entry.label)}: ${formatValue(entry.value, entry.format)}`);
     }
     if (sorted.length > displayed.length) {
       lines.push(`<br/>... and ${sorted.length - displayed.length} more`);
     }
   }
 
-  return lines.length > 1 ? lines.join('') : `<strong>${axisLabel}</strong>`;
+  return lines.length > 1 ? lines.join('') : `<strong>${escapeHtml(axisLabel)}</strong>`;
 }
 
 function tooltipNumber(value: unknown) {
   if (Array.isArray(value)) return Number(value[value.length - 1] ?? 0);
   return Number(value ?? 0);
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
 function axisLabelFormatter(format: ChartSpec['config']['series'][number]['format']) {
@@ -1351,6 +1416,9 @@ function buildSeriesConfig(
       axis: 'secondary' as const,
     });
   }
+  if (!series.length && (builder.chartType === 'rankingSlope' || builder.chartType === 'deltaComparison')) {
+    return [{ field: 'count', name: 'Count', format: 'number', chartType: null, axis: 'primary' as const }];
+  }
   return series.length ? series : [{ field: yField, name: prettifyLabel(yField), format: 'number', chartType: null, axis: 'primary' as const }];
 }
 
@@ -1436,6 +1504,91 @@ function buildHeatmapChartData(
       [groupField]: entry.groupValue,
       [yField]: aggregate(entry.values, aggregation),
     }));
+}
+
+function buildPeriodComparisonChartData(
+  rows: Array<Record<string, unknown>>,
+  entityField: string,
+  periodField: string,
+  metricField: string,
+  aggregation: ChartBuilderState['aggregation'],
+  chartType: 'rankingSlope' | 'deltaComparison',
+  topN: number | null,
+  sortBy?: { field?: string; order?: 'asc' | 'desc' } | null,
+): { chartData: Record<string, unknown>[]; compareLabels: string[] | null; aggregationNote: string } {
+  const orderedPeriods = uniqueStrings(rows.map((row) => String(row[periodField] ?? '')).filter(Boolean)).sort(comparePeriodValues);
+  if (orderedPeriods.length < 2) {
+    return {
+      chartData: [],
+      compareLabels: null,
+      aggregationNote: `${chartType} skipped because fewer than two periods were available`,
+    };
+  }
+
+  const compareLabels = orderedPeriods.slice(-2);
+  const [startLabel, endLabel] = compareLabels;
+  const grouped = new Map<string, Map<string, number[]>>();
+  for (const row of rows) {
+    const entity = String(row[entityField] ?? '');
+    const period = String(row[periodField] ?? '');
+    if (!entity || !period) continue;
+    if (!grouped.has(entity)) grouped.set(entity, new Map());
+    const byPeriod = grouped.get(entity)!;
+    if (!byPeriod.has(period)) byPeriod.set(period, []);
+    byPeriod.get(period)!.push(metricField && metricField !== 'count' ? numeric(row[metricField]) : 1);
+  }
+
+  const comparisonRows: Array<Record<string, unknown>> = [];
+  let excludedEntities = 0;
+  for (const [entity, byPeriod] of grouped.entries()) {
+    const startValues = byPeriod.get(startLabel);
+    const endValues = byPeriod.get(endLabel);
+    if (!startValues?.length || !endValues?.length) {
+      excludedEntities += 1;
+      continue;
+    }
+    const method = metricField && metricField !== 'count' ? aggregation : 'count';
+    const startValue = aggregate(startValues, method);
+    const endValue = aggregate(endValues, method);
+    comparisonRows.push({
+      [entityField]: entity,
+      startLabel,
+      endLabel,
+      startValue,
+      endValue,
+      delta: endValue - startValue,
+    });
+  }
+
+  if (comparisonRows.length === 0) {
+    return {
+      chartData: [],
+      compareLabels,
+      aggregationNote: `${chartType} skipped because no entities had data in both ${startLabel} and ${endLabel}`,
+    };
+  }
+
+  if (chartType === 'rankingSlope') {
+    const startRanks = rankPeriodComparisonRows(comparisonRows, entityField, 'startValue');
+    const endRanks = rankPeriodComparisonRows(comparisonRows, entityField, 'endValue');
+    for (const row of comparisonRows) {
+      row.startRank = startRanks.get(String(row[entityField] ?? '')) ?? 0;
+      row.endRank = endRanks.get(String(row[entityField] ?? '')) ?? 0;
+    }
+  }
+
+  const rankedRows = sortPeriodComparisonRows(comparisonRows, chartType, entityField, sortBy);
+  const trimmedRows = topN && topN > 0 ? rankedRows.slice(0, topN) : rankedRows;
+  const baseNote = chartType === 'rankingSlope'
+    ? `Compared ${comparisonRows.length} entities across ${startLabel} and ${endLabel} with rank alignment`
+    : `Computed deltas across ${startLabel} and ${endLabel}`;
+  return {
+    chartData: trimmedRows,
+    compareLabels,
+    aggregationNote: excludedEntities > 0
+      ? `${baseNote}; excluded ${excludedEntities} entities without both periods`
+      : baseNote,
+  };
 }
 
 function buildBoxplotChartData(
@@ -1571,9 +1724,18 @@ function normalizeLayoutFromBuilder(builder: ChartBuilderState): ChartSpec['conf
 function getSupportedTypesFromBuilder(
   builder: ChartBuilderState,
   xKind?: ChartField['kind'],
+  numericBinCount?: number | null,
 ): ChartType[] {
-  if (xKind === 'date') return ['line', 'area', 'stackedArea', 'bar'];
+  if (builder.chartType === 'heatmap' || builder.chartType === 'boxplot' || builder.chartType === 'rankingSlope' || builder.chartType === 'deltaComparison') {
+    return [builder.chartType];
+  }
+  if (builder.chartType === 'dualAxis' || builder.secondaryYAxisField) return ['dualAxis', 'bar', 'line'];
+  if (numericBinCount && builder.chartType !== 'scatter') return ['bar', 'line'];
+  if (builder.chartType === 'normalizedStackedBar') return ['normalizedStackedBar', 'stackedBar', 'bar'];
+  if (builder.chartType === 'stackedArea') return ['stackedArea', 'area', 'line'];
+  if (builder.chartType === 'stackedBar') return ['stackedBar', 'bar', 'line'];
   if (builder.groupByField) return ['bar', 'line', 'area', 'stackedBar', 'normalizedStackedBar'];
+  if (xKind === 'date') return ['line', 'area', 'stackedArea', 'bar'];
   return ['bar', 'line', 'scatter', 'pie', 'heatmap', 'boxplot'];
 }
 
@@ -1588,9 +1750,19 @@ function resolveXAxisBinCount(
 ) {
   if (chartType === 'scatter') return null;
   if (transform?.type !== 'histogram') return null;
-  if (xField && transform?.field && String(transform.field) !== xField) return null;
   const bins = Number(transform?.bins ?? 0);
   return Number.isInteger(bins) && bins > 1 ? bins : null;
+}
+
+function resolveBuilderXAxisField(
+  transform: ChartSpec['config']['transform'],
+  xAxisField: string | null | undefined,
+  fields: ChartField[],
+) {
+  if (transform?.type === 'histogram' && typeof transform.field === 'string' && transform.field) {
+    return transform.field;
+  }
+  return xAxisField ?? pickDefaultXField(fields);
 }
 
 function resolveNumericBinCount(builder: ChartBuilderState, field?: ChartField) {
@@ -1622,6 +1794,88 @@ function compareAxisValues(left: unknown, right: unknown, direction: 'asc' | 'de
   const rightNumeric = Number(right);
   if (!Number.isNaN(leftNumeric) && !Number.isNaN(rightNumeric)) return (leftNumeric - rightNumeric) * multiplier;
   return String(left ?? '').localeCompare(String(right ?? '')) * multiplier;
+}
+
+function comparePeriodValues(left: unknown, right: unknown) {
+  return comparePeriodSortKeys(toPeriodSortKey(left), toPeriodSortKey(right));
+}
+
+function toPeriodSortKey(value: unknown): Array<number | string> {
+  if (isDateLike(value)) {
+    const date = toDate(value);
+    if (date) return [0, date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate()];
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    let match = trimmed.match(/^(\d{4})[-/](\d{1,2})$/);
+    if (match) return [1, Number(match[1]), Number(match[2])];
+    match = trimmed.match(/^(\d{4})[-/]Q([1-4])$/i);
+    if (match) return [2, Number(match[1]), Number(match[2])];
+    match = trimmed.match(/^(\d{4})[-/]W(\d{1,2})$/i);
+    if (match) return [3, Number(match[1]), Number(match[2])];
+  }
+
+  if (isNumericLike(value)) return [4, numeric(value)];
+  return [5, String(value ?? '')];
+}
+
+function comparePeriodSortKeys(left: Array<number | string>, right: Array<number | string>) {
+  const maxLength = Math.max(left.length, right.length);
+  for (let index = 0; index < maxLength; index += 1) {
+    const leftValue = left[index];
+    const rightValue = right[index];
+    if (leftValue === rightValue) continue;
+    if (typeof leftValue === 'number' && typeof rightValue === 'number') return leftValue - rightValue;
+    return String(leftValue ?? '').localeCompare(String(rightValue ?? ''));
+  }
+  return 0;
+}
+
+function rankPeriodComparisonRows(
+  rows: Array<Record<string, unknown>>,
+  entityField: string,
+  valueField: 'startValue' | 'endValue',
+) {
+  const sortedRows = [...rows].sort((left, right) => numeric(right[valueField]) - numeric(left[valueField]));
+  const ranks = new Map<string, number>();
+  let currentRank = 0;
+  let previousValue: number | null = null;
+  sortedRows.forEach((row, index) => {
+    const value = numeric(row[valueField]);
+    if (previousValue === null || Math.abs(value - previousValue) > Number.EPSILON) {
+      currentRank = index + 1;
+      previousValue = value;
+    }
+    ranks.set(String(row[entityField] ?? ''), currentRank);
+  });
+  return ranks;
+}
+
+function sortPeriodComparisonRows(
+  rows: Array<Record<string, unknown>>,
+  chartType: 'rankingSlope' | 'deltaComparison',
+  entityField: string,
+  sortBy?: { field?: string; order?: 'asc' | 'desc' } | null,
+) {
+  if (sortBy?.field) {
+    const direction = sortBy.order === 'asc' ? 'asc' : 'desc';
+    const field = sortBy.field;
+    if (rows.every((row) => field in row)) {
+      return [...rows].sort((left, right) => compareAxisValues(left[field], right[field], direction));
+    }
+    if (field === entityField) {
+      return [...rows].sort((left, right) => compareAxisValues(left[entityField], right[entityField], direction));
+    }
+  }
+
+  if (chartType === 'rankingSlope') {
+    return [...rows].sort(
+      (left, right) => Math.min(numeric(left.startRank), numeric(left.endRank)) - Math.min(numeric(right.startRank), numeric(right.endRank)),
+    );
+  }
+
+  return [...rows].sort((left, right) => Math.abs(numeric(right.delta)) - Math.abs(numeric(left.delta)));
 }
 
 function createNumericBinner(

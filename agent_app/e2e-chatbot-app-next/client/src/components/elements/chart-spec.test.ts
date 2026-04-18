@@ -115,6 +115,517 @@ test('buildOption creates a heatmap config', () => {
   assert.equal((option.yAxis as any)?.type, 'category');
 });
 
+test('buildOption heatmap preserves signed visualMap range', () => {
+  const spec = parseChartSpec({
+    config: {
+      chartType: 'heatmap',
+      title: 'Signed Heatmap',
+      xAxisField: 'state',
+      yAxisField: 'benefit_type',
+      series: [{ field: 'delta', name: 'Delta', format: 'number' }],
+    },
+    chartData: [
+      { state: 'MI', benefit_type: 'Medical', delta: -10 },
+      { state: 'TX', benefit_type: 'Medical', delta: -5 },
+    ],
+  });
+
+  assert.ok(spec);
+  const option = buildOption(spec);
+  assert.equal((option.visualMap as any)?.min, -10);
+  assert.equal((option.visualMap as any)?.max, 0);
+});
+
+test('materializeChartSpecFromBuilder keeps heatmap category axis fields aligned', () => {
+  const workspace = parseChartWorkspace({
+    workspaceId: 'query-heatmap',
+    title: 'State by Benefit',
+    table: {
+      columns: ['patient_state', 'benefit_type', 'paid_amount'],
+      rows: [
+        { patient_state: 'MI', benefit_type: 'Medical', paid_amount: 100 },
+        { patient_state: 'MI', benefit_type: 'Rx', paid_amount: 50 },
+      ],
+      totalRows: 2,
+      previewRowCount: 2,
+      isPreview: false,
+      title: 'State by Benefit',
+    },
+    fields: [
+      { name: 'patient_state', label: 'Patient State', kind: 'text', role: 'dimension', format: 'number', uniqueCount: 1, uniqueRatio: 0.5 },
+      { name: 'benefit_type', label: 'Benefit Type', kind: 'text', role: 'dimension', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+      { name: 'paid_amount', label: 'Paid Amount', kind: 'numeric', role: 'currency', format: 'currency', uniqueCount: 2, uniqueRatio: 1 },
+    ],
+    charts: [
+      {
+        config: {
+          chartType: 'heatmap',
+          title: 'State by Benefit',
+          xAxisField: 'patient_state',
+          yAxisField: 'benefit_type',
+          groupByField: 'benefit_type',
+          series: [{ field: 'paid_amount', name: 'Paid Amount', format: 'currency' }],
+        },
+        chartData: [
+          { patient_state: 'MI', benefit_type: 'Medical', paid_amount: 100 },
+          { patient_state: 'MI', benefit_type: 'Rx', paid_amount: 50 },
+        ],
+      },
+    ],
+  });
+
+  assert.ok(workspace);
+  const builder = createBuilderStateFromChart(workspace!.charts[0], workspace!);
+  const spec = materializeChartSpecFromBuilder(workspace!, builder, workspace!.charts[0], 'manual');
+
+  assert.equal(spec.config.chartType, 'heatmap');
+  assert.equal(spec.config.yAxisField, 'benefit_type');
+  assert.equal(spec.config.groupByField, 'benefit_type');
+  assert.equal(spec.config.series[0]?.field, 'paid_amount');
+
+  const option = buildOption(spec);
+  assert.equal((option.yAxis as any)?.type, 'category');
+});
+
+test('createBuilderStateFromChart falls back to heatmap yAxisField for group field', () => {
+  const workspace = parseChartWorkspace({
+    workspaceId: 'query-heatmap-fallback',
+    title: 'State by Benefit',
+    table: {
+      columns: ['patient_state', 'benefit_type', 'paid_amount'],
+      rows: [{ patient_state: 'MI', benefit_type: 'Medical', paid_amount: 100 }],
+      totalRows: 1,
+      previewRowCount: 1,
+      isPreview: false,
+      title: 'State by Benefit',
+    },
+    fields: [
+      { name: 'patient_state', label: 'Patient State', kind: 'text', role: 'dimension', format: 'number', uniqueCount: 1, uniqueRatio: 1 },
+      { name: 'benefit_type', label: 'Benefit Type', kind: 'text', role: 'dimension', format: 'number', uniqueCount: 1, uniqueRatio: 1 },
+      { name: 'paid_amount', label: 'Paid Amount', kind: 'numeric', role: 'currency', format: 'currency', uniqueCount: 1, uniqueRatio: 1 },
+    ],
+    charts: [
+      {
+        config: {
+          chartType: 'heatmap',
+          title: 'State by Benefit',
+          xAxisField: 'patient_state',
+          yAxisField: 'benefit_type',
+          series: [{ field: 'paid_amount', name: 'Paid Amount', format: 'currency' }],
+        },
+        chartData: [{ patient_state: 'MI', benefit_type: 'Medical', paid_amount: 100 }],
+      },
+    ],
+  });
+
+  assert.ok(workspace);
+  const builder = createBuilderStateFromChart(workspace!.charts[0], workspace!);
+  assert.equal(builder.groupByField, 'benefit_type');
+});
+
+test('materializeChartSpecFromBuilder preserves ranking slope chart shape', () => {
+  const workspace = parseChartWorkspace({
+    workspaceId: 'query-ranking',
+    title: 'Member rank shift',
+    table: {
+      columns: ['patient_id', 'service_year', 'paid_amount'],
+      rows: [
+        { patient_id: 'A', service_year: '2023', paid_amount: 100 },
+        { patient_id: 'A', service_year: '2024', paid_amount: 80 },
+        { patient_id: 'B', service_year: '2023', paid_amount: 90 },
+        { patient_id: 'B', service_year: '2024', paid_amount: 120 },
+      ],
+      totalRows: 4,
+      previewRowCount: 4,
+      isPreview: false,
+      title: 'Member rank shift',
+    },
+    fields: [
+      { name: 'patient_id', label: 'Patient', kind: 'text', role: 'id', format: 'number', uniqueCount: 2, uniqueRatio: 0.5 },
+      { name: 'service_year', label: 'Service Year', kind: 'text', role: 'time', format: 'number', uniqueCount: 2, uniqueRatio: 0.5 },
+      { name: 'paid_amount', label: 'Paid Amount', kind: 'numeric', role: 'currency', format: 'currency', uniqueCount: 4, uniqueRatio: 1 },
+    ],
+    charts: [
+      {
+        config: {
+          chartType: 'rankingSlope',
+          title: 'Member rank shift',
+          xAxisField: 'patient_id',
+          groupByField: 'service_year',
+          compareLabels: ['2023', '2024'],
+          transform: { type: 'rankingSlope', periodField: 'service_year', metric: 'paid_amount', compareLabels: ['2023', '2024'] },
+          series: [{ field: 'paid_amount', name: 'Paid Amount', format: 'currency' }],
+        },
+        chartData: [
+          { patient_id: 'A', startLabel: '2023', endLabel: '2024', startRank: 1, endRank: 2, delta: -20 },
+          { patient_id: 'B', startLabel: '2023', endLabel: '2024', startRank: 2, endRank: 1, delta: 30 },
+        ],
+      },
+    ],
+  });
+
+  assert.ok(workspace);
+  const builder = createBuilderStateFromChart(workspace!.charts[0], workspace!);
+  const spec = materializeChartSpecFromBuilder(workspace!, builder, workspace!.charts[0], 'manual');
+
+  assert.equal(spec.config.chartType, 'rankingSlope');
+  assert.deepEqual(spec.config.compareLabels, ['2023', '2024']);
+  assert.equal(spec.config.transform?.type, 'rankingSlope');
+  assert.deepEqual(spec.config.transform?.compareLabels, ['2023', '2024']);
+  assert.ok(spec.chartData.every((row) => 'startRank' in row && 'endRank' in row));
+
+  const option = buildOption(spec);
+  assert.equal((option.series as any)?.[0]?.type, 'line');
+});
+
+test('materializeChartSpecFromBuilder preserves delta comparison chart shape', () => {
+  const workspace = parseChartWorkspace({
+    workspaceId: 'query-delta',
+    title: 'Year Over Year Change',
+    table: {
+      columns: ['benefit_type', 'service_year', 'paid_amount'],
+      rows: [
+        { benefit_type: 'Medical', service_year: '2023', paid_amount: 100 },
+        { benefit_type: 'Medical', service_year: '2024', paid_amount: 80 },
+        { benefit_type: 'Rx', service_year: '2023', paid_amount: 90 },
+        { benefit_type: 'Rx', service_year: '2024', paid_amount: 120 },
+      ],
+      totalRows: 4,
+      previewRowCount: 4,
+      isPreview: false,
+      title: 'Year Over Year Change',
+    },
+    fields: [
+      { name: 'benefit_type', label: 'Benefit Type', kind: 'text', role: 'dimension', format: 'number', uniqueCount: 2, uniqueRatio: 0.5 },
+      { name: 'service_year', label: 'Service Year', kind: 'text', role: 'time', format: 'number', uniqueCount: 2, uniqueRatio: 0.5 },
+      { name: 'paid_amount', label: 'Paid Amount', kind: 'numeric', role: 'currency', format: 'currency', uniqueCount: 4, uniqueRatio: 1 },
+    ],
+    charts: [
+      {
+        config: {
+          chartType: 'deltaComparison',
+          title: 'Year Over Year Change',
+          xAxisField: 'benefit_type',
+          groupByField: 'service_year',
+          compareLabels: ['2023', '2024'],
+          transform: { type: 'deltaComparison', periodField: 'service_year', metric: 'paid_amount', compareLabels: ['2023', '2024'] },
+          series: [{ field: 'paid_amount', name: 'Paid Amount', format: 'currency' }],
+        },
+        chartData: [
+          { benefit_type: 'Medical', startLabel: '2023', endLabel: '2024', startValue: 100, endValue: 80, delta: -20 },
+          { benefit_type: 'Rx', startLabel: '2023', endLabel: '2024', startValue: 90, endValue: 120, delta: 30 },
+        ],
+      },
+    ],
+  });
+
+  assert.ok(workspace);
+  const builder = createBuilderStateFromChart(workspace!.charts[0], workspace!);
+  const spec = materializeChartSpecFromBuilder(workspace!, builder, workspace!.charts[0], 'manual');
+
+  assert.equal(spec.config.chartType, 'deltaComparison');
+  assert.deepEqual(spec.config.compareLabels, ['2023', '2024']);
+  assert.equal(spec.config.transform?.type, 'deltaComparison');
+  assert.ok(spec.chartData.every((row) => 'delta' in row && 'startValue' in row && 'endValue' in row));
+
+  const option = buildOption(spec);
+  assert.equal((option.series as any)?.[0]?.type, 'bar');
+});
+
+test('materializeChartSpecFromBuilder preserves backend sortBy and passthrough meta fields', () => {
+  const workspace = parseChartWorkspace({
+    workspaceId: 'query-passthrough',
+    title: 'Monthly Spend',
+    table: {
+      columns: ['service_month', 'paid_amount'],
+      rows: [
+        { service_month: '2024-01', paid_amount: 100 },
+        { service_month: '2024-02', paid_amount: 50 },
+      ],
+      totalRows: 2,
+      previewRowCount: 2,
+      isPreview: false,
+      title: 'Monthly Spend',
+    },
+    fields: [
+      { name: 'service_month', label: 'Service Month', kind: 'date', role: 'time', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+      { name: 'paid_amount', label: 'Paid Amount', kind: 'numeric', role: 'currency', format: 'currency', uniqueCount: 2, uniqueRatio: 1 },
+    ],
+    charts: [
+      {
+        config: {
+          chartType: 'line',
+          title: 'Monthly Spend',
+          xAxisField: 'service_month',
+          series: [{ field: 'paid_amount', name: 'Paid Amount', format: 'currency' }],
+          sortBy: { field: 'service_month', order: 'asc' },
+        },
+        chartData: [
+          { service_month: '2024-01', paid_amount: 100 },
+          { service_month: '2024-02', paid_amount: 50 },
+        ],
+        meta: {
+          source: 'natural-language',
+          businessInsight: 'January leads.',
+          intentSource: 'llm',
+        },
+      },
+    ],
+  });
+
+  assert.ok(workspace);
+  const builder = createBuilderStateFromChart(workspace!.charts[0], workspace!);
+  const spec = materializeChartSpecFromBuilder(workspace!, builder, workspace!.charts[0], 'manual');
+
+  assert.deepEqual((spec.config as any).sortBy, { field: 'service_month', order: 'asc' });
+  assert.equal((spec.meta as any).businessInsight, 'January leads.');
+  assert.equal((spec.meta as any).intentSource, 'llm');
+});
+
+test('materializeChartSpecFromBuilder keeps supported chart types aligned with backend capabilities', () => {
+  const workspace = parseChartWorkspace({
+    workspaceId: 'query-supported-types',
+    title: 'Monthly Spend by Benefit',
+    table: {
+      columns: ['service_month', 'benefit_type', 'paid_amount', 'claim_count'],
+      rows: [
+        { service_month: '2024-01', benefit_type: 'Medical', paid_amount: 100, claim_count: 2 },
+        { service_month: '2024-02', benefit_type: 'Rx', paid_amount: 50, claim_count: 1 },
+      ],
+      totalRows: 2,
+      previewRowCount: 2,
+      isPreview: false,
+      title: 'Monthly Spend by Benefit',
+    },
+    fields: [
+      { name: 'service_month', label: 'Service Month', kind: 'date', role: 'time', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+      { name: 'benefit_type', label: 'Benefit Type', kind: 'text', role: 'dimension', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+      { name: 'paid_amount', label: 'Paid Amount', kind: 'numeric', role: 'currency', format: 'currency', uniqueCount: 2, uniqueRatio: 1 },
+      { name: 'claim_count', label: 'Claim Count', kind: 'numeric', role: 'measure', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+    ],
+    charts: [
+      {
+        config: {
+          chartType: 'line',
+          title: 'Monthly Spend by Benefit',
+          xAxisField: 'service_month',
+          groupByField: 'benefit_type',
+          series: [{ field: 'paid_amount', name: 'Paid Amount', format: 'currency' }],
+        },
+        chartData: [],
+      },
+    ],
+  });
+
+  assert.ok(workspace);
+  const builder = createBuilderStateFromChart(workspace!.charts[0], workspace!);
+  const groupedSpec = materializeChartSpecFromBuilder(
+    workspace!,
+    { ...builder, groupByField: 'benefit_type', chartType: 'line' },
+    workspace!.charts[0],
+    'manual',
+  );
+  assert.deepEqual(groupedSpec.config.supportedChartTypes, ['bar', 'line', 'area', 'stackedBar', 'normalizedStackedBar']);
+
+  const dualAxisSpec = materializeChartSpecFromBuilder(
+    workspace!,
+    { ...builder, chartType: 'dualAxis', secondaryYAxisField: 'claim_count', groupByField: '' },
+    workspace!.charts[0],
+    'manual',
+  );
+  assert.deepEqual(dualAxisSpec.config.supportedChartTypes, ['dualAxis', 'bar', 'line']);
+
+  const histogramSpec = materializeChartSpecFromBuilder(
+    workspace!,
+    { ...builder, chartType: 'bar', xAxisField: 'paid_amount', yAxisField: 'claim_count', xAxisBinCount: 5, groupByField: '' },
+    workspace!.charts[0],
+    'manual',
+  );
+  assert.deepEqual(histogramSpec.config.supportedChartTypes, ['bar', 'line']);
+});
+
+test('materializeChartSpecFromBuilder does not claim histogram when numeric binning cannot run', () => {
+  const workspace = parseChartWorkspace({
+    workspaceId: 'query-bad-bins',
+    title: 'Invalid Numeric Bins',
+    table: {
+      columns: ['age_band', 'paid_amount'],
+      rows: [
+        { age_band: 'young', paid_amount: 10 },
+        { age_band: 'adult', paid_amount: 20 },
+      ],
+      totalRows: 2,
+      previewRowCount: 2,
+      isPreview: false,
+      title: 'Invalid Numeric Bins',
+    },
+    fields: [
+      { name: 'age_band', label: 'Age Band', kind: 'numeric', role: 'measure', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+      { name: 'paid_amount', label: 'Paid Amount', kind: 'numeric', role: 'currency', format: 'currency', uniqueCount: 2, uniqueRatio: 1 },
+    ],
+    charts: [
+      {
+        config: {
+          chartType: 'bar',
+          title: 'Invalid Numeric Bins',
+          xAxisField: 'age_band',
+          series: [{ field: 'paid_amount', name: 'Paid Amount', format: 'currency' }],
+        },
+        chartData: [],
+      },
+    ],
+  });
+
+  assert.ok(workspace);
+  const builder = createBuilderStateFromChart(workspace!.charts[0], workspace!);
+  const spec = materializeChartSpecFromBuilder(
+    workspace!,
+    { ...builder, xAxisField: 'age_band', yAxisField: 'paid_amount', xAxisBinCount: 5 },
+    workspace!.charts[0],
+    'manual',
+  );
+
+  assert.equal(spec.config.transform, null);
+  assert.doesNotMatch(spec.aggregationNote ?? '', /Bucketed/);
+  assert.notDeepEqual(spec.config.supportedChartTypes, ['bar', 'line']);
+});
+
+test('buildOption tooltip keeps legitimate zero values', () => {
+  const spec = parseChartSpec({
+    config: {
+      chartType: 'bar',
+      title: 'Monthly Spend',
+      xAxisField: 'service_month',
+      series: [{ field: 'paid_amount', name: 'Paid Amount', format: 'currency' }],
+    },
+    chartData: [
+      { service_month: '2024-01', paid_amount: 0 },
+      { service_month: '2024-02', paid_amount: 100 },
+    ],
+  });
+
+  assert.ok(spec);
+  const option = buildOption(spec);
+  const formatter = (option.tooltip as any)?.formatter;
+  assert.equal(typeof formatter, 'function');
+  const html = formatter([
+    {
+      axisValueLabel: '2024-01',
+      seriesName: 'Paid Amount',
+      value: 0,
+      marker: '',
+    },
+  ]);
+  assert.match(String(html), /\$0|\b0\b/);
+});
+
+test('buildOption heatmap tooltip tolerates malformed params.value', () => {
+  const spec = parseChartSpec({
+    config: {
+      chartType: 'heatmap',
+      title: 'State by Benefit',
+      xAxisField: 'state',
+      yAxisField: 'benefit_type',
+      series: [{ field: 'paid_amount', name: 'Paid Amount', format: 'currency' }],
+    },
+    chartData: [
+      { state: 'MI', benefit_type: 'Medical', paid_amount: 100 },
+    ],
+  });
+
+  assert.ok(spec);
+  const option = buildOption(spec);
+  const formatter = (option.tooltip as any)?.formatter;
+  assert.equal(typeof formatter, 'function');
+  const html = formatter({ value: 100 });
+  assert.match(String(html), /\//);
+});
+
+test('buildOption scatter falls back to a single series when group values are blank', () => {
+  const spec = parseChartSpec({
+    config: {
+      chartType: 'scatter',
+      title: 'Age vs Spend',
+      xAxisField: 'age',
+      groupByField: 'segment',
+      series: [{ field: 'paid_amount', name: 'Paid Amount', format: 'currency' }],
+    },
+    chartData: [
+      { age: 40, paid_amount: 100, segment: '' },
+      { age: 50, paid_amount: 200, segment: '' },
+    ],
+  });
+
+  assert.ok(spec);
+  const option = buildOption(spec);
+  assert.equal((option.series as any)?.length, 1);
+  assert.deepEqual((option.series as any)?.[0]?.data, [[40, 100], [50, 200]]);
+});
+
+test('buildOption cartesian tooltip escapes html labels', () => {
+  const spec = parseChartSpec({
+    config: {
+      chartType: 'bar',
+      title: 'Unsafe Labels',
+      xAxisField: 'category',
+      series: [{ field: 'paid_amount', name: '<b>Paid</b>', format: 'currency' }],
+    },
+    chartData: [{ category: '<img>', paid_amount: 10 }],
+  });
+
+  assert.ok(spec);
+  const option = buildOption(spec);
+  const formatter = (option.tooltip as any)?.formatter;
+  assert.equal(typeof formatter, 'function');
+  const html = formatter([
+    {
+      axisValueLabel: '<img>',
+      seriesName: '<b>Paid</b>',
+      value: 10,
+      marker: '',
+    },
+  ]);
+  assert.doesNotMatch(String(html), /<img>|<b>/);
+  assert.match(String(html), /&lt;img&gt;|&lt;b&gt;Paid&lt;\/b&gt;/);
+});
+
+test('validateBuilderState rejects non-numeric scatter bubble size fields', () => {
+  const workspace = parseChartWorkspace({
+    workspaceId: 'query-scatter-z',
+    title: 'Age vs Spend',
+    table: {
+      columns: ['age', 'paid_amount', 'segment'],
+      rows: [{ age: 40, paid_amount: 100, segment: 'A' }],
+      totalRows: 1,
+      previewRowCount: 1,
+      isPreview: false,
+      title: 'Age vs Spend',
+    },
+    fields: [
+      { name: 'age', label: 'Age', kind: 'numeric', role: 'measure', format: 'number', uniqueCount: 1, uniqueRatio: 1 },
+      { name: 'paid_amount', label: 'Paid Amount', kind: 'numeric', role: 'currency', format: 'currency', uniqueCount: 1, uniqueRatio: 1 },
+      { name: 'segment', label: 'Segment', kind: 'text', role: 'dimension', format: 'number', uniqueCount: 1, uniqueRatio: 1 },
+    ],
+    charts: [
+      {
+        config: {
+          chartType: 'scatter',
+          title: 'Age vs Spend',
+          xAxisField: 'age',
+          series: [{ field: 'paid_amount', name: 'Paid Amount', format: 'currency' }],
+        },
+        chartData: [{ age: 40, paid_amount: 100 }],
+      },
+    ],
+  });
+
+  assert.ok(workspace);
+  const builder = createBuilderStateFromChart(workspace!.charts[0], workspace!);
+  const result = validateBuilderState({ ...builder, chartType: 'scatter', zAxisField: 'segment' }, workspace!);
+  assert.equal(result.valid, false);
+  assert.match(result.issues.join(' '), /bubble size must use a numeric field/i);
+});
+
 test('buildOption creates a dual-axis config', () => {
   const spec = parseChartSpec({
     config: {
@@ -233,6 +744,54 @@ test('materializeChartSpecFromBuilder creates a normalized grouped chart from wo
   assert.match(spec.aggregationNote ?? '', /percent-of-total|Aggregated|Bucketed/i);
 });
 
+test('materializeChartSpecFromBuilder applies topN on date x-axis when enabled', () => {
+  const workspace = parseChartWorkspace({
+    workspaceId: 'query-date-topn',
+    title: 'Monthly Spend',
+    table: {
+      columns: ['service_month', 'paid_amount'],
+      rows: [
+        { service_month: '2024-01', paid_amount: 100 },
+        { service_month: '2024-02', paid_amount: 300 },
+        { service_month: '2024-03', paid_amount: 200 },
+      ],
+      totalRows: 3,
+      previewRowCount: 3,
+      isPreview: false,
+      title: 'Monthly Spend',
+    },
+    fields: [
+      { name: 'service_month', label: 'Service Month', kind: 'date', role: 'time', format: 'number', uniqueCount: 3, uniqueRatio: 1 },
+      { name: 'paid_amount', label: 'Paid Amount', kind: 'numeric', role: 'currency', format: 'currency', uniqueCount: 3, uniqueRatio: 1 },
+    ],
+    charts: [
+      {
+        config: {
+          chartType: 'line',
+          title: 'Monthly Spend',
+          xAxisField: 'service_month',
+          series: [{ field: 'paid_amount', name: 'Paid Amount', format: 'currency' }],
+        },
+        chartData: [],
+      },
+    ],
+  });
+
+  assert.ok(workspace);
+  const builder = createBuilderStateFromChart(workspace!.charts[0], workspace!);
+  const spec = materializeChartSpecFromBuilder(
+    workspace!,
+    { ...builder, chartType: 'line', topN: 2 },
+    workspace!.charts[0],
+    'manual',
+  );
+
+  assert.equal(spec.chartData.length, 3);
+  assert.match(spec.aggregationNote ?? '', /Top 2 categories/i);
+  assert.equal(spec.config.transform?.type, 'topN');
+  assert.equal((spec.config.transform as any)?.n, 2);
+});
+
 test('materializeChartSpecFromBuilder buckets numeric X axis into bins', () => {
   const workspace = parseChartWorkspace({
     workspaceId: 'query-ages',
@@ -290,6 +849,87 @@ test('materializeChartSpecFromBuilder buckets numeric X axis into bins', () => {
   assert.ok(spec.chartData.length <= 4);
   assert.equal(typeof spec.chartData[0]?.age, 'string');
   assert.match(spec.aggregationNote ?? '', /Bucketed Age into 4 bins/i);
+});
+
+test('createBuilderStateFromChart preserves histogram source field and bins from backend specs', () => {
+  const workspace = parseChartWorkspace({
+    workspaceId: 'query-hist',
+    title: 'Age Distribution',
+    table: {
+      columns: ['age', 'paid_amount'],
+      rows: [
+        { age: 5, paid_amount: 10 },
+        { age: 8, paid_amount: 20 },
+      ],
+      totalRows: 2,
+      previewRowCount: 2,
+      isPreview: false,
+      title: 'Age Distribution',
+    },
+    fields: [
+      { name: 'age', label: 'Age', kind: 'numeric', role: 'measure', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+      { name: 'paid_amount', label: 'Paid Amount', kind: 'numeric', role: 'currency', format: 'currency', uniqueCount: 2, uniqueRatio: 1 },
+    ],
+    charts: [
+      {
+        config: {
+          chartType: 'bar',
+          title: 'Age Distribution',
+          xAxisField: 'bucket',
+          series: [{ field: 'count', name: 'Count', format: 'number', axis: 'primary' }],
+          transform: { type: 'histogram', field: 'age', bins: 4 },
+          style: { palette: 'default' },
+        },
+        chartData: [{ bucket: '5-10', bucketStart: 5, bucketEnd: 10, count: 2 }],
+      },
+    ],
+  });
+
+  assert.ok(workspace);
+  const builder = createBuilderStateFromChart(workspace!.charts[0], workspace!);
+  assert.equal(builder.xAxisField, 'age');
+  assert.equal(builder.xAxisBinCount, 4);
+});
+
+test('createBuilderStateFromChart preserves histogram bins when topN metadata coexists', () => {
+  const workspace = parseChartWorkspace({
+    workspaceId: 'query-hist-topn',
+    title: 'Age Distribution',
+    table: {
+      columns: ['age', 'paid_amount'],
+      rows: [
+        { age: 5, paid_amount: 10 },
+        { age: 8, paid_amount: 20 },
+      ],
+      totalRows: 2,
+      previewRowCount: 2,
+      isPreview: false,
+      title: 'Age Distribution',
+    },
+    fields: [
+      { name: 'age', label: 'Age', kind: 'numeric', role: 'measure', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+      { name: 'paid_amount', label: 'Paid Amount', kind: 'numeric', role: 'currency', format: 'currency', uniqueCount: 2, uniqueRatio: 1 },
+    ],
+    charts: [
+      {
+        config: {
+          chartType: 'bar',
+          title: 'Age Distribution',
+          xAxisField: 'bucket',
+          series: [{ field: 'count', name: 'Count', format: 'number', axis: 'primary' }],
+          transform: { type: 'histogram', field: 'age', bins: 4, topN: 3 },
+          style: { palette: 'default' },
+        },
+        chartData: [{ bucket: '5-10', bucketStart: 5, bucketEnd: 10, count: 2 }],
+      },
+    ],
+  });
+
+  assert.ok(workspace);
+  const builder = createBuilderStateFromChart(workspace!.charts[0], workspace!);
+  assert.equal(builder.xAxisField, 'age');
+  assert.equal(builder.xAxisBinCount, 4);
+  assert.equal(builder.topN, 3);
 });
 
 test('getChartBuilderUiConfig adapts controls by chart type', () => {

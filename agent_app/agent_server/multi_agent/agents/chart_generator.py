@@ -138,7 +138,7 @@ def _json_default(o: Any) -> Any:
         return o.isoformat()
     if isinstance(o, Decimal):
         return float(o)
-    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+    return str(o)
 
 
 def _strip_sql_comments(sql: str) -> str:
@@ -245,7 +245,7 @@ class ChartGenerator:
             attempts: List[Tuple[str, Dict[str, Any], List[str]]] = []
 
             if llm_intent and llm_intent.get("plottable", False):
-                attempts.append(("llm", llm_intent, []))
+                attempts.append(("llm" if self.llm is not None else "heuristic", llm_intent, []))
             if heuristic_intent and heuristic_intent.get("plottable", False):
                 heuristic_notes: List[str] = []
                 if llm_intent is None:
@@ -294,6 +294,7 @@ class ChartGenerator:
                         "zAxisField": resolved_config.get("zAxisField"),
                         "series": resolved_config.get("series", []),
                         "layout": resolved_config.get("layout"),
+                        "sortBy": resolved_config.get("sortBy"),
                         "toolbox": True,
                         "supportedChartTypes": resolved_config.get("supportedChartTypes", ["bar"]),
                         "referenceLines": resolved_config.get("referenceLines", []),
@@ -354,11 +355,17 @@ class ChartGenerator:
                 if isinstance(row, dict) and row.get(x_field) not in (None, "")
             ]
             if ranked:
-                top_row = max(ranked, key=lambda row: _numeric(row.get(primary_field, 0)))
-                label = str(top_row.get(x_field, ""))
-                value = _format_number(_numeric(top_row.get(primary_field, 0)))
-                metric = primary_name or primary_field.replace("_", " ")
-                return f"{label} leads on {metric} at {value}."
+                aggregated_totals: Dict[str, float] = defaultdict(float)
+                for row in ranked:
+                    aggregated_totals[str(row.get(x_field, ""))] += _numeric(row.get(primary_field, 0))
+                if aggregated_totals:
+                    top_label, top_value = max(aggregated_totals.items(), key=lambda item: item[1])
+                    if len({round(value, 6) for value in aggregated_totals.values()}) == 1 and chart_type == "normalizedStackedBar":
+                        return None
+                    label = str(top_label)
+                    value = _format_number(top_value)
+                    metric = primary_name or primary_field.replace("_", " ")
+                    return f"{label} leads on {metric} at {value}."
 
         if chart_type == "deltaComparison":
             ranked = [row for row in chart_data if isinstance(row, dict)]
@@ -406,19 +413,20 @@ class ChartGenerator:
                 if hasattr(self.llm, "stream"):
                     for chunk in self.llm.stream(prompt):
                         if getattr(chunk, "content", None):
-                            content += chunk.content
+                            content += _content_to_text(chunk.content)
                 elif hasattr(self.llm, "invoke"):
                     result = self.llm.invoke(prompt)
-                    content = getattr(result, "content", "") or ""
+                    content = _content_to_text(getattr(result, "content", "") or "")
             content = content.strip()
-
-            match = re.search(r"\{[\s\S]*\}", content)
-            if match:
-                return json.loads(match.group())
-            return json.loads(content)
+            parsed = _extract_json_object(content)
+            if not isinstance(parsed, dict):
+                raise ValueError("Chart intent must be a JSON object")
+            if "plottable" in parsed:
+                parsed["plottable"] = _normalize_plottable(parsed.get("plottable"))
+            return parsed
         except Exception as e:
             logger.warning(f"ChartGenerator LLM parse error: {e}")
-            return self._build_heuristic_intent(columns, data, original_query, result_context)
+            return None
 
     def _build_prompt(
         self,
@@ -489,6 +497,7 @@ Return ONLY valid JSON (no markdown, no explanation):
   "title": "short descriptive chart title",
   "businessInsight": "one concise business interpretation grounded in the actual chart data, max 140 chars",
   "xAxisField": "category_or_time_field",
+  "zAxisField": "optional_numeric_size_field",
   "groupByField": "optional_group_field_or_period_field",
   "layout": "grouped"|"stacked"|"normalized"|null,
   "series": [
@@ -517,13 +526,13 @@ Examples for EACH chart type:
 - Top N categories: chartType=bar, transform={{"type":"topN","metric":"total_paid_amount","n":10,"otherLabel":"Other"}}, sortBy={{"field":"total_paid_amount","order":"desc"}}
 - Stacked composition: chartType=stackedBar, layout=stacked, groupByField="benefit_type", transform={{"type":"topN","metric":"paid_amount","n":8,"otherLabel":"Other"}}
 - Percent composition: chartType=normalizedStackedBar, layout=normalized, transform={{"type":"percentOfTotal","metric":"member_count"}}
-- Scatter correlation: chartType=scatter, xAxisField="current_age", series=[{{"field":"total_paid","name":"Total Paid","format":"currency"}}]
+- Scatter correlation: chartType=scatter, xAxisField="current_age", zAxisField="claim_count", series=[{{"field":"total_paid","name":"Total Paid","format":"currency"}}]
 - Pie share: chartType=pie, xAxisField="gender", series=[{{"field":"member_count","name":"Members","format":"number"}}]
-- Heatmap: chartType=heatmap, xAxisField="service_year", groupByField="benefit_type", transform={{"type":"heatmap","metric":"paid_amount","function":"sum"}}
-- Boxplot spread: chartType=boxplot, xAxisField="benefit_type", transform={{"type":"boxplot","field":"paid_amount"}}
+- Heatmap: chartType=heatmap, xAxisField="service_year", groupByField="benefit_type", transform={{"type":"heatmap","metric":"paid_amount","function":"sum","xOrder":"asc","yOrder":"asc"}}
+- Boxplot spread: chartType=boxplot, xAxisField="benefit_type", transform={{"type":"boxplot","field":"paid_amount"}}, sortBy={{"field":"median","order":"desc"}}
 - Dual axis comparison: chartType=dualAxis, series=[{{"field":"total_paid","name":"Total Paid","format":"currency","chartType":"bar","axis":"primary"}},{{"field":"claim_count","name":"Claims","format":"number","chartType":"line","axis":"secondary"}}]
 - Ranking change: chartType=rankingSlope, xAxisField="provider_name", transform={{"type":"rankingSlope","entityField":"provider_name","periodField":"service_year","metric":"paid_amount","function":"sum","topN":10}}
-- Period delta: chartType=deltaComparison, xAxisField="benefit_type", transform={{"type":"deltaComparison","entityField":"benefit_type","periodField":"service_year","metric":"paid_amount","function":"sum"}}
+- Period delta: chartType=deltaComparison, xAxisField="benefit_type", transform={{"type":"deltaComparison","entityField":"benefit_type","periodField":"service_year","metric":"paid_amount","function":"sum"}}, sortBy={{"field":"delta","order":"desc"}}
 
 Rules:
 - DO NOT default to bar chart — actively consider which type best reveals the insight
@@ -536,6 +545,10 @@ Rules:
 - Do NOT use a high-cardinality numeric field as a categorical x-axis unless you are intentionally binning it with histogram
 - If <=6 categories with one metric, consider pie
 - If two categorical dimensions with a metric, consider heatmap
+- For heatmaps, you may set transform.xOrder and transform.yOrder to "asc" or "desc" for axis ordering
+- For charts with a categorical/time x-axis, use sortBy to control x-axis order when helpful
+- For charts with continuous x/y values (for example scatter), use sortBy to control row/point order when helpful
+- For transformed outputs, sortBy.field may refer to derived fields such as count, delta, min, q1, median, q3, max, startRank, or endRank when applicable
 - If you see period/year columns, consider rankingSlope or deltaComparison
 - Prefer charts that match the current result label/explanation, not a previous result
 - If row grain indicates repeated detail rows (diagnosis, procedure, coverage, code-level rows),
@@ -756,6 +769,7 @@ Rules:
         kinds = self._infer_field_kinds(columns, data)
 
         x_field = self._coerce_field(intent.get("xAxisField"), columns)
+        z_field = self._coerce_field(intent.get("zAxisField"), columns)
         group_field = self._coerce_field(intent.get("groupByField"), columns)
 
         series = self._normalize_series(intent.get("series"), columns, data, notes)
@@ -789,9 +803,6 @@ Rules:
         elif chart_type == "area" and layout == "stacked":
             chart_type = "stackedArea"
 
-        if chart_type in {"heatmap", "boxplot", "rankingSlope", "deltaComparison"} and not transform:
-            transform = {"type": chart_type}
-
         if chart_type == "heatmap":
             x_field = x_field or self._pick_categorical_field(columns, kinds)
             group_field = group_field or self._pick_secondary_dimension(columns, kinds, x_field)
@@ -799,11 +810,36 @@ Rules:
             x_field = x_field or self._pick_categorical_field(columns, kinds)
         elif chart_type in {"rankingSlope", "deltaComparison"}:
             x_field = x_field or self._pick_categorical_field(columns, kinds)
-            if transform and not transform.get("periodField"):
-                transform["periodField"] = group_field or self._pick_date_or_categorical_field(columns, kinds, exclude=x_field)
-            group_field = transform.get("periodField") if transform else group_field
+            group_field = (
+                (transform or {}).get("periodField")
+                or group_field
+                or self._pick_date_or_categorical_field(columns, kinds, exclude=x_field)
+            )
         else:
             x_field = x_field or self._pick_default_x_field(columns, kinds)
+
+        if chart_type in {"heatmap", "boxplot", "rankingSlope", "deltaComparison"}:
+            special_transform = self._normalize_transform(
+                {**(transform or {}), "type": chart_type},
+                columns,
+                kinds,
+                x_field,
+                group_field,
+                series,
+                notes,
+            )
+            if special_transform:
+                transform = special_transform
+                if chart_type == "heatmap":
+                    group_field = transform.get("yField") or group_field
+                if chart_type in {"rankingSlope", "deltaComparison"}:
+                    group_field = transform.get("periodField") or group_field
+            else:
+                notes.append(f"Downgraded {chart_type} to bar because required fields could not be inferred")
+                chart_type = "bar"
+                transform = None
+                x_field = x_field or self._pick_default_x_field(columns, kinds)
+                layout = "grouped" if group_field else None
 
         if chart_type == "scatter" and not x_field:
             numeric_candidates = self._rank_numeric_fields_for_series(columns, kinds, data)
@@ -812,11 +848,22 @@ Rules:
             if x_field:
                 notes.append(f"Filled missing scatter x-axis with numeric field '{x_field}'")
 
+        if chart_type == "scatter":
+            numeric_candidates = self._rank_numeric_fields_for_series(columns, kinds, data)
+            primary_field = series[0]["field"] if series else None
+            if z_field and (kinds.get(z_field) != "numeric" or z_field in {x_field, primary_field}):
+                z_field = None
+            if not z_field:
+                z_field = next(
+                    (field for field in numeric_candidates if field not in {x_field, primary_field}),
+                    None,
+                )
+
         if chart_type == "dualAxis" and len(series) < 2:
             chart_type = "bar"
             notes.append("Downgraded dualAxis to bar because fewer than two valid series remained")
 
-        if x_field and self._looks_like_identifier_field(x_field) and chart_type not in {"scatter", "dualAxis"} and series:
+        if x_field and self._looks_like_identifier_field(x_field) and chart_type not in {"scatter", "dualAxis", "heatmap", "boxplot", "rankingSlope", "deltaComparison"} and series:
             primary_metric = series[0]["field"]
             if self._should_bucket_numeric_field(primary_metric, data):
                 x_field = primary_metric
@@ -885,15 +932,35 @@ Rules:
             layout = "grouped" if group_field else None
 
         reference_lines = self._normalize_reference_lines(intent.get("referenceLines"), notes)
-        sort_by = self._normalize_sort(intent.get("sortBy"), columns)
+        sort_by = self._normalize_sort(
+            intent.get("sortBy"),
+            columns,
+            self._resolve_sortable_fields(chart_type, x_field, group_field, transform),
+            allow_source_columns=not bool(transform),
+        )
+        if transform and transform.get("type") == "histogram" and sort_by:
+            histogram_field = transform.get("field")
+            if sort_by.get("field") in {x_field, histogram_field, "bucket"}:
+                sort_by = {"field": "bucketStart", "order": sort_by.get("order", "desc")}
+        if chart_type == "scatter" and x_field and not sort_by:
+            sort_by = {"field": x_field, "order": "asc"}
+        if chart_type == "heatmap" and transform and sort_by:
+            sort_field = sort_by.get("field")
+            if sort_field == transform.get("xField"):
+                transform["xOrder"] = sort_by.get("order", "asc")
+            elif sort_field == transform.get("yField"):
+                transform["yOrder"] = sort_by.get("order", "asc")
+            else:
+                sort_by = None
         supported_types = self._resolve_supported_chart_types(chart_type, group_field, layout, transform)
 
         resolved = {
             "chartType": chart_type,
             "title": intent.get("title") or "",
-            "xAxisField": x_field,
+            "xAxisField": "bucket" if transform and transform.get("type") == "histogram" else x_field,
             "groupByField": group_field,
             "yAxisField": transform.get("yField") if transform else None,
+            "zAxisField": z_field if chart_type == "scatter" else None,
             "series": series,
             "layout": layout,
             "transform": transform,
@@ -1053,6 +1120,8 @@ Rules:
             normalized["xField"] = x_field or self._pick_categorical_field(columns, kinds)
             normalized["yField"] = self._coerce_field(raw_transform.get("yField"), columns) or group_field
             normalized["metric"] = metric
+            normalized["xOrder"] = self._normalize_axis_order(raw_transform.get("xOrder"))
+            normalized["yOrder"] = self._normalize_axis_order(raw_transform.get("yOrder"))
             normalized["function"] = (
                 raw_transform.get("function")
                 if raw_transform.get("function") in SUPPORTED_AGGREGATIONS
@@ -1102,6 +1171,15 @@ Rules:
                 if raw_transform.get("function") in SUPPORTED_AGGREGATIONS
                 else ("count" if not metric else "sum")
             )
+            normalized["syntheticSeries"] = [
+                {
+                    "field": metric or "count",
+                    "name": (metric or "count").replace("_", " ").title(),
+                    "format": self._infer_format(metric or "count"),
+                    "chartType": None,
+                    "axis": "primary",
+                }
+            ]
             return normalized
 
         return None
@@ -1202,14 +1280,64 @@ Rules:
             notes.append("Dropped invalid reference line definitions")
         return normalized
 
-    def _normalize_sort(self, raw: Any, columns: Sequence[str]) -> Optional[Dict[str, str]]:
+    def _normalize_axis_order(self, raw: Any) -> str:
+        return raw if raw in {"asc", "desc"} else "asc"
+
+    def _normalize_sort(
+        self,
+        raw: Any,
+        columns: Sequence[str],
+        extra_fields: Optional[Sequence[str]] = None,
+        allow_source_columns: bool = True,
+    ) -> Optional[Dict[str, str]]:
         if not isinstance(raw, dict):
             return None
         field = raw.get("field")
-        if field not in columns and field not in {"count", "delta", "value"}:
+        allowed_fields = {"count", "delta", "value"} | {field for field in (extra_fields or []) if field}
+        if allow_source_columns:
+            allowed_fields |= set(columns)
+        if field not in allowed_fields:
             return None
         order = raw.get("order") if raw.get("order") in {"asc", "desc"} else "desc"
         return {"field": field, "order": order}
+
+    def _resolve_sortable_fields(
+        self,
+        chart_type: str,
+        x_field: Optional[str],
+        group_field: Optional[str],
+        transform: Optional[Dict[str, Any]],
+    ) -> List[str]:
+        if not transform:
+            return [field for field in [x_field, group_field] if field]
+
+        transform_type = transform.get("type")
+        if transform_type == "frequency":
+            return [field for field in [x_field, "count"] if field]
+        if transform_type == "histogram":
+            return [field for field in ["bucket", transform.get("field"), "bucketStart", "bucketEnd", "count"] if field]
+        if transform_type == "timeBucket":
+            return [
+                field
+                for field in [x_field, group_field, transform.get("metric") or "count"]
+                if field
+            ]
+        if transform_type == "percentOfTotal":
+            return [field for field in [x_field, group_field, transform.get("metric")] if field]
+        if transform_type == "heatmap":
+            return [
+                field
+                for field in [transform.get("xField") or x_field, transform.get("yField") or group_field, transform.get("metric") or "value"]
+                if field
+            ]
+        if transform_type == "boxplot":
+            return [field for field in [x_field, "min", "q1", "median", "q3", "max"] if field]
+        if transform_type == "deltaComparison":
+            return [field for field in [x_field, "startValue", "endValue", "delta"] if field]
+        if transform_type == "rankingSlope":
+            return [field for field in [x_field, "startValue", "endValue", "delta", "startRank", "endRank"] if field]
+
+        return [field for field in [x_field, group_field] if field]
 
     def _resolve_supported_chart_types(
         self,
@@ -1244,20 +1372,17 @@ Rules:
         transform = config.get("transform")
         if transform:
             chart_data, note = self._apply_transform(data, config, transform, result_context)
-            return chart_data[:MAX_CHART_POINTS], True, note
+            sorted_chart_data = self._sort_chart_rows(chart_data, config)
+            if transform.get("type") == "heatmap":
+                trimmed_chart_data, trim_note = self._trim_heatmap_matrix(sorted_chart_data, config)
+                combined_note = " | ".join(part for part in [note, trim_note] if part)
+                return trimmed_chart_data, True, combined_note or None
+            return sorted_chart_data[:MAX_CHART_POINTS], True, note
 
-        working = list(data)
-        sort_by = config.get("sortBy")
-        if sort_by:
-            field = sort_by.get("field", "")
-            reverse = sort_by.get("order", "desc") == "desc"
-            try:
-                working.sort(key=lambda row: _sort_value(row.get(field)), reverse=reverse)
-            except Exception:
-                pass
+        working = self._sort_chart_rows(list(data), config)
 
         if config.get("layout") == "normalized" and config.get("groupByField"):
-            normalized_data = self._normalize_percent_by_group(working, config)
+            normalized_data = self._normalize_percent_by_group(working, config, result_context)
             return normalized_data[:MAX_CHART_POINTS], True, "Converted grouped values to percent-of-total composition"
 
         if len(working) > MAX_CHART_POINTS:
@@ -1268,6 +1393,136 @@ Rules:
             return working[:MAX_CHART_POINTS], True, note
 
         return working, False, None
+
+    def _trim_heatmap_matrix(
+        self,
+        rows: List[Dict[str, Any]],
+        config: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        if len(rows) <= MAX_CHART_POINTS:
+            return rows, None
+
+        x_field = config.get("xAxisField")
+        y_field = config.get("yAxisField") or config.get("groupByField")
+        if not x_field or not y_field:
+            return rows[:MAX_CHART_POINTS], f"Trimmed heatmap to first {MAX_CHART_POINTS} cells"
+
+        x_values = list(dict.fromkeys(row.get(x_field) for row in rows))
+        y_values = list(dict.fromkeys(row.get(y_field) for row in rows))
+        if not x_values or not y_values:
+            return rows[:MAX_CHART_POINTS], f"Trimmed heatmap to first {MAX_CHART_POINTS} cells"
+
+        x_count = len(x_values)
+        y_count = len(y_values)
+        if x_count * y_count <= MAX_CHART_POINTS:
+            return rows, None
+
+        target_x = min(x_count, max(1, int(math.sqrt(MAX_CHART_POINTS * x_count / y_count))))
+        target_y = min(y_count, max(1, MAX_CHART_POINTS // max(target_x, 1)))
+        target_x = min(x_count, max(1, MAX_CHART_POINTS // max(target_y, 1)))
+
+        kept_x = set(x_values[:target_x])
+        kept_y = set(y_values[:target_y])
+        trimmed_rows = [
+            row for row in rows if row.get(x_field) in kept_x and row.get(y_field) in kept_y
+        ]
+        trim_note = (
+            f"Trimmed heatmap matrix to {target_x} x-axis values and {target_y} y-axis values "
+            f"({len(trimmed_rows)} cells) to stay within point limits"
+        )
+        return trimmed_rows, trim_note
+
+    def _sort_chart_rows(
+        self,
+        rows: List[Dict[str, Any]],
+        config: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        if not rows:
+            return rows
+
+        sort_by = config.get("sortBy")
+        if not sort_by:
+            return rows
+
+        chart_type = config.get("chartType")
+        if chart_type == "heatmap":
+            return rows
+
+        x_field = config.get("xAxisField")
+        group_field = config.get("groupByField")
+        sort_field = sort_by.get("field", "")
+        reverse = sort_by.get("order", "desc") == "desc"
+
+        if group_field and x_field and chart_type not in {"scatter", "pie", "boxplot", "rankingSlope", "deltaComparison"}:
+            return self._sort_grouped_chart_rows(rows, x_field, group_field, sort_field, reverse)
+
+        try:
+            return sorted(rows, key=lambda row: _sort_value(row.get(sort_field)), reverse=reverse)
+        except Exception:
+            return rows
+
+    def _sort_grouped_chart_rows(
+        self,
+        rows: List[Dict[str, Any]],
+        x_field: str,
+        group_field: str,
+        sort_field: str,
+        reverse: bool,
+    ) -> List[Dict[str, Any]]:
+        grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            grouped[str(row.get(x_field, ""))].append(row)
+
+        ordered_x_values = list(grouped.keys())
+        ordered_group_values = sorted(
+            {str(row.get(group_field, "")) for row in rows},
+            key=_sort_value,
+            reverse=reverse if sort_field == group_field else False,
+        )
+        group_positions = {value: index for index, value in enumerate(ordered_group_values)}
+        if sort_field == x_field:
+            ordered_x_values = sorted(ordered_x_values, key=_sort_value, reverse=reverse)
+        elif sort_field and sort_field != group_field:
+            ordered_x_values = sorted(
+                ordered_x_values,
+                key=lambda x_value: self._group_sort_value(grouped[x_value], sort_field),
+                reverse=reverse,
+            )
+
+        sorted_rows: List[Dict[str, Any]] = []
+        for x_value in ordered_x_values:
+            x_rows = grouped[x_value]
+            if sort_field == group_field:
+                x_rows = sorted(
+                    x_rows,
+                    key=lambda row: group_positions.get(str(row.get(group_field, "")), len(group_positions)),
+                )
+            else:
+                x_rows = sorted(
+                    x_rows,
+                    key=lambda row: group_positions.get(str(row.get(group_field, "")), len(group_positions)),
+                )
+            sorted_rows.extend(x_rows)
+        return sorted_rows
+
+    def _group_sort_value(self, rows: List[Dict[str, Any]], sort_field: str) -> Any:
+        if not rows:
+            return _sort_value("")
+
+        if all(row.get(sort_field) in (None, "") or _is_numeric_like(row.get(sort_field)) for row in rows):
+            return (1, sum(_numeric(row.get(sort_field, 0)) for row in rows))
+
+        first_value = next((row.get(sort_field) for row in rows if row.get(sort_field) not in (None, "")), "")
+        return _sort_value(first_value)
+
+    def _aggregate_group_metric_values(
+        self,
+        rows: List[Dict[str, Any]],
+        field: str,
+        result_context: Dict[str, Any],
+    ) -> float:
+        values = [_numeric(row.get(field, 0)) for row in rows]
+        return _aggregate_values(values, "sum", field, rows, result_context, self._should_dedupe_metric)
 
     def _apply_transform(
         self,
@@ -1306,9 +1561,21 @@ Rules:
         if transform_type == "boxplot":
             return self._agg_boxplot(data, transform)
         if transform_type == "rankingSlope":
-            return self._agg_period_comparison(data, transform, comparison_type="rankingSlope")
+            return self._agg_period_comparison(
+                data,
+                transform,
+                comparison_type="rankingSlope",
+                result_context=result_context,
+                sort_by=config.get("sortBy"),
+            )
         if transform_type == "deltaComparison":
-            return self._agg_period_comparison(data, transform, comparison_type="deltaComparison")
+            return self._agg_period_comparison(
+                data,
+                transform,
+                comparison_type="deltaComparison",
+                result_context=result_context,
+                sort_by=config.get("sortBy"),
+            )
         return data[:MAX_CHART_POINTS], f"Showing first {MAX_CHART_POINTS} rows"
 
     def _agg_top_n(
@@ -1324,7 +1591,7 @@ Rules:
     ) -> Tuple[List[Dict], str]:
         groups: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
         grouped_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        group_values: Dict[str, Dict[str, Dict[str, float]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+        group_rows: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
         series_fields = [s["field"] for s in series] if series else ([metric] if metric else [])
         deduped_fields: set[str] = set()
 
@@ -1354,11 +1621,17 @@ Rules:
                 if row_key not in top_keys:
                     continue
                 group_value = str(row.get(group_field, ""))
-                for field in series_fields:
-                    group_values[row_key][group_value][field] += _numeric(row.get(field, 0))
+                group_rows[row_key][group_value].append(row)
             chart_data = []
             for key in top_keys:
-                for group_value, values in sorted(group_values[key].items()):
+                for group_value, rows in sorted(group_rows[key].items(), key=lambda item: _sort_value(item[0])):
+                    values = {
+                        field: self._aggregate_group_metric_values(rows, field, result_context)
+                        for field in series_fields
+                    }
+                    for field in series_fields:
+                        if self._should_dedupe_metric(field, rows, result_context):
+                            deduped_fields.add(field)
                     chart_data.append({x_field: key, group_field: group_value, **values})
 
         if rest_keys:
@@ -1368,15 +1641,21 @@ Rules:
                     other[field] = sum(groups[key][field] for key in rest_keys)
                 chart_data.append(other)
             else:
-                other_groups: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+                other_group_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
                 for row in data:
                     row_key = str(row.get(x_field, ""))
                     if row_key not in rest_keys:
                         continue
                     group_value = str(row.get(group_field, ""))
+                    other_group_rows[group_value].append(row)
+                for group_value, rows in sorted(other_group_rows.items(), key=lambda item: _sort_value(item[0])):
+                    values = {
+                        field: self._aggregate_group_metric_values(rows, field, result_context)
+                        for field in series_fields
+                    }
                     for field in series_fields:
-                        other_groups[group_value][field] += _numeric(row.get(field, 0))
-                for group_value, values in sorted(other_groups.items()):
+                        if self._should_dedupe_metric(field, rows, result_context):
+                            deduped_fields.add(field)
                     chart_data.append({x_field: other_label, group_field: group_value, **values})
 
         note = f"Top {n} of {len(groups)} categories by {sort_field}"
@@ -1417,9 +1696,11 @@ Rules:
         metric_fields = [metric] if metric else series_fields or ["count"]
 
         grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        skipped_rows = 0
         for row in data:
             dt = _coerce_datetime(row.get(field))
             if not dt:
+                skipped_rows += 1
                 continue
             bucket_label = _bucket_datetime(dt, bucket)
             group_value = str(row.get(group_field, "")) if group_field else ""
@@ -1439,6 +1720,8 @@ Rules:
             chart_data.append(row_out)
 
         note = f"Bucketed {len(chart_data)} points by {bucket}"
+        if skipped_rows:
+            note += f"; skipped {skipped_rows} rows with unparseable {field} values"
         return chart_data, note
 
     def _agg_histogram(
@@ -1448,7 +1731,11 @@ Rules:
     ) -> Tuple[List[Dict], str]:
         field = transform["field"]
         bins = transform.get("bins", 12)
-        values = sorted(_numeric(row.get(field)) for row in data if row.get(field) is not None)
+        values = sorted(
+            value
+            for value in (_numeric(row.get(field)) for row in data if row.get(field) is not None)
+            if math.isfinite(value)
+        )
         if not values:
             return [], "No numeric values available for histogram"
         lo, hi = values[0], values[-1]
@@ -1525,19 +1812,28 @@ Rules:
         y_field = transform["yField"]
         metric = transform.get("metric")
         function = transform.get("function", "sum")
+        x_order = transform.get("xOrder", "asc")
+        y_order = transform.get("yOrder", "asc")
         cells: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
         for row in data:
             cells[(str(row.get(x_field, "")), str(row.get(y_field, "")))].append(row)
         chart_data: List[Dict[str, Any]] = []
         value_field = metric or "value"
-        for (x_value, y_value), rows in sorted(cells.items()):
-            if metric:
-                values = [_numeric(row.get(metric, 0)) for row in rows]
-                value = _aggregate_values(values, function, metric, rows, result_context, self._should_dedupe_metric)
-            else:
-                value = len(rows)
-            chart_data.append({x_field: x_value, y_field: y_value, value_field: value})
-        note = f"Built heatmap matrix with {len(chart_data)} populated cells"
+        x_values = sorted({x_value for x_value, _ in cells.keys()}, key=_sort_value, reverse=x_order == "desc")
+        y_values = sorted({y_value for _, y_value in cells.keys()}, key=_sort_value, reverse=y_order == "desc")
+        populated_cells = 0
+        for x_value in x_values:
+            for y_value in y_values:
+                rows = cells.get((x_value, y_value), [])
+                if rows:
+                    populated_cells += 1
+                if metric:
+                    values = [_numeric(row.get(metric, 0)) for row in rows]
+                    value = _aggregate_values(values, function, metric, rows, result_context, self._should_dedupe_metric)
+                else:
+                    value = float(len(rows))
+                chart_data.append({x_field: x_value, y_field: y_value, value_field: value})
+        note = f"Built heatmap matrix with {len(chart_data)} cells ({populated_cells} populated)"
         return chart_data, note
 
     def _agg_boxplot(
@@ -1579,6 +1875,8 @@ Rules:
         data: List[Dict[str, Any]],
         transform: Dict[str, Any],
         comparison_type: str,
+        result_context: Dict[str, Any],
+        sort_by: Optional[Dict[str, str]] = None,
     ) -> Tuple[List[Dict], str]:
         entity_field = transform["entityField"]
         period_field = transform["periodField"]
@@ -1596,23 +1894,34 @@ Rules:
             grouped[(entity, period)].append(row)
             periods.append(period)
 
-        ordered_periods = sorted({period for period in periods})
+        ordered_periods = sorted({period for period in periods}, key=_period_sort_value)
         if len(ordered_periods) < 2:
             return [], f"{comparison_type} skipped because fewer than two periods were available"
-        start_label, end_label = ordered_periods[0], ordered_periods[-1]
+        start_label, end_label = ordered_periods[-2], ordered_periods[-1]
 
         entity_values: Dict[str, Dict[str, float]] = defaultdict(dict)
         for (entity, period), rows in grouped.items():
             if metric:
                 values = [_numeric(row.get(metric, 0)) for row in rows]
-                entity_values[entity][period] = _aggregate_values(values, function, metric, rows, {}, self._should_dedupe_metric)
+                entity_values[entity][period] = _aggregate_values(
+                    values,
+                    function,
+                    metric,
+                    rows,
+                    result_context,
+                    self._should_dedupe_metric,
+                )
             else:
                 entity_values[entity][period] = float(len(rows))
 
         comparison_rows: List[Dict[str, Any]] = []
+        excluded_entities = 0
         for entity, period_map in entity_values.items():
-            start_value = period_map.get(start_label, 0.0)
-            end_value = period_map.get(end_label, 0.0)
+            if start_label not in period_map or end_label not in period_map:
+                excluded_entities += 1
+                continue
+            start_value = period_map[start_label]
+            end_value = period_map[end_label]
             comparison_rows.append(
                 {
                     entity_field: entity,
@@ -1624,34 +1933,94 @@ Rules:
                 }
             )
 
+        if not comparison_rows:
+            transform["compareLabels"] = [start_label, end_label]
+            return [], f"{comparison_type} skipped because no entities had data in both {start_label} and {end_label}"
+
         if comparison_type == "rankingSlope":
             start_ranks = self._rank_rows(comparison_rows, entity_field, "startValue")
             end_ranks = self._rank_rows(comparison_rows, entity_field, "endValue")
             for row in comparison_rows:
                 row["startRank"] = start_ranks[row[entity_field]]
                 row["endRank"] = end_ranks[row[entity_field]]
-            comparison_rows.sort(key=lambda row: min(row["startRank"], row["endRank"]))
             note = f"Compared {len(comparison_rows)} entities across {start_label} and {end_label} with rank alignment"
         else:
-            comparison_rows.sort(key=lambda row: abs(row["delta"]), reverse=True)
             note = f"Computed deltas across {start_label} and {end_label}"
 
-        trimmed = comparison_rows[:top_n]
+        if excluded_entities:
+            note += f"; excluded {excluded_entities} entities without both periods"
+
+        ranked_rows = self._sort_period_comparison_rows(comparison_rows, comparison_type, entity_field, sort_by)
+        trimmed = ranked_rows[:top_n]
         transform["compareLabels"] = [start_label, end_label]
         return trimmed, note
 
-    def _normalize_percent_by_group(self, rows: List[Dict[str, Any]], config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _sort_period_comparison_rows(
+        self,
+        rows: List[Dict[str, Any]],
+        comparison_type: str,
+        entity_field: str,
+        sort_by: Optional[Dict[str, str]],
+    ) -> List[Dict[str, Any]]:
+        if not rows:
+            return rows
+
+        if sort_by:
+            field = sort_by.get("field", "")
+            reverse = sort_by.get("order", "desc") == "desc"
+            if all(field in row for row in rows):
+                return sorted(rows, key=lambda row: _sort_value(row.get(field)), reverse=reverse)
+            if field == entity_field:
+                return sorted(rows, key=lambda row: _sort_value(row.get(entity_field)), reverse=reverse)
+
+        if comparison_type == "rankingSlope":
+            return sorted(rows, key=lambda row: min(_numeric(row.get("startRank", 999999)), _numeric(row.get("endRank", 999999))))
+        return sorted(rows, key=lambda row: abs(_numeric(row.get("delta", 0))), reverse=True)
+
+    def _normalize_percent_by_group(
+        self,
+        rows: List[Dict[str, Any]],
+        config: Dict[str, Any],
+        result_context: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
         x_field = config["xAxisField"]
         group_field = config["groupByField"]
         series_fields = [series["field"] for series in config.get("series", [])]
-        totals: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        grouped_rows: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+        x_order: List[str] = []
+        group_order: Dict[str, List[str]] = defaultdict(list)
+
         for row in rows:
             key = str(row.get(x_field, ""))
-            for field in series_fields:
-                totals[key][field] += _numeric(row.get(field, 0))
+            group_value = str(row.get(group_field, ""))
+            if key not in grouped_rows:
+                x_order.append(key)
+            if group_value not in grouped_rows[key]:
+                group_order[key].append(group_value)
+            grouped_rows[key][group_value].append(row)
+
+        aggregated_rows: List[Dict[str, Any]] = []
+        totals: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        for key in x_order:
+            for group_value in group_order[key]:
+                bucket_rows = grouped_rows[key][group_value]
+                aggregated_row: Dict[str, Any] = {x_field: key, group_field: group_value}
+                for field in series_fields:
+                    values = [_numeric(row.get(field, 0)) for row in bucket_rows]
+                    aggregated_value = _aggregate_values(
+                        values,
+                        "sum",
+                        field,
+                        bucket_rows,
+                        result_context,
+                        self._should_dedupe_metric,
+                    )
+                    aggregated_row[field] = aggregated_value
+                    totals[key][field] += aggregated_value
+                aggregated_rows.append(aggregated_row)
 
         normalized: List[Dict[str, Any]] = []
-        for row in rows:
+        for row in aggregated_rows:
             key = str(row.get(x_field, ""))
             new_row = {x_field: key, group_field: row.get(group_field, "")}
             for field in series_fields:
@@ -1693,15 +2062,16 @@ Rules:
         if len(rows) <= 1:
             return False
 
-        values = [_numeric(row.get(field, 0)) for row in rows]
         repeated_grain = bool(result_context.get("row_grain_hint"))
         lower_field = field.lower()
 
-        if len({round(value, 9) for value in values}) == 1:
-            return True
-
         if repeated_grain and any(token in lower_field for token in _DEDUPED_METRIC_TOKENS):
             return True
+
+        if repeated_grain:
+            values = [_numeric(row.get(field, 0)) for row in rows]
+            if len({round(value, 9) for value in values}) == 1:
+                return True
 
         return False
 
@@ -1804,9 +2174,12 @@ Rules:
             group_field = None
         primary_metric = numeric_fields[0]
         secondary_metric = numeric_fields[1] if len(numeric_fields) > 1 else None
+        tertiary_metric = numeric_fields[2] if len(numeric_fields) > 2 else None
         chart_type = "bar"
         layout = None
         transform: Optional[Dict[str, Any]] = None
+        sort_by: Optional[Dict[str, str]] = None
+        z_axis_field: Optional[str] = None
         query_lower = (original_query or "").lower()
 
         if x_field and self._looks_like_identifier_field(x_field) and primary_metric:
@@ -1821,6 +2194,7 @@ Rules:
         if x_field and kinds.get(x_field) == "date":
             chart_type = "stackedArea" if group_field else "line"
             layout = "stacked" if group_field else None
+            sort_by = {"field": x_field, "order": "asc"}
             bucket = "month"
             if any(token in query_lower for token in ("year", "yearly", "annual")):
                 bucket = "year"
@@ -1840,9 +2214,13 @@ Rules:
             or (len(numeric_fields) >= 2 and not x_field)
         ):
             chart_type = "scatter" if not x_field or kinds.get(x_field) == "numeric" else "dualAxis"
+            if chart_type == "scatter" and x_field:
+                sort_by = {"field": x_field, "order": "asc"}
+                z_axis_field = tertiary_metric if tertiary_metric not in {x_field, primary_metric} else None
         elif group_field:
             chart_type = "stackedBar"
             layout = "stacked"
+            sort_by = {"field": primary_metric, "order": "desc"}
             if len(data) > 12:
                 transform = {
                     "type": "topN",
@@ -1856,6 +2234,7 @@ Rules:
                 chart_type = "pie"
             else:
                 chart_type = "bar"
+                sort_by = {"field": primary_metric, "order": "desc"}
                 if unique_count > 12:
                     transform = {
                         "type": "topN",
@@ -1897,10 +2276,11 @@ Rules:
             "chartType": chart_type,
             "title": title,
             "xAxisField": x_field,
+            "zAxisField": z_axis_field if chart_type == "scatter" else None,
             "groupByField": group_field if chart_type not in {"scatter", "pie", "dualAxis"} else None,
             "layout": layout,
             "series": series,
-            "sortBy": {"field": primary_metric, "order": "desc"} if chart_type in {"bar", "stackedBar"} else None,
+            "sortBy": sort_by,
             "transform": transform,
             "referenceLines": [],
         }
@@ -2144,29 +2524,118 @@ Rules:
         entity_field: str,
         value_field: str,
     ) -> Dict[str, int]:
-        sorted_rows = sorted(rows, key=lambda row: row.get(value_field, 0), reverse=True)
-        return {str(row.get(entity_field, "")): index + 1 for index, row in enumerate(sorted_rows)}
+        sorted_rows = sorted(rows, key=lambda row: _numeric(row.get(value_field, 0)), reverse=True)
+        ranks: Dict[str, int] = {}
+        current_rank = 0
+        previous_value: Optional[float] = None
+        for index, row in enumerate(sorted_rows, start=1):
+            value = _numeric(row.get(value_field, 0))
+            if previous_value is None or not math.isclose(value, previous_value, rel_tol=1e-9, abs_tol=1e-9):
+                current_rank = index
+                previous_value = value
+            ranks[str(row.get(entity_field, ""))] = current_rank
+        return ranks
 
     # ------------------------------------------------------------------
     # Stage 3: Size guard
     # ------------------------------------------------------------------
 
     def _size_guard(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        raw = json.dumps(payload, default=_json_default)
-        if len(raw.encode()) <= MAX_JSON_BYTES:
+        if _payload_size_bytes(payload) <= MAX_JSON_BYTES:
             return payload
 
-        logger.warning(f"Chart payload {len(raw.encode())}B exceeds {MAX_JSON_BYTES}B, trimming downloadData")
+        logger.warning(f"Chart payload {_payload_size_bytes(payload)}B exceeds {MAX_JSON_BYTES}B, trimming downloadData")
         download_data = payload.get("downloadData", [])
-        while download_data and len(json.dumps(payload, default=_json_default).encode()) > MAX_JSON_BYTES:
+        while download_data and _payload_size_bytes(payload) > MAX_JSON_BYTES:
             download_data = download_data[: len(download_data) // 2]
             payload["downloadData"] = download_data
 
-        if len(json.dumps(payload, default=_json_default).encode()) > MAX_JSON_BYTES:
+        if _payload_size_bytes(payload) > MAX_JSON_BYTES:
             payload.pop("downloadData", None)
             logger.warning("Dropped downloadData entirely to meet size limit")
 
+        chart_data = payload.get("chartData", [])
+        while chart_data and _payload_size_bytes(payload) > MAX_JSON_BYTES:
+            if len(chart_data) == 1:
+                chart_data = []
+            else:
+                chart_data = chart_data[: max(1, len(chart_data) // 2)]
+            payload["chartData"] = chart_data
+
+        if _payload_size_bytes(payload) > MAX_JSON_BYTES:
+            logger.warning("Payload still exceeds size limit after trimming rows, truncating long strings")
+            for max_length in (2048, 1024, 512, 256, 128):
+                payload = _truncate_payload_strings(payload, max_length)
+                if _payload_size_bytes(payload) <= MAX_JSON_BYTES:
+                    break
+
         return payload
+
+
+def _payload_size_bytes(payload: Dict[str, Any]) -> int:
+    return len(json.dumps(payload, default=_json_default).encode())
+
+
+def _truncate_payload_strings(value: Any, max_length: int) -> Any:
+    if isinstance(value, str):
+        return value if len(value) <= max_length else f"{value[:max_length]}..."
+    if isinstance(value, list):
+        return [_truncate_payload_strings(item, max_length) for item in value]
+    if isinstance(value, dict):
+        return {key: _truncate_payload_strings(item, max_length) for key, item in value.items()}
+    return value
+
+
+def _normalize_plottable(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1"}:
+            return True
+        if normalized in {"false", "no", "0", ""}:
+            return False
+    return bool(value)
+
+
+def _extract_json_object(content: str) -> Any:
+    decoder = json.JSONDecoder()
+    stripped = content.strip()
+    if stripped:
+        try:
+            parsed, _ = decoder.raw_decode(stripped)
+            return parsed
+        except json.JSONDecodeError:
+            pass
+
+    start = stripped.find("{")
+    while start != -1:
+        try:
+            parsed, _ = decoder.raw_decode(stripped[start:])
+            return parsed
+        except json.JSONDecodeError:
+            start = stripped.find("{", start + 1)
+    raise ValueError("No valid JSON object found in model response")
+
+
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+            else:
+                text = getattr(item, "text", None)
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return str(content or "")
 
 
 def _numeric(val: Any) -> float:
@@ -2293,7 +2762,35 @@ def _format_number(value: float) -> str:
     return f"{value:,.1f}"
 
 
-def _sort_value(value: Any) -> Any:
+def _period_sort_value(value: Any) -> Any:
+    if _is_date_like(value):
+        dt = _coerce_datetime(value)
+        if dt:
+            return (0, dt.year, dt.month, dt.day)
+
+    if isinstance(value, str):
+        clean = value.strip()
+        match = re.fullmatch(r"(\d{4})[-/](\d{1,2})$", clean)
+        if match:
+            return (1, int(match.group(1)), int(match.group(2)))
+        match = re.fullmatch(r"(\d{4})[-/]Q([1-4])$", clean, re.IGNORECASE)
+        if match:
+            return (2, int(match.group(1)), int(match.group(2)))
+        match = re.fullmatch(r"(\d{4})[-/]W(\d{1,2})$", clean, re.IGNORECASE)
+        if match:
+            return (3, int(match.group(1)), int(match.group(2)))
+
     if _is_numeric_like(value):
-        return _numeric(value)
-    return str(value or "")
+        return (4, _numeric(value))
+
+    return (5, str(value or ""))
+
+
+def _sort_value(value: Any) -> Any:
+    if _is_date_like(value):
+        dt = _coerce_datetime(value)
+        if dt:
+            return (0, dt.isoformat())
+    if _is_numeric_like(value):
+        return (1, _numeric(value))
+    return (2, str(value or ""))

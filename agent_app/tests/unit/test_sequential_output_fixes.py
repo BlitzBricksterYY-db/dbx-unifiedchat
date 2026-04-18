@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import concurrent.futures
@@ -5,6 +6,7 @@ import threading
 import time
 import types
 import sys
+import uuid
 
 import pytest
 
@@ -52,6 +54,7 @@ sys.modules.setdefault("agent_server.multi_agent.core.graph", graph_stub)
 
 from agent_server.multi_agent.agents.chart_generator import (
     ChartGenerator,
+    MAX_JSON_BYTES,
     SUPPORTED_CHART_TYPES,
     SUPPORTED_TRANSFORMS,
     _load_sqlglot,
@@ -297,6 +300,75 @@ def test_chart_generator_dedupes_repeated_patient_totals():
     assert "guardrail" in note
 
 
+def test_chart_generator_does_not_dedupe_equal_values_without_repeated_grain_hint():
+    generator = ChartGenerator(llm=None)  # type: ignore[arg-type]
+
+    chart_data, note = generator._agg_top_n(
+        data=[
+            {"patient_id": "a", "paid_amount": 100.0},
+            {"patient_id": "a", "paid_amount": 100.0},
+            {"patient_id": "b", "paid_amount": 50.0},
+        ],
+        x_field="patient_id",
+        metric="paid_amount",
+        series=[{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+        n=10,
+        other_label="Other",
+        result_context={"label": "Paid amounts"},
+    )
+
+    assert chart_data == [
+        {"patient_id": "a", "paid_amount": 200.0},
+        {"patient_id": "b", "paid_amount": 50.0},
+    ]
+    assert "guardrail" not in note
+
+
+def test_chart_generator_grouped_top_n_dedupes_repeated_metrics_within_groups():
+    generator = ChartGenerator(llm=None)  # type: ignore[arg-type]
+
+    chart_data, note = generator._agg_top_n(
+        data=[
+            {
+                "patient_id": "a",
+                "benefit_type": "Medical",
+                "total_paid_amount": 100.0,
+            },
+            {
+                "patient_id": "a",
+                "benefit_type": "Medical",
+                "total_paid_amount": 100.0,
+            },
+            {
+                "patient_id": "a",
+                "benefit_type": "Rx",
+                "total_paid_amount": 40.0,
+            },
+            {
+                "patient_id": "a",
+                "benefit_type": "Rx",
+                "total_paid_amount": 40.0,
+            },
+        ],
+        x_field="patient_id",
+        metric="total_paid_amount",
+        series=[{"field": "total_paid_amount", "name": "Total Paid", "format": "currency"}],
+        n=10,
+        other_label="Other",
+        result_context={
+            "label": "Coverage mix",
+            "row_grain_hint": "Rows are repeated coverage-level detail.",
+        },
+        group_field="benefit_type",
+    )
+
+    assert chart_data == [
+        {"patient_id": "a", "benefit_type": "Medical", "total_paid_amount": 100.0},
+        {"patient_id": "a", "benefit_type": "Rx", "total_paid_amount": 40.0},
+    ]
+    assert "guardrail" in note
+
+
 def test_chart_generator_prompt_lists_supported_capabilities():
     generator = ChartGenerator(llm=StubLlm("{}"))  # type: ignore[arg-type]
 
@@ -412,7 +484,7 @@ def test_chart_generator_without_llm_uses_histogram_for_id_plus_numeric_preview(
 
     assert payload is not None
     assert payload["config"]["transform"]["type"] == "histogram"
-    assert payload["config"]["xAxisField"] == "age"
+    assert payload["config"]["xAxisField"] == "bucket"
 
 
 def test_chart_generator_without_llm_avoids_code_description_grouping():
@@ -615,9 +687,35 @@ def test_chart_generator_histogram_builds_count_bins():
     )
 
     assert payload is not None
+    assert payload["config"]["xAxisField"] == "bucket"
     assert payload["config"]["series"][0]["field"] == "count"
     assert len(payload["chartData"]) == 5
     assert sum(row["count"] for row in payload["chartData"]) == 7
+
+
+def test_chart_generator_histogram_ignores_nan_values():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "bar",
+          "title": "Paid Amount Distribution",
+          "xAxisField": "paid_amount",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "transform": {"type": "histogram", "field": "paid_amount", "bins": 4}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["paid_amount"],
+        data=[{"paid_amount": value} for value in (10, 12, float("nan"), 18, 20)],
+        original_query="Distribution of paid amount",
+    )
+
+    assert payload is not None
+    assert sum(row["count"] for row in payload["chartData"]) == 4
 
 
 def test_chart_generator_llm_numeric_x_axis_is_bucketed_to_histogram():
@@ -653,8 +751,41 @@ def test_chart_generator_llm_numeric_x_axis_is_bucketed_to_histogram():
     assert payload is not None
     assert payload["config"]["chartType"] == "bar"
     assert payload["config"]["transform"]["type"] == "histogram"
-    assert payload["config"]["xAxisField"] == "age"
+    assert payload["config"]["xAxisField"] == "bucket"
     assert payload["config"]["series"][0]["field"] == "count"
+
+
+def test_chart_generator_histogram_remaps_x_sort_to_bucket_boundaries():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "bar",
+          "title": "Age Distribution",
+          "xAxisField": "age",
+          "sortBy": {"field": "age", "order": "desc"},
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "transform": {"type": "histogram", "field": "age", "bins": 4}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["age", "paid_amount"],
+        data=[
+            {"age": 5, "paid_amount": 10},
+            {"age": 10, "paid_amount": 15},
+            {"age": 20, "paid_amount": 20},
+            {"age": 40, "paid_amount": 25},
+        ],
+        original_query="Distribution of age",
+    )
+
+    assert payload is not None
+    assert payload["config"]["sortBy"] == {"field": "bucketStart", "order": "desc"}
+    bucket_starts = [row["bucketStart"] for row in payload["chartData"]]
+    assert bucket_starts == sorted(bucket_starts, reverse=True)
 
 
 def test_chart_generator_heatmap_builds_dense_matrix_cells():
@@ -686,7 +817,768 @@ def test_chart_generator_heatmap_builds_dense_matrix_cells():
     assert payload is not None
     assert payload["config"]["chartType"] == "heatmap"
     assert payload["config"]["yAxisField"] == "benefit_type"
-    assert len(payload["chartData"]) == 3
+    assert len(payload["chartData"]) == 4
+    assert payload["chartData"][-1] == {
+        "patient_state": "TX",
+        "benefit_type": "Rx",
+        "paid_amount": 0.0,
+    }
+
+
+def test_chart_generator_llm_plottable_string_false_falls_back_to_heuristic():
+    llm = StubLlm(
+        """
+        {
+          "plottable": "false",
+          "chartType": "bar",
+          "title": "Should not plot"
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["service_month", "paid_amount"],
+        data=[
+            {"service_month": "2024-01", "paid_amount": 100},
+            {"service_month": "2024-02", "paid_amount": 150},
+        ],
+        original_query="Monthly spend",
+    )
+
+    assert payload is not None
+    assert payload["meta"]["intentSource"] == "heuristic"
+
+
+def test_chart_generator_llm_json_extraction_ignores_trailing_prose():
+    llm = StubLlm(
+        """
+        {"plottable": true, "chartType": "bar", "title": "Monthly spend", "xAxisField": "service_month", "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}]}
+
+        Additional explanation after the JSON block.
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["service_month", "paid_amount"],
+        data=[
+            {"service_month": "2024-01", "paid_amount": 100},
+            {"service_month": "2024-02", "paid_amount": 150},
+        ],
+        original_query="Monthly spend",
+    )
+
+    assert payload is not None
+    assert payload["meta"]["intentSource"] == "llm"
+
+
+def test_chart_generator_llm_parse_failure_uses_heuristic_intent_source():
+    llm = StubLlm("{not valid json")
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["service_month", "paid_amount"],
+        data=[
+            {"service_month": "2024-01", "paid_amount": 100},
+            {"service_month": "2024-02", "paid_amount": 150},
+        ],
+        original_query="Monthly spend",
+    )
+
+    assert payload is not None
+    assert payload["meta"]["intentSource"] == "heuristic"
+
+
+def test_chart_generator_heatmap_infers_transform_when_model_omits_one():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "heatmap",
+          "title": "State by Benefit",
+          "xAxisField": "patient_state",
+          "groupByField": "benefit_type",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}]
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["patient_state", "benefit_type", "paid_amount"],
+        data=[
+            {"patient_state": "MI", "benefit_type": "Medical", "paid_amount": 100},
+            {"patient_state": "TX", "benefit_type": "Rx", "paid_amount": 50},
+        ],
+        original_query="Heatmap of spend by state and benefit",
+    )
+
+    assert payload is not None
+    assert payload["config"]["chartType"] == "heatmap"
+    assert payload["config"]["transform"]["type"] == "heatmap"
+    assert payload["config"]["yAxisField"] == "benefit_type"
+    assert len(payload["chartData"]) == 4
+
+
+def test_chart_generator_heatmap_aligns_groupby_with_resolved_y_axis_field():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "heatmap",
+          "title": "State by Channel",
+          "xAxisField": "patient_state",
+          "groupByField": "benefit_type",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "transform": {"type": "heatmap", "yField": "channel", "metric": "paid_amount", "function": "sum"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["patient_state", "benefit_type", "channel", "paid_amount"],
+        data=[
+            {"patient_state": "MI", "benefit_type": "Medical", "channel": "A", "paid_amount": 100},
+            {"patient_state": "MI", "benefit_type": "Medical", "channel": "B", "paid_amount": 50},
+        ],
+        original_query="Heatmap of spend by state and channel",
+    )
+
+    assert payload is not None
+    assert payload["config"]["yAxisField"] == "channel"
+    assert payload["config"]["groupByField"] == "channel"
+
+
+def test_chart_generator_heatmap_sorts_x_and_y_axes_independently():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "heatmap",
+          "title": "Year by Benefit",
+          "xAxisField": "service_year",
+          "groupByField": "benefit_type",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "transform": {
+            "type": "heatmap",
+            "metric": "paid_amount",
+            "function": "sum",
+            "xOrder": "desc",
+            "yOrder": "desc"
+          }
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["service_year", "benefit_type", "paid_amount"],
+        data=[
+            {"service_year": 2, "benefit_type": "A", "paid_amount": 20},
+            {"service_year": 10, "benefit_type": "B", "paid_amount": 100},
+            {"service_year": 2, "benefit_type": "C", "paid_amount": 40},
+            {"service_year": 10, "benefit_type": "A", "paid_amount": 10},
+        ],
+        original_query="Heatmap of spend by year and benefit",
+    )
+
+    assert payload is not None
+    assert payload["chartData"] == [
+        {"service_year": "10", "benefit_type": "C", "paid_amount": 0.0},
+        {"service_year": "10", "benefit_type": "B", "paid_amount": 100.0},
+        {"service_year": "10", "benefit_type": "A", "paid_amount": 10.0},
+        {"service_year": "2", "benefit_type": "C", "paid_amount": 40.0},
+        {"service_year": "2", "benefit_type": "B", "paid_amount": 0.0},
+        {"service_year": "2", "benefit_type": "A", "paid_amount": 20.0},
+    ]
+
+
+def test_chart_generator_heatmap_rejects_metric_based_sortby():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "heatmap",
+          "title": "Year by Benefit",
+          "xAxisField": "service_year",
+          "groupByField": "benefit_type",
+          "sortBy": {"field": "paid_amount", "order": "desc"},
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "transform": {"type": "heatmap", "metric": "paid_amount", "function": "sum"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["service_year", "benefit_type", "paid_amount"],
+        data=[
+            {"service_year": 2, "benefit_type": "B", "paid_amount": 20},
+            {"service_year": 10, "benefit_type": "A", "paid_amount": 100},
+        ],
+        original_query="Heatmap of spend by year and benefit",
+    )
+
+    assert payload is not None
+    assert payload["config"]["sortBy"] is None
+    assert payload["chartData"] == [
+        {"service_year": "2", "benefit_type": "A", "paid_amount": 0.0},
+        {"service_year": "2", "benefit_type": "B", "paid_amount": 20.0},
+        {"service_year": "10", "benefit_type": "A", "paid_amount": 100.0},
+        {"service_year": "10", "benefit_type": "B", "paid_amount": 0.0},
+    ]
+
+
+def test_chart_generator_large_heatmap_trims_full_matrix_not_partial_cells():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "heatmap",
+          "title": "Large Heatmap",
+          "xAxisField": "service_year",
+          "groupByField": "benefit_type",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "transform": {"type": "heatmap", "metric": "paid_amount", "function": "sum"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["service_year", "benefit_type", "paid_amount"],
+        data=[
+            {"service_year": f"Y{index:02d}", "benefit_type": f"B{index:02d}", "paid_amount": float(index)}
+            for index in range(30)
+        ],
+        original_query="Heatmap of spend by year and benefit",
+    )
+
+    assert payload is not None
+    x_values = {row["service_year"] for row in payload["chartData"]}
+    y_values = {row["benefit_type"] for row in payload["chartData"]}
+    assert len(payload["chartData"]) <= 500
+    assert len(payload["chartData"]) == len(x_values) * len(y_values)
+    assert "Trimmed heatmap matrix" in (payload["aggregationNote"] or "")
+
+
+def test_chart_generator_time_bucket_respects_x_axis_sort_order():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "line",
+          "title": "Monthly Spend",
+          "xAxisField": "service_date",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "sortBy": {"field": "service_date", "order": "desc"},
+          "transform": {"type": "timeBucket", "field": "service_date", "bucket": "month", "metric": "paid_amount", "function": "sum"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["service_date", "paid_amount"],
+        data=[
+            {"service_date": "2024-01-10", "paid_amount": 10},
+            {"service_date": "2024-03-02", "paid_amount": 30},
+            {"service_date": "2024-02-05", "paid_amount": 20},
+        ],
+        original_query="Monthly spend trend",
+    )
+
+    assert payload is not None
+    assert [row["service_date"] for row in payload["chartData"]] == ["2024-03", "2024-02", "2024-01"]
+
+
+def test_chart_generator_time_bucket_reports_skipped_unparseable_dates():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "line",
+          "title": "Monthly spend",
+          "xAxisField": "service_date",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "transform": {"type": "timeBucket", "field": "service_date", "bucket": "month", "metric": "paid_amount", "function": "sum"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["service_date", "paid_amount"],
+        data=[
+            {"service_date": "2024-01-01", "paid_amount": 10},
+            {"service_date": None, "paid_amount": 15},
+            {"service_date": "2024-02-01", "paid_amount": 25},
+        ],
+        original_query="Monthly spend",
+    )
+
+    assert payload is not None
+    assert "skipped 1 rows with unparseable service_date values" in (payload["aggregationNote"] or "")
+
+
+def test_chart_generator_grouped_rows_use_global_group_sort_order():
+    generator = ChartGenerator(llm=None)  # type: ignore[arg-type]
+
+    sorted_rows = generator._sort_chart_rows(
+        [
+            {"service_month": "2024-01", "benefit_type": "Rx", "paid_amount": 20},
+            {"service_month": "2024-01", "benefit_type": "Medical", "paid_amount": 10},
+            {"service_month": "2024-02", "benefit_type": "Medical", "paid_amount": 30},
+            {"service_month": "2024-02", "benefit_type": "Rx", "paid_amount": 40},
+        ],
+        {
+            "chartType": "stackedBar",
+            "xAxisField": "service_month",
+            "groupByField": "benefit_type",
+            "sortBy": {"field": "benefit_type", "order": "desc"},
+        },
+    )
+
+    assert [(row["service_month"], row["benefit_type"]) for row in sorted_rows] == [
+        ("2024-01", "Rx"),
+        ("2024-01", "Medical"),
+        ("2024-02", "Rx"),
+        ("2024-02", "Medical"),
+    ]
+
+
+def test_chart_generator_normalized_layout_aggregates_repeated_grain_before_percentages():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "normalizedStackedBar",
+          "title": "Benefit Mix",
+          "xAxisField": "service_year",
+          "groupByField": "benefit_type",
+          "layout": "normalized",
+          "series": [{"field": "total_paid_amount", "name": "Total Paid Amount", "format": "currency"}],
+          "transform": null
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["service_year", "benefit_type", "total_paid_amount"],
+        data=[
+            {"service_year": "2024", "benefit_type": "Medical", "total_paid_amount": 100},
+            {"service_year": "2024", "benefit_type": "Medical", "total_paid_amount": 100},
+            {"service_year": "2024", "benefit_type": "Rx", "total_paid_amount": 40},
+            {"service_year": "2024", "benefit_type": "Rx", "total_paid_amount": 40},
+        ],
+        original_query="Normalized benefit mix",
+        result_context={"row_grain_hint": "Rows are repeated detail-level records."},
+    )
+
+    assert payload is not None
+    assert payload["config"]["layout"] == "normalized"
+    assert payload["chartData"] == [
+        {"service_year": "2024", "benefit_type": "Medical", "total_paid_amount": 71.4286},
+        {"service_year": "2024", "benefit_type": "Rx", "total_paid_amount": 28.5714},
+    ]
+
+
+def test_chart_generator_boxplot_respects_boxplot_sort_fields():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "boxplot",
+          "title": "Spend Distribution",
+          "xAxisField": "benefit_type",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "sortBy": {"field": "median", "order": "desc"},
+          "transform": {"type": "boxplot", "field": "paid_amount"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["benefit_type", "paid_amount"],
+        data=[
+            {"benefit_type": "Medical", "paid_amount": 10},
+            {"benefit_type": "Medical", "paid_amount": 20},
+            {"benefit_type": "Rx", "paid_amount": 50},
+            {"benefit_type": "Rx", "paid_amount": 60},
+            {"benefit_type": "Dental", "paid_amount": 30},
+            {"benefit_type": "Dental", "paid_amount": 40},
+        ],
+        original_query="Distribution of spend by benefit type",
+    )
+
+    assert payload is not None
+    assert [row["benefit_type"] for row in payload["chartData"]] == ["Rx", "Dental", "Medical"]
+
+
+def test_chart_generator_boxplot_rejects_source_metric_sortby():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "boxplot",
+          "title": "Spend Distribution",
+          "xAxisField": "benefit_type",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "sortBy": {"field": "paid_amount", "order": "desc"},
+          "transform": {"type": "boxplot", "field": "paid_amount"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["benefit_type", "paid_amount"],
+        data=[
+            {"benefit_type": "Medical", "paid_amount": 10},
+            {"benefit_type": "Rx", "paid_amount": 50},
+        ],
+        original_query="Distribution of spend by benefit type",
+    )
+
+    assert payload is not None
+    assert payload["config"]["sortBy"] is None
+
+
+def test_chart_generator_delta_comparison_respects_explicit_delta_sort_order():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "deltaComparison",
+          "title": "Year Over Year Change",
+          "xAxisField": "benefit_type",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "sortBy": {"field": "delta", "order": "asc"},
+          "transform": {"type": "deltaComparison", "entityField": "benefit_type", "periodField": "service_year", "metric": "paid_amount", "function": "sum"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["benefit_type", "service_year", "paid_amount"],
+        data=[
+            {"benefit_type": "Medical", "service_year": 2023, "paid_amount": 100},
+            {"benefit_type": "Medical", "service_year": 2024, "paid_amount": 80},
+            {"benefit_type": "Rx", "service_year": 2023, "paid_amount": 100},
+            {"benefit_type": "Rx", "service_year": 2024, "paid_amount": 120},
+            {"benefit_type": "Dental", "service_year": 2023, "paid_amount": 100},
+            {"benefit_type": "Dental", "service_year": 2024, "paid_amount": 100},
+        ],
+        original_query="Year over year change in spend by benefit type",
+    )
+
+    assert payload is not None
+    assert [(row["benefit_type"], row["delta"]) for row in payload["chartData"]] == [
+        ("Medical", -20.0),
+        ("Dental", 0.0),
+        ("Rx", 20.0),
+    ]
+
+
+def test_chart_generator_delta_comparison_respects_repeated_grain_guardrail():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "deltaComparison",
+          "title": "Year Over Year Change",
+          "xAxisField": "benefit_type",
+          "series": [{"field": "total_paid_amount", "name": "Total Paid Amount", "format": "currency"}],
+          "transform": {"type": "deltaComparison", "entityField": "benefit_type", "periodField": "service_year", "metric": "total_paid_amount", "function": "sum"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["benefit_type", "service_year", "total_paid_amount"],
+        data=[
+            {"benefit_type": "Medical", "service_year": 2023, "total_paid_amount": 100},
+            {"benefit_type": "Medical", "service_year": 2023, "total_paid_amount": 100},
+            {"benefit_type": "Medical", "service_year": 2024, "total_paid_amount": 120},
+            {"benefit_type": "Medical", "service_year": 2024, "total_paid_amount": 120},
+        ],
+        original_query="Year over year change in spend by benefit type",
+        result_context={"row_grain_hint": "Rows are repeated detail-level records."},
+    )
+
+    assert payload is not None
+    assert payload["chartData"] == [
+        {
+            "benefit_type": "Medical",
+            "startLabel": "2023",
+            "endLabel": "2024",
+            "startValue": 100.0,
+            "endValue": 120.0,
+            "delta": 20.0,
+        }
+    ]
+
+
+def test_chart_generator_delta_comparison_uses_period_aware_ordering():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "deltaComparison",
+          "title": "Month Over Month Change",
+          "xAxisField": "benefit_type",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "transform": {"type": "deltaComparison", "entityField": "benefit_type", "periodField": "service_month", "metric": "paid_amount", "function": "sum"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["benefit_type", "service_month", "paid_amount"],
+        data=[
+            {"benefit_type": "Medical", "service_month": "2024-2", "paid_amount": 100},
+            {"benefit_type": "Medical", "service_month": "2024-10", "paid_amount": 140},
+        ],
+        original_query="Month over month change in spend by benefit type",
+    )
+
+    assert payload is not None
+    assert payload["config"]["compareLabels"] == ["2024-2", "2024-10"]
+    assert payload["chartData"][0]["delta"] == 40.0
+
+
+def test_chart_generator_delta_comparison_uses_latest_two_periods():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "deltaComparison",
+          "title": "Month Over Month Change",
+          "xAxisField": "benefit_type",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "transform": {"type": "deltaComparison", "entityField": "benefit_type", "periodField": "service_month", "metric": "paid_amount", "function": "sum"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["benefit_type", "service_month", "paid_amount"],
+        data=[
+            {"benefit_type": "Medical", "service_month": "2024-01", "paid_amount": 80},
+            {"benefit_type": "Medical", "service_month": "2024-02", "paid_amount": 100},
+            {"benefit_type": "Medical", "service_month": "2024-03", "paid_amount": 140},
+        ],
+        original_query="Month over month change in spend by benefit type",
+    )
+
+    assert payload is not None
+    assert payload["config"]["compareLabels"] == ["2024-02", "2024-03"]
+    assert payload["chartData"][0]["startValue"] == 100.0
+    assert payload["chartData"][0]["delta"] == 40.0
+
+
+def test_chart_generator_delta_comparison_excludes_entities_missing_selected_period():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "deltaComparison",
+          "title": "Month Over Month Change",
+          "xAxisField": "benefit_type",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "transform": {"type": "deltaComparison", "entityField": "benefit_type", "periodField": "service_month", "metric": "paid_amount", "function": "sum"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["benefit_type", "service_month", "paid_amount"],
+        data=[
+            {"benefit_type": "Medical", "service_month": "2024-02", "paid_amount": 100},
+            {"benefit_type": "Medical", "service_month": "2024-03", "paid_amount": 140},
+            {"benefit_type": "Rx", "service_month": "2024-02", "paid_amount": 50},
+        ],
+        original_query="Month over month change in spend by benefit type",
+    )
+
+    assert payload is not None
+    assert [row["benefit_type"] for row in payload["chartData"]] == ["Medical"]
+    assert "excluded 1 entities without both periods" in (payload["aggregationNote"] or "")
+
+
+def test_chart_generator_delta_comparison_topn_respects_explicit_sort_selection():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "deltaComparison",
+          "title": "Year Over Year Change",
+          "xAxisField": "benefit_type",
+          "sortBy": {"field": "delta", "order": "asc"},
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "transform": {"type": "deltaComparison", "entityField": "benefit_type", "periodField": "service_year", "metric": "paid_amount", "function": "sum", "topN": 2}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["benefit_type", "service_year", "paid_amount"],
+        data=[
+            {"benefit_type": "A", "service_year": 2023, "paid_amount": 100},
+            {"benefit_type": "A", "service_year": 2024, "paid_amount": 50},
+            {"benefit_type": "B", "service_year": 2023, "paid_amount": 100},
+            {"benefit_type": "B", "service_year": 2024, "paid_amount": 110},
+            {"benefit_type": "C", "service_year": 2023, "paid_amount": 100},
+            {"benefit_type": "C", "service_year": 2024, "paid_amount": 130},
+        ],
+        original_query="Year over year change in spend by benefit type",
+    )
+
+    assert payload is not None
+    assert [(row["benefit_type"], row["delta"]) for row in payload["chartData"]] == [
+        ("A", -50.0),
+        ("B", 10.0),
+    ]
+
+
+def test_chart_generator_scatter_respects_continuous_axis_sort_order():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "scatter",
+          "title": "Age vs Spend",
+          "xAxisField": "age",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "sortBy": {"field": "paid_amount", "order": "asc"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["age", "paid_amount"],
+        data=[
+            {"age": 55, "paid_amount": 400},
+            {"age": 40, "paid_amount": 150},
+            {"age": 48, "paid_amount": 250},
+        ],
+        original_query="Relationship between age and spend",
+    )
+
+    assert payload is not None
+    assert [(row["age"], row["paid_amount"]) for row in payload["chartData"]] == [
+        (40, 150),
+        (48, 250),
+        (55, 400),
+    ]
+
+
+def test_chart_generator_without_llm_sorts_scatter_by_continuous_x_axis():
+    generator = ChartGenerator(llm=None)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["age", "paid_amount"],
+        data=[
+            {"age": 55, "paid_amount": 400},
+            {"age": 40, "paid_amount": 150},
+            {"age": 48, "paid_amount": 250},
+        ],
+        original_query="Compare age versus paid amount",
+    )
+
+    assert payload is not None
+    assert payload["config"]["chartType"] == "scatter"
+    assert payload["config"]["sortBy"] == {"field": "age", "order": "asc"}
+    assert [row["age"] for row in payload["chartData"]] == [40, 48, 55]
+    assert payload["meta"]["intentSource"] == "heuristic"
+
+
+def test_chart_generator_scatter_keeps_numeric_z_axis_field():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "scatter",
+          "title": "Age vs Spend",
+          "xAxisField": "age",
+          "zAxisField": "claim_count",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}]
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["age", "paid_amount", "claim_count"],
+        data=[
+            {"age": 40, "paid_amount": 150, "claim_count": 3},
+            {"age": 48, "paid_amount": 250, "claim_count": 5},
+        ],
+        original_query="Relationship between age and spend",
+    )
+
+    assert payload is not None
+    assert payload["config"]["zAxisField"] == "claim_count"
+
+
+def test_chart_generator_without_llm_adds_scatter_bubble_size_when_available():
+    generator = ChartGenerator(llm=None)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["age", "paid_amount", "claim_count"],
+        data=[
+            {"age": 55, "paid_amount": 400, "claim_count": 8},
+            {"age": 40, "paid_amount": 150, "claim_count": 3},
+            {"age": 48, "paid_amount": 250, "claim_count": 5},
+        ],
+        original_query="Compare age versus paid amount",
+    )
+
+    assert payload is not None
+    assert payload["config"]["chartType"] == "scatter"
+    assert payload["config"]["zAxisField"] is not None
+    assert payload["config"]["zAxisField"] != payload["config"]["xAxisField"]
+    assert payload["config"]["zAxisField"] != payload["config"]["series"][0]["field"]
+
+
+def test_chart_generator_business_insight_aggregates_grouped_categories():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "stackedBar",
+          "title": "Yearly Spend by Benefit",
+          "xAxisField": "service_year",
+          "groupByField": "benefit_type",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}]
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["service_year", "benefit_type", "paid_amount"],
+        data=[
+            {"service_year": "2024", "benefit_type": "Medical", "paid_amount": 60},
+            {"service_year": "2024", "benefit_type": "Rx", "paid_amount": 60},
+            {"service_year": "2023", "benefit_type": "Medical", "paid_amount": 100},
+        ],
+        original_query="Yearly spend by benefit",
+    )
+
+    assert payload is not None
+    assert payload["meta"]["businessInsight"] == "2024 leads on Paid Amount at 120."
 
 
 def test_chart_generator_dual_axis_keeps_allowlisted_series_metadata():
@@ -753,6 +1645,176 @@ def test_chart_generator_ranking_slope_aligns_two_periods():
     assert {"startRank", "endRank"} <= set(payload["chartData"][0].keys())
 
 
+def test_chart_generator_ranking_slope_infers_transform_when_model_omits_one():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "rankingSlope",
+          "title": "Member rank shift",
+          "xAxisField": "patient_id",
+          "groupByField": "service_year",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}]
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["patient_id", "service_year", "paid_amount"],
+        data=[
+            {"patient_id": "a", "service_year": "2023", "paid_amount": 100},
+            {"patient_id": "a", "service_year": "2024", "paid_amount": 80},
+            {"patient_id": "b", "service_year": "2023", "paid_amount": 90},
+            {"patient_id": "b", "service_year": "2024", "paid_amount": 120},
+        ],
+        original_query="How did spend rank change by member?",
+    )
+
+    assert payload is not None
+    assert payload["config"]["chartType"] == "rankingSlope"
+    assert payload["config"]["transform"]["type"] == "rankingSlope"
+    assert payload["config"]["transform"]["compareLabels"] == ["2023", "2024"]
+
+
+def test_chart_generator_ranking_slope_without_metric_still_emits_series():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "rankingSlope",
+          "title": "Member rank shift",
+          "xAxisField": "patient_id",
+          "groupByField": "service_year",
+          "series": [],
+          "transform": {"type": "rankingSlope", "periodField": "service_year", "topN": 5, "function": "count"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["patient_id", "service_year"],
+        data=[
+            {"patient_id": "a", "service_year": "2023"},
+            {"patient_id": "a", "service_year": "2024"},
+            {"patient_id": "b", "service_year": "2023"},
+            {"patient_id": "b", "service_year": "2024"},
+        ],
+        original_query="How member rankings changed year over year",
+    )
+
+    assert payload is not None
+    assert payload["config"]["series"]
+
+
+def test_chart_generator_ranking_slope_is_not_rewritten_to_histogram_for_identifier_x_axis():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "rankingSlope",
+          "title": "Member rank shift",
+          "xAxisField": "patient_id",
+          "groupByField": "service_year",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}]
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["patient_id", "service_year", "paid_amount"],
+        data=[
+            {"patient_id": f"member-{index}", "service_year": "2023", "paid_amount": float(index * 11 + 5)}
+            for index in range(10)
+        ] + [
+            {"patient_id": f"member-{index}", "service_year": "2024", "paid_amount": float(index * 13 + 7)}
+            for index in range(10)
+        ],
+        original_query="How did spend rank change by member?",
+    )
+
+    assert payload is not None
+    assert payload["config"]["chartType"] == "rankingSlope"
+    assert payload["config"]["transform"]["type"] == "rankingSlope"
+
+
+def test_chart_generator_ranking_slope_uses_shared_ranks_for_ties():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "rankingSlope",
+          "title": "Member rank shift",
+          "xAxisField": "patient_id",
+          "groupByField": "service_year",
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "transform": {"type": "rankingSlope", "metric": "paid_amount", "periodField": "service_year", "topN": 5, "function": "sum"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["patient_id", "service_year", "paid_amount"],
+        data=[
+            {"patient_id": "a", "service_year": "2023", "paid_amount": 100},
+            {"patient_id": "b", "service_year": "2023", "paid_amount": 100},
+            {"patient_id": "c", "service_year": "2023", "paid_amount": 90},
+            {"patient_id": "a", "service_year": "2024", "paid_amount": 80},
+            {"patient_id": "b", "service_year": "2024", "paid_amount": 80},
+            {"patient_id": "c", "service_year": "2024", "paid_amount": 120},
+        ],
+        original_query="How did spend rank change by member?",
+    )
+
+    assert payload is not None
+    by_member = {row["patient_id"]: row for row in payload["chartData"]}
+    assert by_member["a"]["startRank"] == 1
+    assert by_member["b"]["startRank"] == 1
+    assert by_member["a"]["endRank"] == 2
+    assert by_member["b"]["endRank"] == 2
+
+
+def test_chart_generator_ranking_slope_respects_explicit_delta_sort_order():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "rankingSlope",
+          "title": "Member rank shift",
+          "xAxisField": "patient_id",
+          "sortBy": {"field": "delta", "order": "asc"},
+          "series": [{"field": "paid_amount", "name": "Paid Amount", "format": "currency"}],
+          "transform": {"type": "rankingSlope", "metric": "paid_amount", "periodField": "service_year", "topN": 3, "function": "sum"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["patient_id", "service_year", "paid_amount"],
+        data=[
+            {"patient_id": "A", "service_year": 2023, "paid_amount": 100},
+            {"patient_id": "A", "service_year": 2024, "paid_amount": 80},
+            {"patient_id": "B", "service_year": 2023, "paid_amount": 100},
+            {"patient_id": "B", "service_year": 2024, "paid_amount": 100},
+            {"patient_id": "C", "service_year": 2023, "paid_amount": 100},
+            {"patient_id": "C", "service_year": 2024, "paid_amount": 130},
+        ],
+        original_query="How member rankings changed year over year",
+    )
+
+    assert payload is not None
+    assert payload["config"]["sortBy"] == {"field": "delta", "order": "asc"}
+    assert [(row["patient_id"], row["delta"]) for row in payload["chartData"]] == [
+        ("A", -20.0),
+        ("B", 0.0),
+        ("C", 30.0),
+    ]
+
+
 def test_detect_code_columns_skips_aggregate_metric_columns():
     llm = StubLlm(
         '[{"column":"distinct_cpt_codes","code_type":"CPT"},'
@@ -769,3 +1831,48 @@ def test_detect_code_columns_skips_aggregate_metric_columns():
     )
 
     assert detected == [{"column": "diagnosis_code", "code_type": "ICD10"}]
+
+
+def test_chart_generator_size_guard_enforces_transport_limit_after_dropping_download_data():
+    generator = ChartGenerator(llm=None)  # type: ignore[arg-type]
+    long_text = "x" * 20_000
+    payload = {
+        "config": {
+            "chartType": "bar",
+            "title": "Oversized payload",
+            "xAxisField": "category",
+            "series": [{"field": "value", "name": "Value", "format": "number"}],
+        },
+        "chartData": [
+            {"category": f"Category {index}", "value": index, "detail": long_text}
+            for index in range(20)
+        ],
+        "downloadData": [
+            {"category": f"Row {index}", "value": index, "detail": long_text}
+            for index in range(20)
+        ],
+        "meta": {"source": "auto", "note": long_text},
+    }
+
+    guarded = generator._size_guard(payload)
+
+    assert len(json.dumps(guarded).encode()) <= MAX_JSON_BYTES
+
+
+def test_chart_generator_size_guard_handles_uuid_values():
+    generator = ChartGenerator(llm=None)  # type: ignore[arg-type]
+    payload = {
+        "config": {
+            "chartType": "bar",
+            "title": "UUID payload",
+            "xAxisField": "category",
+            "series": [{"field": "value", "name": "Value", "format": "number"}],
+        },
+        "chartData": [{"category": uuid.uuid4(), "value": 1}],
+        "downloadData": [{"category": uuid.uuid4(), "value": 1}],
+        "meta": {"source": "auto"},
+    }
+
+    guarded = generator._size_guard(payload)
+
+    assert len(json.dumps(guarded, default=str).encode()) <= MAX_JSON_BYTES
