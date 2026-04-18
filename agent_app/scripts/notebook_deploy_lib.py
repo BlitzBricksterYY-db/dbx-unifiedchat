@@ -83,7 +83,10 @@ def resolve_app_name(project_dir: Path, *, target: str, bundle_app_key: str) -> 
     if not raw_name:
         return f"dbx-unifiedchat-app-{target}"
     if isinstance(raw_name, str):
-        return raw_name.replace("${bundle.target}", target)
+        resolved_name = raw_name.replace("${bundle.target}", target)
+        if resolved_name == "${var.app_name}":
+            return resolve_bundle_var(project_dir, target, "app_name") or resolved_name
+        return resolved_name
     return str(raw_name)
 
 
