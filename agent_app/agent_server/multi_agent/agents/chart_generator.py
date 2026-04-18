@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import re
+import threading
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
@@ -186,6 +187,10 @@ class ChartGenerator:
 
     def __init__(self, llm: Runnable):
         self.llm = llm
+        # The summarize path shares one ChartGenerator instance across futures.
+        # Serialize LLM access so concurrent chart requests cannot interleave
+        # streamed model responses and produce partial/invalid intents.
+        self._llm_lock = threading.Lock()
 
     def generate_chart(
         self,
@@ -366,13 +371,14 @@ class ChartGenerator:
         prompt = self._build_prompt(columns, data, original_query, result_context)
         try:
             content = ""
-            if hasattr(self.llm, "stream"):
-                for chunk in self.llm.stream(prompt):
-                    if getattr(chunk, "content", None):
-                        content += chunk.content
-            elif hasattr(self.llm, "invoke"):
-                result = self.llm.invoke(prompt)
-                content = getattr(result, "content", "") or ""
+            with self._llm_lock:
+                if hasattr(self.llm, "stream"):
+                    for chunk in self.llm.stream(prompt):
+                        if getattr(chunk, "content", None):
+                            content += chunk.content
+                elif hasattr(self.llm, "invoke"):
+                    result = self.llm.invoke(prompt)
+                    content = getattr(result, "content", "") or ""
             content = content.strip()
 
             match = re.search(r"\{[\s\S]*\}", content)
@@ -1738,6 +1744,8 @@ Rules:
 
         x_field = dimension_fields[0] if dimension_fields else None
         group_field = dimension_fields[1] if len(dimension_fields) > 1 else None
+        if x_field and group_field and self._dimensions_are_redundant(x_field, group_field, data):
+            group_field = None
         primary_metric = numeric_fields[0]
         secondary_metric = numeric_fields[1] if len(numeric_fields) > 1 else None
         chart_type = "bar"
@@ -1745,6 +1753,15 @@ Rules:
         transform: Optional[Dict[str, Any]] = None
         query_lower = (original_query or "").lower()
 
+        if x_field and self._looks_like_identifier_field(x_field) and primary_metric:
+            x_field = primary_metric
+            group_field = None
+            chart_type = "bar"
+            transform = {
+                "type": "histogram",
+                "field": primary_metric,
+                "bins": 10,
+            }
         if x_field and kinds.get(x_field) == "date":
             chart_type = "stackedArea" if group_field else "line"
             layout = "stacked" if group_field else None
@@ -1825,6 +1842,40 @@ Rules:
             "transform": transform,
             "referenceLines": [],
         }
+
+    def _looks_like_identifier_field(self, field: str) -> bool:
+        lowered = field.lower()
+        return any(token in lowered for token in _ID_FIELD_TOKENS)
+
+    def _dimensions_are_redundant(
+        self,
+        primary_field: str,
+        secondary_field: str,
+        data: List[Dict[str, Any]],
+    ) -> bool:
+        sample = data[: min(len(data), 100)]
+        pairs = [
+            (str(row.get(primary_field, "")), str(row.get(secondary_field, "")))
+            for row in sample
+            if row.get(primary_field) not in (None, "") and row.get(secondary_field) not in (None, "")
+        ]
+        if len(pairs) < 2:
+            return False
+
+        primary_to_secondary: Dict[str, set[str]] = defaultdict(set)
+        secondary_to_primary: Dict[str, set[str]] = defaultdict(set)
+        for primary_value, secondary_value in pairs:
+            primary_to_secondary[primary_value].add(secondary_value)
+            secondary_to_primary[secondary_value].add(primary_value)
+
+        looks_like_code_description = (
+            ("code" in primary_field.lower() and "description" in secondary_field.lower())
+            or ("description" in primary_field.lower() and "code" in secondary_field.lower())
+        )
+        one_to_one = all(len(values) == 1 for values in primary_to_secondary.values()) and all(
+            len(values) == 1 for values in secondary_to_primary.values()
+        )
+        return looks_like_code_description or one_to_one
 
     def _build_chart_meta(
         self,

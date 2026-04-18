@@ -1,5 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
+import concurrent.futures
+import threading
+import time
 import types
 import sys
 
@@ -71,6 +74,24 @@ class StubLlm:
 
     def stream(self, _prompt: str):
         yield SimpleNamespace(content=self._content)
+
+
+class NonConcurrentLlm:
+    def __init__(self, content: str, delay: float = 0.05):
+        self._content = content
+        self._delay = delay
+        self._active = 0
+        self.max_active = 0
+        self._lock = threading.Lock()
+
+    def invoke(self, _prompt: str):
+        with self._lock:
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+        time.sleep(self._delay)
+        with self._lock:
+            self._active -= 1
+        return SimpleNamespace(content=self._content)
 
 
 def test_build_artifact_entries_prefers_execution_result_metadata():
@@ -371,6 +392,92 @@ def test_chart_generator_without_llm_prefers_time_series_rollup():
     assert payload["config"]["transform"]["type"] == "timeBucket"
     assert payload["meta"]["source"] == "auto"
     assert payload["meta"]["confidence"] is not None
+
+
+def test_chart_generator_without_llm_uses_histogram_for_id_plus_numeric_preview():
+    generator = ChartGenerator(llm=None)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["patient_id", "age"],
+        data=[
+            {"patient_id": "a", "age": 7},
+            {"patient_id": "b", "age": 9},
+            {"patient_id": "c", "age": 11},
+            {"patient_id": "d", "age": 11},
+            {"patient_id": "e", "age": 13},
+        ],
+        original_query="Show pediatric members",
+        result_context={"label": "Pediatric members"},
+    )
+
+    assert payload is not None
+    assert payload["config"]["transform"]["type"] == "histogram"
+    assert payload["config"]["xAxisField"] == "age"
+
+
+def test_chart_generator_without_llm_avoids_code_description_grouping():
+    generator = ChartGenerator(llm=None)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["diagnosis_code", "Description", "total_diagnosis_count", "unique_patient_count"],
+        data=[
+            {
+                "diagnosis_code": "Z00129",
+                "Description": "Routine child health examination without abnormal findings",
+                "total_diagnosis_count": 1160,
+                "unique_patient_count": 202,
+            },
+            {
+                "diagnosis_code": "Z23",
+                "Description": "Encounter for immunization",
+                "total_diagnosis_count": 969,
+                "unique_patient_count": 197,
+            },
+            {
+                "diagnosis_code": "J069",
+                "Description": "Acute upper respiratory infection, unspecified",
+                "total_diagnosis_count": 627,
+                "unique_patient_count": 151,
+            },
+        ],
+        original_query="Group-level diagnosis distribution",
+        result_context={"label": "Diagnosis distribution"},
+    )
+
+    assert payload is not None
+    assert payload["config"]["groupByField"] is None
+    assert payload["config"]["chartType"] in {"bar", "dualAxis"}
+
+
+def test_chart_generator_serializes_shared_llm_access():
+    llm = NonConcurrentLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "bar",
+          "title": "Age",
+          "xAxisField": "patient_id",
+          "series": [{"field": "age", "name": "Age", "format": "number"}]
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    def run_once():
+        return generator.generate_chart(
+            columns=["patient_id", "age"],
+            data=[
+                {"patient_id": "a", "age": 7},
+                {"patient_id": "b", "age": 9},
+            ],
+            original_query="Show ages",
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        payloads = list(pool.map(lambda _i: run_once(), range(4)))
+
+    assert all(payload is not None for payload in payloads)
+    assert llm.max_active == 1
 
 
 def test_build_visualization_workspace_payload_groups_table_and_chart():
