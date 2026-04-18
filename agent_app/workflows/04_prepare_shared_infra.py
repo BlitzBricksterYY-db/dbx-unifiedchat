@@ -18,13 +18,12 @@ This notebook is intentionally app-centric:
 
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Optional
 
 import mlflow
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.database import DatabaseInstance
+from databricks.sdk.service.postgres import Branch, BranchSpec, Project, ProjectSpec
 
 
 def _notebook_dir() -> Path:
@@ -41,6 +40,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from uc_functions import register_uc_functions
+
 from scripts.grant_lakebase_permissions import PermissionGrantConfig, apply_permission_grants
 
 
@@ -52,8 +52,8 @@ _WIDGET_DEFAULTS = {
     "data_catalog_name": "",
     "data_schema_name": "",
     "sql_warehouse_id": "",
-    "lakebase_instance_name": "",
-    "lakebase_capacity": "",
+    "lakebase_project": "",
+    "lakebase_branch": "",
     "source_table": "",
     "experiment_id": "",
 }
@@ -70,58 +70,95 @@ schema_name = params["schema_name"] or None
 data_catalog_name = params["data_catalog_name"] or None
 data_schema_name = params["data_schema_name"] or None
 sql_warehouse_id = params["sql_warehouse_id"] or None
-lakebase_instance_name = params["lakebase_instance_name"] or None
-lakebase_capacity = params["lakebase_capacity"] or "CU_1"
+lakebase_project = params["lakebase_project"] or None
+lakebase_branch = params["lakebase_branch"] or None
 source_table = params["source_table"] or "enriched_genie_docs_chunks"
 
 
-def ensure_lakebase_instance(
+def ensure_lakebase_branch(
     workspace_client: WorkspaceClient,
     *,
-    instance_name: Optional[str],
-    capacity: str,
+    project: Optional[str],
+    branch: Optional[str],
 ):
-    if not instance_name:
-        print("\nNo Lakebase instance configured; skipping instance provisioning.")
+    if not project or not branch:
+        print("\nNo Lakebase autoscaling project/branch configured; skipping branch validation.")
         return None
 
-    print("\nEnsuring Lakebase instance exists...")
-    print(f"  name: {instance_name}")
-    print(f"  capacity: {capacity}")
+    project_name = f"projects/{project}"
+    branch_name = f"{project_name}/branches/{branch}"
+    print("\nEnsuring Lakebase autoscaling project/branch exist...")
+    print(f"  project: {project}")
+    print(f"  branch: {branch}")
+
+    project_created = False
+    try:
+        workspace_client.postgres.get_project(name=project_name)
+        print(f"  ✓ Project '{project_name}' already exists")
+    except Exception as exc:
+        print(f"  Project '{project_name}' not found. Creating it now...")
+        try:
+            workspace_client.postgres.create_project(
+                project=Project(spec=ProjectSpec(display_name=project)),
+                project_id=project,
+            ).wait()
+            project_created = True
+            print(f"  ✓ Project '{project_name}' created")
+        except Exception as create_exc:
+            raise RuntimeError(
+                f"Lakebase autoscaling project '{project_name}' could not be created."
+            ) from create_exc
+
+    if branch == "production" and project_created:
+        print(f"  ✓ Branch '{branch_name}' is available (auto-created with project)")
+    else:
+        try:
+            workspace_client.postgres.get_branch(name=branch_name)
+            print(f"  ✓ Branch '{branch_name}' already exists")
+        except Exception as exc:
+            if branch == "production":
+                raise RuntimeError(
+                    f"Lakebase autoscaling branch '{branch_name}' could not be resolved."
+                ) from exc
+
+            print(f"  Branch '{branch_name}' not found. Creating it now...")
+            try:
+                workspace_client.postgres.create_branch(
+                    parent=project_name,
+                    branch=Branch(
+                        spec=BranchSpec(
+                            source_branch=f"{project_name}/branches/production",
+                            no_expiry=True,
+                        )
+                    ),
+                    branch_id=branch,
+                ).wait()
+                print(f"  ✓ Branch '{branch_name}' created")
+            except Exception as create_exc:
+                raise RuntimeError(
+                    f"Lakebase autoscaling branch '{branch_name}' could not be created."
+                ) from create_exc
 
     try:
-        workspace_client.database.get_database_instance(instance_name)
-        print(f"  ✓ Lakebase instance '{instance_name}' already exists")
-    except Exception:
-        print(f"  Lakebase instance '{instance_name}' not found. Creating it now...")
-        workspace_client.database.create_database_instance(
-            DatabaseInstance(name=instance_name, capacity=capacity)
-        )
+        endpoints = list(workspace_client.postgres.list_endpoints(parent=branch_name))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Lakebase autoscaling endpoints for '{branch_name}' could not be resolved."
+        ) from exc
 
-    max_wait_seconds = 600
-    wait_interval_seconds = 15
-    elapsed_seconds = 0
+    if not endpoints:
+        print(f"  ✓ Branch '{branch_name}' exists (no endpoints reported yet)")
+        return {"branch": branch_name, "host": None}
 
-    while elapsed_seconds <= max_wait_seconds:
-        instance = workspace_client.database.get_database_instance(instance_name)
-        state = getattr(getattr(instance, "state", None), "value", None) or str(
-            getattr(instance, "state", "UNKNOWN")
-        )
-        print(f"  state: {state}")
-        if state == "AVAILABLE":
-            print(f"  ✓ Lakebase instance '{instance_name}' is ready")
-            return instance
-        if state in {"FAILED", "DELETED"}:
-            raise RuntimeError(
-                f"Lakebase instance '{instance_name}' is in unexpected state '{state}'."
-            )
-        time.sleep(wait_interval_seconds)
-        elapsed_seconds += wait_interval_seconds
-
-    raise TimeoutError(
-        f"Lakebase instance '{instance_name}' did not become AVAILABLE within "
-        f"{max_wait_seconds} seconds."
-    )
+    first_endpoint = endpoints[0]
+    endpoint_name = getattr(first_endpoint, "name", None) or "<unknown>"
+    endpoint_status = getattr(first_endpoint, "status", None)
+    endpoint_hosts = getattr(endpoint_status, "hosts", None)
+    host = getattr(endpoint_hosts, "host", None) if endpoint_hosts else None
+    print(f"  ✓ Branch '{branch_name}' is available via endpoint {endpoint_name}")
+    if host:
+        print(f"  host: {host}")
+    return {"branch": branch_name, "host": host}
 
 
 def ensure_experiment(
@@ -181,10 +218,10 @@ if not sp_client_id:
 
 print(f"\nResolved app service principal: {sp_client_id}")
 
-ensure_lakebase_instance(
+ensure_lakebase_branch(
     w,
-    instance_name=lakebase_instance_name,
-    capacity=lakebase_capacity,
+    project=lakebase_project,
+    branch=lakebase_branch,
 )
 
 for memory_type in ("langgraph-short-term", "langgraph-long-term"):
@@ -199,7 +236,8 @@ for memory_type in ("langgraph-short-term", "langgraph-long-term"):
             data_catalog_name=data_catalog_name,
             data_schema_name=data_schema_name,
             warehouse_id=sql_warehouse_id,
-            instance_name=lakebase_instance_name,
+            project=lakebase_project,
+            branch=lakebase_branch,
             bundle_config_path=str(APP_DIR / "databricks.yml"),
         ),
         workspace_client=w,

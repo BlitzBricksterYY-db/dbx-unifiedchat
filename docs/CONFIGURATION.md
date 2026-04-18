@@ -26,7 +26,8 @@ shared app + ETL flow:
 - `data_schema_name`
 - `sql_warehouse_id`
 - `genie_space_ids`
-- `lakebase_instance_name`
+- `lakebase_project`
+- `lakebase_branch`
 - `experiment_id`
 - `vs_endpoint_name`
 - `embedding_model`

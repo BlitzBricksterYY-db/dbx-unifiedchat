@@ -26,7 +26,8 @@ _WIDGET_DEFAULTS = {
     "catalog_name": "",
     "schema_name": "",
     "sql_warehouse_id": "",
-    "lakebase_instance_name": "",
+    "lakebase_project": "",
+    "lakebase_branch": "",
     "experiment_id": "",
 }
 
@@ -85,7 +86,8 @@ print(f"status: {app_status or '<unknown>'}")
 print(f"catalog_name: {params['catalog_name'] or '<unset>'}")
 print(f"schema_name: {params['schema_name'] or '<unset>'}")
 print(f"sql_warehouse_id: {params['sql_warehouse_id'] or '<unset>'}")
-print(f"lakebase_instance_name: {params['lakebase_instance_name'] or '<unset>'}")
+print(f"lakebase_project: {params['lakebase_project'] or '<unset>'}")
+print(f"lakebase_branch: {params['lakebase_branch'] or '<unset>'}")
 
 if not sp_client_id:
     raise RuntimeError("App validation failed: missing service principal client ID.")

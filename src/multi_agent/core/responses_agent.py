@@ -35,16 +35,28 @@ In notebooks, reads from the AGENT_CONFIG_FILE env var (set by notebook before i
 #########################################################
 # Lazy load config if not set
 LAKEBASE_INSTANCE_NAME = None
-if LAKEBASE_INSTANCE_NAME is None:
+LAKEBASE_PROJECT = None
+LAKEBASE_BRANCH = None
+LAKEBASE_AUTOSCALING_ENDPOINT = None
+LAKEBASE_RUNTIME_KWARGS = {}
+EMBEDDING_ENDPOINT = None
+EMBEDDING_DIMS = None
+if LAKEBASE_INSTANCE_NAME is None and not LAKEBASE_RUNTIME_KWARGS:
     try:
         from ..core.config import get_config
         config = get_config()
         if LAKEBASE_INSTANCE_NAME is None:
-            LAKEBASE_INSTANCE_NAME = config.lakebase.instance_name
+            LAKEBASE_INSTANCE_NAME = config.lakebase.instance_name or None
+        LAKEBASE_PROJECT = config.lakebase.project or None
+        LAKEBASE_BRANCH = config.lakebase.branch or None
+        LAKEBASE_AUTOSCALING_ENDPOINT = config.lakebase.autoscaling_endpoint or None
+        LAKEBASE_RUNTIME_KWARGS = config.lakebase.runtime_kwargs()
+        EMBEDDING_ENDPOINT = config.lakebase.embedding_endpoint
+        EMBEDDING_DIMS = config.lakebase.embedding_dims
     except Exception as e:
         print(f"⚠️ Failed to load config: {e}")
 
-print(f"Lakebase Instance: {LAKEBASE_INSTANCE_NAME}")
+print(f"Lakebase Connection: {LAKEBASE_RUNTIME_KWARGS or {'instance_name': LAKEBASE_INSTANCE_NAME}}")
 print("="*80)
 
 
@@ -91,17 +103,32 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
         """
         self.workflow = workflow
         self.lakebase_instance_name = LAKEBASE_INSTANCE_NAME
+        self.lakebase_project = LAKEBASE_PROJECT
+        self.lakebase_branch = LAKEBASE_BRANCH
+        self.lakebase_autoscaling_endpoint = LAKEBASE_AUTOSCALING_ENDPOINT
+        self.lakebase_runtime_kwargs = dict(LAKEBASE_RUNTIME_KWARGS)
         self._store = None
         self._memory_tools = None
         print("✓ SuperAgentHybridResponsesAgent initialized with memory support")
+
+    def _lakebase_runtime_kwargs(self) -> dict[str, str]:
+        if self.lakebase_runtime_kwargs:
+            return dict(self.lakebase_runtime_kwargs)
+        if self.lakebase_autoscaling_endpoint:
+            return {"autoscaling_endpoint": self.lakebase_autoscaling_endpoint}
+        if self.lakebase_project and self.lakebase_branch:
+            return {"project": self.lakebase_project, "branch": self.lakebase_branch}
+        if self.lakebase_instance_name:
+            return {"instance_name": self.lakebase_instance_name}
+        return {}
     
     @property
     def store(self):
         """Lazy initialization of DatabricksStore for long-term memory."""
         if self._store is None:
-            logger.info(f"Initializing DatabricksStore with instance: {self.lakebase_instance_name}")
+            logger.info("Initializing DatabricksStore with Lakebase kwargs: %s", self._lakebase_runtime_kwargs())
             self._store = DatabricksStore(
-                instance_name=self.lakebase_instance_name,
+                **self._lakebase_runtime_kwargs(),
                 embedding_endpoint=EMBEDDING_ENDPOINT,
                 embedding_dims=EMBEDDING_DIMS,
             )
@@ -511,7 +538,7 @@ Guidelines:
         
         # Execute workflow with CheckpointSaver for distributed serving
         # CRITICAL: CheckpointSaver as context manager ensures all instances share state
-        with CheckpointSaver(instance_name=self.lakebase_instance_name) as checkpointer:
+        with CheckpointSaver(**self._lakebase_runtime_kwargs()) as checkpointer:
             # Compile graph with checkpointer at runtime
             # This allows distributed Model Serving to access shared state
             app = self.workflow.compile(checkpointer=checkpointer)

@@ -7,7 +7,7 @@
 #       name: ${var.schema_name}
 #       catalog_name: ${var.catalog_name}
 #       grants:
-#         - principal: ${resources.apps.agent_migration.service_principal_client_id}
+#         - principal: ${resources.apps.dbx_unifiedchat_agent_app.service_principal_client_id}
 #           privileges:
 #             - USE_SCHEMA
 #             - SELECT

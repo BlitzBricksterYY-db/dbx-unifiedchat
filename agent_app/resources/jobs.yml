@@ -71,15 +71,15 @@ resources:
             notebook_path: ../workflows/04_prepare_shared_infra.py
             source: WORKSPACE
             base_parameters:
-              app_name: ${resources.apps.agent_migration.name}
+              app_name: ${resources.apps.dbx_unifiedchat_agent_app.name}
               target: ${bundle.target}
               catalog_name: ${var.catalog_name}
               schema_name: ${var.schema_name}
               data_catalog_name: ${var.data_catalog_name}
               data_schema_name: ${var.data_schema_name}
               sql_warehouse_id: ${var.sql_warehouse_id}
-              lakebase_instance_name: ${var.lakebase_instance_name}
-              lakebase_capacity: ${var.lakebase_capacity}
+              lakebase_project: ${var.lakebase_project}
+              lakebase_branch: ${var.lakebase_branch}
               source_table: ${var.source_table}
               experiment_id: ${var.experiment_id}
           timeout_seconds: 1800
@@ -120,12 +120,13 @@ resources:
             notebook_path: ../workflows/05_validate_app_deployment.py
             source: WORKSPACE
             base_parameters:
-              app_name: ${resources.apps.agent_migration.name}
+              app_name: ${resources.apps.dbx_unifiedchat_agent_app.name}
               target: ${bundle.target}
               catalog_name: ${var.catalog_name}
               schema_name: ${var.schema_name}
               sql_warehouse_id: ${var.sql_warehouse_id}
-              lakebase_instance_name: ${var.lakebase_instance_name}
+              lakebase_project: ${var.lakebase_project}
+              lakebase_branch: ${var.lakebase_branch}
               experiment_id: ${var.experiment_id}
           timeout_seconds: 1200
 

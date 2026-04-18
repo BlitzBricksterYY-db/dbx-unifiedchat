@@ -67,7 +67,8 @@ VS_ENDPOINT_NAME=genie_multi_agent_vs
 EMBEDDING_MODEL=databricks-gte-large-en
 
 # Lakebase (state management)
-LAKEBASE_INSTANCE_NAME=your-lakebase-instance
+LAKEBASE_AUTOSCALING_PROJECT=your-lakebase-project
+LAKEBASE_AUTOSCALING_BRANCH=production
 ```
 
 **Get these values**:

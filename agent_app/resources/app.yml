@@ -1,6 +1,6 @@
 resources:
   apps:
-    agent_migration:
+    dbx_unifiedchat_agent_app:
       name: ${var.app_name}
       description: "Multi-agent Genie system on Databricks Apps"
       source_code_path: ../
@@ -53,8 +53,10 @@ resources:
             value: ${var.sql_warehouse_id}
           - name: GENIE_SPACE_IDS
             value: ${var.genie_space_ids}
-          - name: LAKEBASE_INSTANCE_NAME
-            value: ${var.lakebase_instance_name}
+          - name: LAKEBASE_AUTOSCALING_PROJECT
+            value: ${var.lakebase_project}
+          - name: LAKEBASE_AUTOSCALING_BRANCH
+            value: ${var.lakebase_branch}
           - name: LAKEBASE_EMBEDDING_ENDPOINT
             value: ${var.embedding_model}
           - name: LAKEBASE_EMBEDDING_DIMS
@@ -77,15 +79,27 @@ resources:
           experiment:
             experiment_id: ${var.experiment_id}
             permission: 'CAN_MANAGE'
+                    # SQL warehouse
+        - name: 'sql-warehouse'
+          sql_warehouse:
+            id: ${var.sql_warehouse_id}
+            permission: 'CAN_USE'
 
-        # lakebase database access is granted post-deploy by shared-infra bootstrap.        # - name: 'database'
+        # Lakebase app database access is granted post-deploy by shared-infra bootstrap.
+        # - name: 'postgres'
+        #   postgres:
+        #     branch: projects/${var.lakebase_project}/branches/${var.lakebase_branch}
+        #     database: projects/${var.lakebase_project}/branches/${var.lakebase_branch}/databases/<database-resource-id>
+        #     permission: 'CAN_CONNECT_AND_CREATE'
+
+        # (Deprecated) Provisioned Lakebase uses the legacy database resource shape instead.
         # - name: 'database'
         #   database:
-        #     instance_name: ${var.lakebase_instance_name}
+        #     instance_name: "<provisioned-only>"
         #     database_name: databricks_postgres
         #     permission: 'CAN_CONNECT_AND_CREATE'
 
-        # UC volume access is granted post-deploy by shared-infra bootstrap.        # - name: 'database'
+        # UC volume access is granted post-deploy by shared-infra bootstrap.
         # UC Volume for MLflow trace artifacts
         # - name: 'trace-volume'
         #   uc_securable:
@@ -93,7 +107,7 @@ resources:
         #     securable_full_name: ${var.catalog_name}.${var.schema_name}.${var.volume_name}
         #     permission: 'WRITE_VOLUME'
 
-        # # Serving endpoints (LLM + embedding)
+        # # Serving endpoints (LLM + embedding) Access is granted by default on databricks for anyone to can_query.
         # - name: 'serving-endpoint-sonnet'
         #   serving_endpoint:
         #     name: ${var.llm_endpoint}
@@ -107,10 +121,6 @@ resources:
         #     name: ${var.embedding_model}
         #     permission: 'CAN_QUERY'
 
-        # SQL warehouse
-        - name: 'sql-warehouse'
-          sql_warehouse:
-            id: ${var.sql_warehouse_id}
-            permission: 'CAN_USE'
+
 
 

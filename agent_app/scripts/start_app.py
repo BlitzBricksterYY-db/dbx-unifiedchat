@@ -35,7 +35,11 @@ def grant_lakebase_permissions():
     """Bootstrap Lakebase roles for the app service principal (best effort)."""
     app_name = os.environ.get("DATABRICKS_APP_NAME")
     instance_name = os.environ.get("LAKEBASE_INSTANCE_NAME")
-    if not app_name or not instance_name or not GRANT_SCRIPT.exists():
+    project = os.environ.get("LAKEBASE_PROJECT") or os.environ.get("LAKEBASE_AUTOSCALING_PROJECT")
+    branch = os.environ.get("LAKEBASE_BRANCH") or os.environ.get("LAKEBASE_AUTOSCALING_BRANCH")
+    if not app_name or not GRANT_SCRIPT.exists():
+        return
+    if not instance_name and not (project and branch):
         return
 
     extra_args = []
@@ -59,6 +63,7 @@ def grant_lakebase_permissions():
         extra_args.extend(["--warehouse-id", warehouse_id])
 
     for memory_type in ("langgraph-short-term", "langgraph-long-term"):
+        lakebase_args = ["--instance-name", instance_name] if instance_name else ["--project", project, "--branch", branch]
         rc = _run(
             [
                 "uv",
@@ -69,8 +74,7 @@ def grant_lakebase_permissions():
                 app_name,
                 "--memory-type",
                 memory_type,
-                "--instance-name",
-                instance_name,
+                *lakebase_args,
                 *extra_args,
             ],
             label=f"Lakebase grant ({memory_type})",

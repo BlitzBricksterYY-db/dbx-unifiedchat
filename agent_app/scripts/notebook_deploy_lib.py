@@ -28,7 +28,7 @@ class NotebookDeployConfig:
     start_app: bool = False
     sync_workspace: bool = False
     run_job: str | None = "full"
-    bundle_app_key: str = "agent_migration"
+    bundle_app_key: str = "dbx_unifiedchat_agent_app"
 
     @property
     def app_name(self) -> str:
@@ -119,6 +119,8 @@ def bundle_settings(project_dir: Path, target: str) -> dict[str, str | None]:
         "data_catalog_name": resolved.data_catalog_name,
         "data_schema_name": resolved.data_schema_name,
         "sql_warehouse_id": resolved.warehouse_id,
+        "lakebase_project": resolved.project,
+        "lakebase_branch": resolved.branch,
         "lakebase_instance_name": resolved.instance_name,
         "database_name": resolved.database_name,
         "genie_space_ids": ",".join(resolved.genie_space_ids or []),
@@ -299,9 +301,11 @@ def bootstrap_lakebase_role(
     fail_ok: bool,
 ) -> list[tuple[str, bool, str | None]]:
     settings = bundle_settings(config.project_dir, config.target)
+    project = settings["lakebase_project"]
+    branch = settings["lakebase_branch"]
     instance_name = settings["lakebase_instance_name"]
-    if not instance_name:
-        print("Skipping Lakebase bootstrap: no lakebase_instance_name resolved.")
+    if not (instance_name or (project and branch)):
+        print("Skipping Lakebase bootstrap: no Lakebase connection resolved.")
         return []
 
     effective_profile = resolve_effective_profile(
@@ -314,7 +318,10 @@ def bootstrap_lakebase_role(
         )
         return []
 
-    print(f"Bootstrapping Lakebase role ({phase}) in {instance_name}...")
+    if project and branch:
+        print(f"Bootstrapping Lakebase role ({phase}) in project={project}, branch={branch}...")
+    else:
+        print(f"Bootstrapping Lakebase role ({phase}) in {instance_name}...")
     workspace_client = _workspace_client(effective_profile)
     results: list[tuple[str, bool, str | None]] = []
     for memory_type in ("langgraph-short-term", "langgraph-long-term"):

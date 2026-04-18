@@ -164,7 +164,11 @@ def hydrate_config_from_bundle(config: PermissionGrantConfig) -> PermissionGrant
     config.volume_name = config.volume_name or _resolve_bundle_variable(
         bundle_config, target, "volume_name"
     )
-    config.instance_name = config.instance_name or _resolve_bundle_variable(bundle_config, target, "lakebase_instance_name")
+    config.project = config.project or _resolve_bundle_variable(bundle_config, target, "lakebase_project")
+    config.branch = config.branch or _resolve_bundle_variable(bundle_config, target, "lakebase_branch")
+    config.instance_name = config.instance_name or _resolve_bundle_variable(
+        bundle_config, target, "lakebase_instance_name"
+    )
     config.warehouse_id = config.warehouse_id or _resolve_bundle_variable(
         bundle_config, target, "sql_warehouse_id"
     )
@@ -399,6 +403,177 @@ def validate_permission_config(config: PermissionGrantConfig) -> None:
         )
 
 
+def _postgres_branch_name(config: PermissionGrantConfig) -> str | None:
+    if not (config.project and config.branch):
+        return None
+    return f"projects/{config.project}/branches/{config.branch}"
+
+
+def _postgres_database_name(config: PermissionGrantConfig) -> str | None:
+    branch_name = _postgres_branch_name(config)
+    if not branch_name:
+        return None
+    return f"{branch_name}/databases/{config.database_name or DEFAULT_DATABASE_NAME}"
+
+
+def _sdk_supports_postgres_app_resource(apps_service) -> bool:
+    return all(
+        hasattr(apps_service, attr)
+        for attr in (
+            "AppResourcePostgres",
+            "AppResourcePostgresPostgresPermission",
+        )
+    )
+
+
+def _resolve_postgres_database_resource_name(
+    config: PermissionGrantConfig,
+    workspace_client,
+    *,
+    wait_timeout_seconds: int = 30,
+    poll_interval_seconds: int = 2,
+) -> str | None:
+    branch_name = _postgres_branch_name(config)
+    if not branch_name:
+        return None
+
+    postgres_database_name = config.database_name or DEFAULT_DATABASE_NAME
+    deadline = time.time() + wait_timeout_seconds
+
+    while True:
+        response = workspace_client.api_client.do(
+            "GET",
+            f"/api/2.0/postgres/{branch_name}/databases",
+        )
+        databases = list((response or {}).get("databases") or [])
+        for database in databases:
+            status = database.get("status") or {}
+            if status.get("postgres_database") == postgres_database_name:
+                return database.get("name")
+
+        if time.time() >= deadline:
+            return None
+
+        time.sleep(poll_interval_seconds)
+
+
+def _require_postgres_database_resource_name(config: PermissionGrantConfig, workspace_client) -> str | None:
+    branch_name = _postgres_branch_name(config)
+    if not branch_name:
+        return None
+
+    postgres_database_resource_name = _resolve_postgres_database_resource_name(config, workspace_client)
+    if postgres_database_resource_name:
+        return postgres_database_resource_name
+
+    postgres_database_name = config.database_name or DEFAULT_DATABASE_NAME
+    raise RuntimeError(
+        "Lakebase autoscaling database resource did not become available within 30 seconds: "
+        f"branch={branch_name}, postgres_database={postgres_database_name}. "
+        "Cannot grant app postgres CAN_CONNECT_AND_CREATE permission."
+    )
+
+
+def _sync_app_resource_permissions_raw(config: PermissionGrantConfig, workspace_client) -> None:
+    resources_payload = workspace_client.api_client.do("GET", f"/api/2.0/apps/{config.app_name}")
+    resources = list((resources_payload or {}).get("resources") or [])
+    updated_resources: list[dict] = []
+
+    volume_full_name = None
+    if config.catalog_name and config.schema_name and config.volume_name:
+        volume_full_name = f"{config.catalog_name}.{config.schema_name}.{config.volume_name}"
+
+    postgres_branch_name = _postgres_branch_name(config)
+    postgres_database_resource_name = _require_postgres_database_resource_name(config, workspace_client)
+
+    for resource in resources:
+        name = resource.get("name")
+        if name == "database" and (config.instance_name or postgres_branch_name):
+            continue
+        if name == "postgres" and postgres_branch_name:
+            continue
+        if config.genie_space_ids and resource.get("genie_space") is not None:
+            continue
+
+        uc_securable = resource.get("uc_securable")
+        if (
+            volume_full_name
+            and uc_securable is not None
+            and uc_securable.get("securable_type") == "VOLUME"
+            and uc_securable.get("securable_full_name") == volume_full_name
+        ):
+            continue
+        updated_resources.append(resource)
+
+    if config.instance_name:
+        print(
+            "Ensuring app database resource grants "
+            f"{config.database_name}@{config.instance_name} with CAN_CONNECT_AND_CREATE..."
+        )
+        updated_resources.append(
+            {
+                "name": "database",
+                "database": {
+                    "instance_name": config.instance_name,
+                    "database_name": config.database_name or DEFAULT_DATABASE_NAME,
+                    "permission": "CAN_CONNECT_AND_CREATE",
+                },
+            }
+        )
+
+    if postgres_branch_name and postgres_database_resource_name:
+        print(
+            "Ensuring app autoscaling Lakebase resource grants "
+            f"CAN_CONNECT_AND_CREATE on {postgres_database_resource_name}..."
+        )
+        updated_resources.append(
+            {
+                "name": "postgres",
+                "postgres": {
+                    "branch": postgres_branch_name,
+                    "database": postgres_database_resource_name,
+                    "permission": "CAN_CONNECT_AND_CREATE",
+                },
+            }
+        )
+    if config.genie_space_ids:
+        print(f"Ensuring app Genie space grants for {len(config.genie_space_ids)} space(s)...")
+        for index, space_id in enumerate(config.genie_space_ids, start=1):
+            resource_name = f"genie-space-{index}"
+            updated_resources.append(
+                {
+                    "name": resource_name,
+                    "genie_space": {
+                        "name": resource_name,
+                        "space_id": space_id,
+                        "permission": "CAN_RUN",
+                    },
+                }
+            )
+
+    if volume_full_name:
+        print(
+            "Ensuring app UC volume resource grants "
+            f"WRITE_VOLUME on {volume_full_name}..."
+        )
+        updated_resources.append(
+            {
+                "name": "trace-volume-write",
+                "uc_securable": {
+                    "securable_full_name": volume_full_name,
+                    "securable_type": "VOLUME",
+                    "permission": "WRITE_VOLUME",
+                },
+            }
+        )
+
+    workspace_client.api_client.do(
+        "PATCH",
+        f"/api/2.0/apps/{config.app_name}",
+        body={"name": config.app_name, "resources": updated_resources},
+    )
+
+
 def sync_app_resource_permissions(config: PermissionGrantConfig, workspace_client) -> None:
     from databricks.sdk.service import apps as apps_service
 
@@ -409,6 +584,10 @@ def sync_app_resource_permissions(config: PermissionGrantConfig, workspace_clien
         )
         return
 
+    if config.project and config.branch and not _sdk_supports_postgres_app_resource(apps_service):
+        _sync_app_resource_permissions_raw(config, workspace_client)
+        return
+
     current_app = workspace_client.apps.get(config.app_name)
     resources = list(current_app.resources or [])
     updated_resources: list[apps_service.AppResource] = []
@@ -417,7 +596,9 @@ def sync_app_resource_permissions(config: PermissionGrantConfig, workspace_clien
         volume_full_name = f"{config.catalog_name}.{config.schema_name}.{config.volume_name}"
 
     for resource in resources:
-        if config.instance_name and resource.name == "database":
+        if resource.name == "database" and (config.instance_name or (config.project and config.branch)):
+            continue
+        if resource.name == "postgres" and config.project and config.branch:
             continue
         if config.genie_space_ids and getattr(resource, "genie_space", None) is not None:
             continue
@@ -448,6 +629,23 @@ def sync_app_resource_permissions(config: PermissionGrantConfig, workspace_clien
             )
         )
 
+    postgres_branch_name = _postgres_branch_name(config)
+    postgres_database_resource_name = _require_postgres_database_resource_name(config, workspace_client)
+    if postgres_branch_name and postgres_database_resource_name:
+        print(
+            "Ensuring app autoscaling Lakebase resource grants "
+            f"CAN_CONNECT_AND_CREATE on {postgres_database_resource_name}..."
+        )
+        updated_resources.append(
+            apps_service.AppResource(
+                name="postgres",
+                postgres=apps_service.AppResourcePostgres(
+                    branch=postgres_branch_name,
+                    database=postgres_database_resource_name,
+                    permission=apps_service.AppResourcePostgresPostgresPermission.CAN_CONNECT_AND_CREATE,
+                ),
+            )
+        )
     if config.genie_space_ids:
         print(f"Ensuring app Genie space grants for {len(config.genie_space_ids)} space(s)...")
         for index, space_id in enumerate(config.genie_space_ids, start=1):
