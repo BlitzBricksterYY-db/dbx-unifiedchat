@@ -1,8 +1,5 @@
 """
-Migrated multi-agent Genie system — async @invoke/@stream entry point.
-
-Converted from SuperAgentHybridResponsesAgent (Model Serving) to
-MLflow GenAI Server decorated functions (Databricks Apps).
+Multi-agent Genie system async @invoke/@stream entry point for Databricks Apps.
 """
 
 import atexit
@@ -78,6 +75,10 @@ def _append_privacy_query_postfix(query: str, enabled: bool) -> str:
 _workflow = create_super_agent_hybrid()
 
 LAKEBASE_INSTANCE_NAME = None
+LAKEBASE_PROJECT = None
+LAKEBASE_BRANCH = None
+LAKEBASE_AUTOSCALING_ENDPOINT = None
+LAKEBASE_RUNTIME_KWARGS: dict[str, str] = {}
 EMBEDDING_ENDPOINT = None
 EMBEDDING_DIMS = None
 SPACE_CONTEXT_TABLE_NAME = None
@@ -85,12 +86,16 @@ SQL_WAREHOUSE_ID = None
 try:
     from agent_server.multi_agent.core.config import get_config
     _cfg = get_config()
-    LAKEBASE_INSTANCE_NAME = _cfg.lakebase.instance_name
+    LAKEBASE_INSTANCE_NAME = _cfg.lakebase.instance_name or None
+    LAKEBASE_PROJECT = _cfg.lakebase.project or None
+    LAKEBASE_BRANCH = _cfg.lakebase.branch or None
+    LAKEBASE_AUTOSCALING_ENDPOINT = _cfg.lakebase.autoscaling_endpoint or None
+    LAKEBASE_RUNTIME_KWARGS = _cfg.lakebase.runtime_kwargs()
     EMBEDDING_ENDPOINT = _cfg.lakebase.embedding_endpoint
     EMBEDDING_DIMS = _cfg.lakebase.embedding_dims
     SPACE_CONTEXT_TABLE_NAME = get_space_context_table_name(_cfg)
     SQL_WAREHOUSE_ID = _cfg.table_metadata.sql_warehouse_id
-    logger.info(f"Using Lakebase instance: {LAKEBASE_INSTANCE_NAME}")
+    logger.info("Using Lakebase connection: %s", _cfg.lakebase.connection_label())
 except Exception as e:
     logger.warning(f"Failed to load config at import time: {e}")
 
@@ -125,15 +130,15 @@ def _get_store():
     global _store
     if _store is not None:
         return _store
-    if not LAKEBASE_INSTANCE_NAME:
+    if not LAKEBASE_RUNTIME_KWARGS:
         return None
     with _store_lock:
         if _store is not None:
             return _store
         from databricks_langchain import DatabricksStore
-        logger.info(f"Initializing DatabricksStore with instance: {LAKEBASE_INSTANCE_NAME}")
+        logger.info("Initializing DatabricksStore with Lakebase kwargs: %s", LAKEBASE_RUNTIME_KWARGS)
         store = DatabricksStore(
-            instance_name=LAKEBASE_INSTANCE_NAME,
+            **LAKEBASE_RUNTIME_KWARGS,
             embedding_endpoint=EMBEDDING_ENDPOINT,
             embedding_dims=EMBEDDING_DIMS,
         )
@@ -249,10 +254,15 @@ def _get_compiled_workflow_app(*, record_trace: bool = True):
                 record_trace,
                 name="workflow_checkpointer_init",
                 span_type=SpanType.TOOL,
-                attributes={"lakebase_instance_name": LAKEBASE_INSTANCE_NAME or ""},
+                attributes={
+                    "lakebase_instance_name": LAKEBASE_INSTANCE_NAME or "",
+                    "lakebase_project": LAKEBASE_PROJECT or "",
+                    "lakebase_branch": LAKEBASE_BRANCH or "",
+                    "lakebase_autoscaling_endpoint": LAKEBASE_AUTOSCALING_ENDPOINT or "",
+                },
             ):
                 checkpointer_init_started = time.perf_counter()
-                cm = CheckpointSaver(instance_name=LAKEBASE_INSTANCE_NAME)
+                cm = CheckpointSaver(**LAKEBASE_RUNTIME_KWARGS)
             logger.info(
                 "Initialized workflow checkpointer in %.1f ms",
                 (time.perf_counter() - checkpointer_init_started) * 1000,

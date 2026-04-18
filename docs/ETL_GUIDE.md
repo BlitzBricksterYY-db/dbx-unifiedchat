@@ -76,10 +76,12 @@ The ETL pipeline enriches Genie space metadata with table schemas, column detail
 
 **Setup**:
 ```bash
-# Install ETL dependencies
-pip install -r requirements.txt
+# Sync app dependencies
+cd agent_app
+uv sync --dev
 
 # Run local ETL tester
+cd ..
 python etl/local_dev_etl.py --step export --sample-size 10
 python etl/local_dev_etl.py --step enrich --sample-size 10
 python etl/local_dev_etl.py --step vectorize --sample-size 10

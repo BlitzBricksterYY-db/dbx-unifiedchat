@@ -243,14 +243,44 @@ class LakebaseConfig:
     - Short-term memory: Conversation checkpoints (CheckpointSaver)
     - Long-term memory: User preferences with semantic search (DatabricksStore)
     """
+    project: str
+    branch: str
+    autoscaling_endpoint: str
     instance_name: str
     embedding_endpoint: str
     embedding_dims: int
+
+    def is_autoscaling(self) -> bool:
+        return bool(self.autoscaling_endpoint or (self.project and self.branch))
+
+    def is_configured(self) -> bool:
+        return bool(self.runtime_kwargs())
+
+    def runtime_kwargs(self) -> dict[str, str]:
+        if self.autoscaling_endpoint:
+            return {"autoscaling_endpoint": self.autoscaling_endpoint}
+        if self.project and self.branch:
+            return {"project": self.project, "branch": self.branch}
+        if self.instance_name:
+            return {"instance_name": self.instance_name}
+        return {}
+
+    def connection_label(self) -> str:
+        if self.autoscaling_endpoint:
+            return f"autoscaling endpoint {self.autoscaling_endpoint}"
+        if self.project and self.branch:
+            return f"autoscaling project={self.project}, branch={self.branch}"
+        if self.instance_name:
+            return f"provisioned instance {self.instance_name}"
+        return "unconfigured"
     
     @classmethod
     def from_env(cls) -> 'LakebaseConfig':
         return cls(
-            instance_name=os.getenv("LAKEBASE_INSTANCE_NAME", "agent-state-db"),
+            project=os.getenv("LAKEBASE_PROJECT", os.getenv("LAKEBASE_AUTOSCALING_PROJECT", "")).strip(),
+            branch=os.getenv("LAKEBASE_BRANCH", os.getenv("LAKEBASE_AUTOSCALING_BRANCH", "")).strip(),
+            autoscaling_endpoint=os.getenv("LAKEBASE_AUTOSCALING_ENDPOINT", "").strip(),
+            instance_name=os.getenv("LAKEBASE_INSTANCE_NAME", "").strip(),
             embedding_endpoint=os.getenv("LAKEBASE_EMBEDDING_ENDPOINT", "databricks-gte-large-en"),
             embedding_dims=int(os.getenv("LAKEBASE_EMBEDDING_DIMS", "1024")),
         )
@@ -258,7 +288,26 @@ class LakebaseConfig:
     @classmethod
     def from_model_config(cls, mc: Any) -> 'LakebaseConfig':
         return cls(
-            instance_name=_mc_get(mc, "lakebase_instance_name", "agent-state-db"),
+            project=str(
+                _mc_get(
+                    mc,
+                    "lakebase_project",
+                    _mc_get(mc, "lakebase_autoscaling_project", ""),
+                )
+                or ""
+            ).strip(),
+            branch=str(
+                _mc_get(
+                    mc,
+                    "lakebase_branch",
+                    _mc_get(mc, "lakebase_autoscaling_branch", ""),
+                )
+                or ""
+            ).strip(),
+            autoscaling_endpoint=str(
+                _mc_get(mc, "lakebase_autoscaling_endpoint", "") or ""
+            ).strip(),
+            instance_name=str(_mc_get(mc, "lakebase_instance_name", "") or "").strip(),
             embedding_endpoint=_mc_get(mc, "lakebase_embedding_endpoint", "databricks-gte-large-en"),
             embedding_dims=int(_mc_get(mc, "lakebase_embedding_dims", 1024)),
         )
@@ -354,9 +403,22 @@ class AgentConfig:
                 "Expected alphanumeric string (e.g., '148ccb90800933a1')"
             )
         
-        # Check Lakebase (critical for distributed Model Serving)
-        if not self.lakebase.instance_name:
-            raise ValueError("LAKEBASE_INSTANCE_NAME cannot be empty")
+        # Check Lakebase (critical for distributed deployed runtimes)
+        if self.lakebase.project and not self.lakebase.branch:
+            raise ValueError("LAKEBASE_BRANCH cannot be empty when LAKEBASE_PROJECT is set")
+
+        if self.lakebase.branch and not self.lakebase.project and not self.lakebase.autoscaling_endpoint:
+            raise ValueError(
+                "LAKEBASE_PROJECT cannot be empty when LAKEBASE_BRANCH is set "
+                "unless LAKEBASE_AUTOSCALING_ENDPOINT is configured"
+            )
+
+        if not self.lakebase.is_configured():
+            raise ValueError(
+                "Lakebase configuration cannot be empty. Set LAKEBASE_PROJECT and "
+                "LAKEBASE_BRANCH, LAKEBASE_AUTOSCALING_ENDPOINT, or legacy "
+                "LAKEBASE_INSTANCE_NAME."
+            )
         
         if self.lakebase.embedding_dims <= 0:
             raise ValueError("LAKEBASE_EMBEDDING_DIMS must be positive")
@@ -403,13 +465,13 @@ class AgentConfig:
         print(f"  Genie Space IDs: {len(self.table_metadata.genie_space_ids)} spaces")
         for i, sid in enumerate(self.table_metadata.genie_space_ids, 1):
             print(f"    {i}. {sid}")
-        print(f"\nModel Serving:")
+        print(f"\nRuntime Compatibility:")
         print(f"  Model Name: {self.model_serving.model_name}")
         print(f"  Endpoint Name: {self.model_serving.endpoint_name}")
         print(f"  Workload Size: {self.model_serving.workload_size}")
         print(f"  Scale to Zero: {self.model_serving.scale_to_zero_enabled}")
         print(f"\nLakebase (State Management):")
-        print(f"  Instance Name: {self.lakebase.instance_name}")
+        print(f"  Connection: {self.lakebase.connection_label()}")
         print(f"  Embedding Endpoint: {self.lakebase.embedding_endpoint}")
         print(f"  Embedding Dimensions: {self.lakebase.embedding_dims}")
         print(f"  Purpose: Short-term (checkpoints) + Long-term (user memories)")
@@ -421,12 +483,12 @@ _config: Optional[AgentConfig] = None
 
 
 def is_databricks_apps() -> bool:
-    """Detect if running as a Databricks App (not Model Serving)."""
+    """Detect if running as a Databricks App."""
     return bool(os.environ.get("DATABRICKS_APP_NAME"))
 
 
 def is_databricks() -> bool:
-    """Detect if running on Databricks (Notebook, Job, or Model Serving) but NOT Apps."""
+    """Detect if running on Databricks compute outside the Databricks App runtime."""
     if is_databricks_apps():
         return False
     return (

@@ -691,6 +691,11 @@ def summarize_node(state: AgentState) -> dict:
         try:
             payload = future.result(timeout=30)
             if not payload:
+                print(
+                    "⚠ Chart generation returned no payload for result "
+                    f"{idx} ({entry.get('label') or f'Query {idx + 1}'}) "
+                    f"columns={columns}"
+                )
                 continue
 
             preview_rows = data[:MAX_PREVIEW_ROWS]
@@ -709,7 +714,11 @@ def summarize_node(state: AgentState) -> dict:
             writer({"type": "text_delta", "content": workspace_block})
             print(f"✓ Visualization workspace inserted for result {idx} ({len(workspace_json)} bytes)")
         except Exception as e:
-            print(f"⚠ Chart generation failed for result {idx}: {e}")
+            print(
+                "⚠ Chart generation failed for result "
+                f"{idx} ({entry.get('label') or f'Query {idx + 1}'}) "
+                f"columns={columns}: {e}"
+            )
     if chart_pool:
         chart_pool.shutdown(wait=False)
 

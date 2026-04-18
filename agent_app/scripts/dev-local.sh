@@ -21,7 +21,7 @@
 # Defaults pulled from databricks.yml and remembered in .env:
 #   Target   = LOCAL_DATABRICKS_TARGET, else bundle default target
 #   Profile  = --profile, else target.workspace.profile
-#   Lakebase = variables.lakebase_instance_name for the resolved target
+#   Lakebase = variables.lakebase_project + variables.lakebase_branch for the resolved target
 
 set -euo pipefail
 
@@ -171,6 +171,8 @@ def resolve_bundle_var(name: str) -> str:
 context = {
     "RESOLVED_TARGET": resolved_target,
     "RESOLVED_PROFILE": resolved_profile,
+    "BUNDLE_LAKEBASE_PROJECT": resolve_bundle_var("lakebase_project"),
+    "BUNDLE_LAKEBASE_BRANCH": resolve_bundle_var("lakebase_branch"),
     "BUNDLE_LAKEBASE_INSTANCE": resolve_bundle_var("lakebase_instance_name"),
     "BUNDLE_CATALOG_NAME": resolve_bundle_var("catalog_name"),
     "BUNDLE_SCHEMA_NAME": resolve_bundle_var("schema_name"),
@@ -245,20 +247,31 @@ PGUSER=$(echo "$AUTH_JSON" | jq -r '.username // empty')
 success "Authenticated as: $PGUSER"
 
 # ---------------------------------------------------------------------------
-# 3. Resolve PGHOST from Lakebase instance
+# 3. Resolve PGHOST from Lakebase
 # ---------------------------------------------------------------------------
 section "Resolving Lakebase connection details"
 
+LAKEBASE_PROJECT="${BUNDLE_LAKEBASE_PROJECT:-}"
+LAKEBASE_BRANCH="${BUNDLE_LAKEBASE_BRANCH:-}"
 LAKEBASE_INSTANCE="${BUNDLE_LAKEBASE_INSTANCE:-}"
-[[ -z "$LAKEBASE_INSTANCE" ]] && error "No Lakebase instance could be resolved for target '$TARGET'."
-info "Instance: $LAKEBASE_INSTANCE"
 
-PGHOST=$(databricks database get-database-instance "$LAKEBASE_INSTANCE" \
-         --profile "$PROFILE" \
-         2>/dev/null | jq -r '.read_write_dns // empty') || true
+if [[ -n "$LAKEBASE_PROJECT" && -n "$LAKEBASE_BRANCH" ]]; then
+  info "Autoscaling project: $LAKEBASE_PROJECT"
+  info "Autoscaling branch: $LAKEBASE_BRANCH"
+  PGHOST=$(databricks api get "/api/2.0/postgres/projects/${LAKEBASE_PROJECT}/branches/${LAKEBASE_BRANCH}/endpoints" \
+           --profile "$PROFILE" \
+           --output json 2>/dev/null | jq -r '.endpoints[0].status.hosts.host // empty') || true
+elif [[ -n "$LAKEBASE_INSTANCE" ]]; then
+  info "Provisioned instance: $LAKEBASE_INSTANCE"
+  PGHOST=$(databricks database get-database-instance "$LAKEBASE_INSTANCE" \
+           --profile "$PROFILE" \
+           2>/dev/null | jq -r '.read_write_dns // empty') || true
+else
+  error "No Lakebase project/branch or legacy instance could be resolved for target '$TARGET'."
+fi
 
 if [[ -z "$PGHOST" || "$PGHOST" == "null" ]]; then
-  warn "Could not resolve PGHOST for instance '$LAKEBASE_INSTANCE'."
+  warn "Could not resolve PGHOST for the configured Lakebase connection."
   warn "The chat UI will start in ephemeral mode (no persistent chat history)."
   PGHOST=""
 else
@@ -286,7 +299,15 @@ set_env_value "DATABRICKS_CONFIG_PROFILE" "$PROFILE"
 [[ -n "$BUNDLE_UC_FUNCTION_NAMES" ]] && set_env_value "UC_FUNCTION_NAMES" "$BUNDLE_UC_FUNCTION_NAMES"
 [[ -n "$BUNDLE_SQL_WAREHOUSE_ID" ]] && set_env_value "SQL_WAREHOUSE_ID" "$BUNDLE_SQL_WAREHOUSE_ID"
 [[ -n "$BUNDLE_GENIE_SPACE_IDS" ]] && set_env_value "GENIE_SPACE_IDS" "$BUNDLE_GENIE_SPACE_IDS"
-[[ -n "$BUNDLE_LAKEBASE_INSTANCE" ]] && set_env_value "LAKEBASE_INSTANCE_NAME" "$BUNDLE_LAKEBASE_INSTANCE"
+if [[ -n "$BUNDLE_LAKEBASE_PROJECT" && -n "$BUNDLE_LAKEBASE_BRANCH" ]]; then
+  set_env_value "LAKEBASE_AUTOSCALING_PROJECT" "$BUNDLE_LAKEBASE_PROJECT"
+  set_env_value "LAKEBASE_AUTOSCALING_BRANCH" "$BUNDLE_LAKEBASE_BRANCH"
+  set_env_value "LAKEBASE_INSTANCE_NAME" ""
+elif [[ -n "$BUNDLE_LAKEBASE_INSTANCE" ]]; then
+  set_env_value "LAKEBASE_INSTANCE_NAME" "$BUNDLE_LAKEBASE_INSTANCE"
+  set_env_value "LAKEBASE_AUTOSCALING_PROJECT" ""
+  set_env_value "LAKEBASE_AUTOSCALING_BRANCH" ""
+fi
 [[ -n "$BUNDLE_EXPERIMENT_ID" ]] && set_env_value "MLFLOW_EXPERIMENT_ID" "$BUNDLE_EXPERIMENT_ID"
 
 if [[ -n "$PGHOST" ]]; then

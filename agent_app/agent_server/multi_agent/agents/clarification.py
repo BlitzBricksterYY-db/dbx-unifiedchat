@@ -134,6 +134,27 @@ def _emit_clarification_result(writer, result: str, content: str) -> None:
     )
 
 
+def _format_clarification_context_summary(
+    context_summary: str,
+    clarification_reason: str,
+    clarification_options: Optional[List[str]],
+    user_response: str,
+) -> str:
+    parts: List[str] = []
+    if context_summary:
+        parts.append(context_summary.strip())
+
+    parts.append(f"Clarification asked: {clarification_reason}")
+    if clarification_options:
+        options_text = " ".join(
+            f"{index}), {option.rstrip('.')}" for index, option in enumerate(clarification_options, 1)
+        )
+        parts.append(f"Clarification Options: {options_text}.")
+
+    parts.append(f"User answered: {user_response}")
+    return " — ".join(parts)
+
+
 def _get_cached_space_context(table_name: str, now: datetime) -> tuple[Optional[Dict[str, str]], Optional[float]]:
     cached_data = _space_context_cache.get("data")
     cached_table_name = _space_context_cache.get("table_name")
@@ -644,10 +665,11 @@ Use ## headings, **bold** keywords, and bullet lists. Be professional and helpfu
         print(f"[clarify] resumed with: {user_response!r}")
         turn = dict(turn)
         turn["triggered_clarification"] = True
-        turn["context_summary"] = (
-            f"{context_summary} — "
-            f"Clarification asked: {clarification_reason} — "
-            f"User answered: {user_response}"
+        turn["context_summary"] = _format_clarification_context_summary(
+            context_summary=context_summary,
+            clarification_reason=clarification_reason,
+            clarification_options=clarification_options,
+            user_response=user_response,
         )
         return {
             "current_turn": turn,

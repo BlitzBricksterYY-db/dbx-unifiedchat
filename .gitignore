@@ -1,5 +1,7 @@
 # Environment and Secrets
 .env
+.env.example
+agent_app/.env.example
 .databricks
 
 # Python
@@ -59,9 +61,8 @@ data/
 *.json.local
 test_results.json
 
-# Agent files (auto-generated from notebook)
+# Agent backup files
 agent.py.bak
-Notebooks/agent.py.bak
 
 # Temporary files
 *.tmp
@@ -89,3 +90,7 @@ assets/
 mlflow.db
 src/mlflow.db
 .langgraph_api/
+
+# AI tooling metadata
+.cursor/
+.claude/

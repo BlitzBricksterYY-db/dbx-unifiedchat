@@ -20,8 +20,10 @@ import { InteractiveChart } from './interactive-chart';
 import { useMessageId } from './message-context';
 import {
   createBuilderStateFromChart,
+  getChartBuilderUiConfig,
   getWorkspaceFields,
   materializeChartSpecFromBuilder,
+  normalizeBuilderStateForChartType,
   validateBuilderState,
   type ChartBuilderState,
   type ChartSpec,
@@ -259,11 +261,18 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
   const openBuilder = (chartIndex: number, mode: 'replace' | 'add') => {
     const chart = charts[chartIndex] ?? charts[0];
     setBuilderChartIndex(chartIndex);
-    setBuilderState(createBuilderStateFromChart(chart, hydratedWorkspace, mode));
+    setBuilderState(
+      normalizeBuilderStateForChartType(
+        createBuilderStateFromChart(chart, hydratedWorkspace, mode),
+        getWorkspaceFields(hydratedWorkspace),
+      ),
+    );
     setBuilderOpen(true);
   };
 
   const applyBuilder = () => {
+    const validation = validateBuilderState(builderState, hydratedWorkspace);
+    if (!validation.valid) return;
     const nextChart = materializeChartSpecFromBuilder(
       hydratedWorkspace,
       builderState,
@@ -540,6 +549,7 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
         builderState={builderState}
         setBuilderState={setBuilderState}
         fields={getWorkspaceFields(hydratedWorkspace)}
+        validation={validateBuilderState(builderState, hydratedWorkspace)}
         onOpenChange={setBuilderOpen}
         onApply={applyBuilder}
       />
@@ -620,6 +630,7 @@ function ChartBuilderSheet({
   builderState,
   setBuilderState,
   fields,
+  validation,
   onOpenChange,
   onApply,
 }: {
@@ -628,17 +639,30 @@ function ChartBuilderSheet({
   builderState: ChartBuilderState;
   setBuilderState: React.Dispatch<React.SetStateAction<ChartBuilderState>>;
   fields: ReturnType<typeof getWorkspaceFields>;
+  validation: ReturnType<typeof validateBuilderState>;
   onOpenChange: (open: boolean) => void;
   onApply: () => void;
 }) {
   const dimensionFields = fields.filter((field) => field.kind !== 'numeric' || field.role === 'dimension' || field.role === 'time');
   const numericFields = fields.filter((field) => field.kind === 'numeric' && field.role !== 'id');
+  const ui = getChartBuilderUiConfig(builderState.chartType);
+  const xAxisFields = ui.xAxisKind === 'numeric'
+    ? numericFields
+    : (dimensionFields.length ? [...dimensionFields, ...numericFields] : numericFields);
+  const groupByFields = dimensionFields.filter((field) => field.name !== builderState.xAxisField);
+  const selectedXAxisField = fields.find((field) => field.name === builderState.xAxisField);
+  const showNumericBins = selectedXAxisField?.kind === 'numeric' && builderState.chartType !== 'scatter';
 
   const updateBuilder = <Key extends keyof ChartBuilderState>(
     key: Key,
     value: ChartBuilderState[Key],
   ) => {
-    setBuilderState((current) => ({ ...current, [key]: value }));
+    setBuilderState((current) => {
+      const next = { ...current, [key]: value };
+      return key === 'chartType' || key === 'xAxisField'
+        ? normalizeBuilderStateForChartType(next, fields)
+        : next;
+    });
   };
 
   return (
@@ -714,16 +738,33 @@ function ChartBuilderSheet({
                   <FieldSelect
                     value={builderState.xAxisField}
                     onChange={(value) => updateBuilder('xAxisField', value)}
-                    fields={dimensionFields.length ? fields : numericFields}
+                    fields={xAxisFields}
                   />
                 </BuilderRow>
-                <BuilderRow label="Y axis">
+                {showNumericBins && (
+                <BuilderRow label="Numeric bins">
+                  <Input
+                    type="number"
+                    min={2}
+                    max={100}
+                    value={builderState.xAxisBinCount ?? ''}
+                    placeholder="No bucketing"
+                    onChange={(event) =>
+                      updateBuilder('xAxisBinCount', event.target.value ? Number(event.target.value) : null)
+                    }
+                  />
+                </BuilderRow>
+                )}
+                {ui.showYAxis && (
+                <BuilderRow label={ui.yAxisLabel}>
                   <FieldSelect
                     value={builderState.yAxisField}
                     onChange={(value) => updateBuilder('yAxisField', value)}
                     fields={numericFields}
                   />
                 </BuilderRow>
+                )}
+                {ui.showSecondaryYAxis && (
                 <BuilderRow label="Secondary Y axis">
                   <FieldSelect
                     value={builderState.secondaryYAxisField}
@@ -732,15 +773,19 @@ function ChartBuilderSheet({
                     allowEmpty
                   />
                 </BuilderRow>
-                <BuilderRow label="Breakdown / Color">
+                )}
+                {ui.showGroupBy && (
+                <BuilderRow label={ui.groupByLabel}>
                   <FieldSelect
                     value={builderState.groupByField}
                     onChange={(value) => updateBuilder('groupByField', value)}
-                    fields={dimensionFields}
+                    fields={groupByFields}
                     allowEmpty
                   />
                 </BuilderRow>
-                <BuilderRow label="Size">
+                )}
+                {ui.showZAxis && (
+                <BuilderRow label={ui.zAxisLabel}>
                   <FieldSelect
                     value={builderState.zAxisField}
                     onChange={(value) => updateBuilder('zAxisField', value)}
@@ -748,9 +793,11 @@ function ChartBuilderSheet({
                     allowEmpty
                   />
                 </BuilderRow>
+                )}
               </BuilderSection>
 
               <BuilderSection title="Data">
+                {ui.showAggregation && (
                 <BuilderRow label="Aggregation">
                   <select
                     value={builderState.aggregation}
@@ -764,6 +811,8 @@ function ChartBuilderSheet({
                     <option value="max">Max</option>
                   </select>
                 </BuilderRow>
+                )}
+                {ui.showTimeBucket && (
                 <BuilderRow label="Time grain">
                   <select
                     value={builderState.timeBucket}
@@ -778,6 +827,8 @@ function ChartBuilderSheet({
                     <option value="year">Year</option>
                   </select>
                 </BuilderRow>
+                )}
+                {ui.showTopN && (
                 <BuilderRow label="Top N">
                   <Input
                     type="number"
@@ -788,6 +839,8 @@ function ChartBuilderSheet({
                     }
                   />
                 </BuilderRow>
+                )}
+                {ui.showSort && (
                 <BuilderRow label="Sort">
                   <select
                     value={builderState.sortDirection}
@@ -798,6 +851,7 @@ function ChartBuilderSheet({
                     <option value="desc">Descending</option>
                   </select>
                 </BuilderRow>
+                )}
               </BuilderSection>
 
               <BuilderSection title="Style">
@@ -843,11 +897,13 @@ function ChartBuilderSheet({
                   checked={builderState.showGridLines}
                   onChange={(checked) => updateBuilder('showGridLines', checked)}
                 />
+                {ui.showSmoothLines && (
                 <ToggleRow
                   label="Smooth lines"
                   checked={builderState.smoothLines}
                   onChange={(checked) => updateBuilder('smoothLines', checked)}
                 />
+                )}
                 <ToggleRow
                   label="Title"
                   checked={builderState.showTitle}
@@ -881,11 +937,16 @@ function ChartBuilderSheet({
           </div>
 
           <div className="border-t border-zinc-200 px-5 py-4 dark:border-zinc-800">
+            {!validation.valid && (
+              <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200">
+                {validation.issues[0]}
+              </div>
+            )}
             <div className="flex items-center justify-end gap-2">
               <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
                 Cancel
               </Button>
-              <Button type="button" onClick={onApply}>
+              <Button type="button" onClick={onApply} disabled={!validation.valid}>
                 Apply chart
               </Button>
             </div>

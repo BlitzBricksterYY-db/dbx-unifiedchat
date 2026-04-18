@@ -1,7 +1,16 @@
-# NOTE: Deprecated in favor of /agent_app/workflows/04_prepare_shared_infra.py for Lakebase creation and grant permissions
+# NOTE: Deprecated in favor of /agent_app/workflows/04_prepare_shared_infra.py for lakebase creation and grant permissions
+
 
 # resources:
-#   database_instances:
+#   # A postgres project is the Lakebase Autoscaling top-level bundle resource.
+#   # `var.lakebase_branch` in `databricks.yml` is still the branch the app and
+#   # shared-infra workflow target at runtime, but we only declare the project
+#   # here because Databricks auto-creates the default `production` branch and
+#   # read-write endpoint. If the bundle later needs to manage a non-production
+#   # branch declaratively, it should add matching `postgres_branches` and
+#   # `postgres_endpoints` resources together.
+#   postgres_projects:
 #     app_state_db:
-#       name: ${var.lakebase_instance_name}
-#       capacity: ${var.lakebase_capacity}
+#       project_id: ${var.lakebase_project}
+#       display_name: ${var.lakebase_project}
+#       pg_version: ${var.lakebase_pg_version}

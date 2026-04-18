@@ -1,100 +1,90 @@
 # Development Guide
 
-This guide covers the three supported development workflows for the Multi-Agent Genie System. Choose the workflow that best fits your current task.
+This repository now supports one application workflow: build, test, and deploy
+from `agent_app/`.
 
-## Workflow 1: Local Development (Fastest Iteration)
+## Workflow 1: Local App Development
 
-Best for: Writing unit tests, modifying single agent logic, fast iteration without deploying.
+Use this when iterating on backend logic, frontend behavior, or local Databricks
+integration.
 
 ### Setup
 
 ```bash
-# Setup virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+cd agent_app
 
-# Setup pre-commit hooks for code quality
-pip install pre-commit
-pre-commit install
-```
+# Prepare the local virtualenv and install dev dependencies
+uv sync --dev
 
-### Configuration
-
-Copy the example environment file and fill in your values:
-
-```bash
+# Create local config from the example if needed
 cp .env.example .env
-# Edit .env with your credentials and resource IDs
 ```
 
-### Testing & Running
-
-```bash
-# Test individual modules
-pytest tests/unit/test_planning_agent.py -v
-
-# Test full system locally
-python src/multi_agent/main.py
-```
-
-## Workflow 2: Databricks Notebook Dev (Real Services)
-
-Best for: Integration testing, debugging with real Databricks services (Genie, Vector Search, Lakebase) before deployment.
-
-### 1. Sync code to Databricks
-We recommend using Databricks Repos to keep your Databricks workspace synced with your git repository:
-```bash
-databricks repos update <repo-id>
-```
-
-### 2. Configuration
-The notebook tests use `dev_config.yaml`. Make sure your variables in this file point to your development/sandbox resources.
-
-### 3. Run Notebooks
-Open the Databricks UI, navigate to the synced repo, and run:
-1. `Notebooks/test_agent_databricks.py`
-2. Iterate on `src/multi_agent/` code (changes will auto-reload if using `%autoreload 2`)
-3. Debug directly against real services without packaging the model.
-
-## Workflow 3: Production Deployment (CI/CD)
-
-Best for: Final deployment to Model Serving endpoints.
-
-### Method A: Via GitHub Actions (Recommended)
-
-Our CI/CD pipeline automatically runs tests and deploys based on branch pushes.
-
-1. **Deploy to Dev**:
-   ```bash
-   git checkout develop
-   git commit -m "feat: add new agent"
-   git push  # Auto-runs tests, validates bundle, and deploys to dev workspace
-   ```
-
-2. **Deploy to Prod**:
-   ```bash
-   # Create a Pull Request to main branch
-   # Once merged:
-   # Auto-runs tests, validates bundle, and deploys to prod workspace
-   ```
-
-### Method B: Via CLI (Manual)
-
-If you need to deploy manually using the Databricks Asset Bundle (DAB):
+### Recommended commands
 
 ```bash
 cd agent_app
 
-# Validate the canonical app bundle
-databricks bundle validate -t dev
+# One-shot local startup
+./scripts/dev-local.sh
 
-# Run prep-only flow
-./scripts/deploy.sh --target dev --prep-only
+# Hot reload during active development
+./scripts/dev-local-hot-reload.sh
 
-# Full deploy to Dev
-./scripts/deploy.sh --target dev --full-deploy --run
-
-# Full deploy to Prod
-./scripts/deploy.sh --target prod --full-deploy --run
+# Run tests
+uv run pytest tests/ -v
 ```
+
+### When to use this workflow
+
+- updating agent behavior in `agent_app/agent_server/`
+- working on the app UI in `agent_app/e2e-chatbot-app-next/`
+- validating bundle-derived local settings in `agent_app/.env`
+
+## Workflow 2: Deployment and Validation
+
+Use this when you need to prepare metadata, reconcile shared infra, or deploy the
+Databricks App.
+
+### Local or CI deploy
+
+```bash
+cd agent_app
+
+# Prep metadata and shared infra
+./scripts/deploy.sh --target dev --run-job prep
+
+# Full deploy and start the app
+./scripts/deploy.sh --target dev --run-job full --start-app
+```
+
+### Workspace-native operator flow
+
+If you want to drive deploys from Databricks:
+
+1. open `agent_app/scripts/deploy_notebook.py`
+2. set the target and deploy mode
+3. run the preflight cells
+4. execute the printed `./scripts/deploy.sh ...` command in the Databricks web terminal
+
+### CI/CD
+
+GitHub Actions now validates and deploys the same bundle from `agent_app/`:
+
+- run tests in `agent_app/tests/`
+- validate `agent_app/databricks.yml`
+- deploy `dev` from `develop`
+- deploy `prod` from `main`
+
+## Current source of truth
+
+The supported project surfaces are:
+
+- `agent_app/databricks.yml`
+- `agent_app/resources/*.yml`
+- `agent_app/scripts/deploy.sh`
+- `agent_app/scripts/dev-local.sh`
+- `agent_app/scripts/dev-local-hot-reload.sh`
+
+The previous root-level Model Serving workflow has been removed from this
+repository.

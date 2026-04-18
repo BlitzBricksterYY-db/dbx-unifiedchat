@@ -111,7 +111,7 @@ graph TB
     EnrichedTable -.chunks.-> VSIndex
     
     %% MLflow Integration
-    MLflow[MLflow<br/>Logging & Model Serving]
+    MLflow[MLflow<br/>Tracing & Runtime Integration]
     SuperAgent -.logs & deploys.-> MLflow
     PlanningAgent -.logs.-> MLflow
     SQLTableAgent -.logs.-> MLflow

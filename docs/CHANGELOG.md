@@ -8,33 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Repository reorganization for public release
-- Modular code structure in `src/multi_agent/`
-- Three workflows for development, testing, and deployment
-- Comprehensive documentation with 6 README files
-- ETL pipeline with three workflows
-- Local testing capabilities for ETL and agents
-- `notebooks/test_agent_databricks.py` for Databricks testing
-- `notebooks/deploy_agent.py` (renamed from Super_Agent_hybrid.py)
-- Unified code structure using MLflow `code_paths`
+- `agent_app/tests/README.md` for the supported test workflow
 
 ### Changed
-- Renamed `kumc_agent` → `multi_agent` (generalized naming)
-- Simplified deployment notebook from 6,833 lines to ~200-300 lines
-- Organized architecture diagrams in `docs/architecture/`
-- Improved configuration management (three systems)
-- Updated test organization with unit/integration/e2e structure
+- Simplified the repository to a single supported app workflow rooted in `agent_app/`
+- Updated CI and pre-commit to validate the supported `agent_app` test surface
+- Rewrote top-level docs around the Databricks App bundle and local app development
 
 ### Removed
-- 148+ outdated markdown files (session notes, summaries)
-- Duplicate agent files and old versions
-- Temporary test and verification scripts
-- Instructions/ directory (old notes)
+- Root-level Model Serving deployment path
+- Legacy `src/`, `Notebooks/`, and root `tests/` directories
+- Root packaging and setup files tied only to the removed workflow
+- Obsolete helper scripts such as `dab_*`, local LangGraph entrypoints, and upload helpers
 
 ### Security
-- All sensitive data in `.env` (gitignored)
-- Configuration best practices documented
-- Secrets management guide for YAML configs
+- Local secrets remain isolated to `agent_app/.env`
 
 ## [1.0.0] - Initial Public Release
 
@@ -62,8 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Vector Search for metadata
 - Databricks Genie integration
 - Lakebase for state management
-- MLflow for model tracking and deployment
-- Model Serving for production deployment
+- MLflow for tracing and runtime integration
 
 ---
 

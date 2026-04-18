@@ -25,8 +25,10 @@ _WIDGET_DEFAULTS = {
     "target": "dev",
     "catalog_name": "",
     "schema_name": "",
+    "volume_name": "",
     "sql_warehouse_id": "",
-    "lakebase_instance_name": "",
+    "lakebase_project": "",
+    "lakebase_branch": "",
     "experiment_id": "",
 }
 
@@ -43,7 +45,14 @@ def ensure_experiment(
     *,
     target: str,
     experiment_id: Optional[str],
+    catalog_name: Optional[str],
+    schema_name: Optional[str],
+    volume_name: Optional[str],
 ):
+    artifact_location = None
+    if catalog_name and schema_name and volume_name:
+        artifact_location = f"dbfs:/Volumes/{catalog_name}/{schema_name}/{volume_name}"
+
     if experiment_id:
         experiment = mlflow.get_experiment(experiment_id)
         if experiment is not None:
@@ -57,7 +66,10 @@ def ensure_experiment(
     experiment_name = f"/Users/{user_name}/multi-agent-genie-{target}"
     experiment = mlflow.get_experiment_by_name(experiment_name)
     if experiment is None:
-        created_id = mlflow.create_experiment(experiment_name)
+        create_kwargs = {}
+        if artifact_location:
+            create_kwargs["artifact_location"] = artifact_location
+        created_id = mlflow.create_experiment(experiment_name, **create_kwargs)
         experiment = mlflow.get_experiment(created_id)
         print(
             "Created fallback MLflow experiment for validation: "
@@ -84,8 +96,10 @@ print(f"compute_status: {compute_status or '<unknown>'}")
 print(f"status: {app_status or '<unknown>'}")
 print(f"catalog_name: {params['catalog_name'] or '<unset>'}")
 print(f"schema_name: {params['schema_name'] or '<unset>'}")
+print(f"volume_name: {params['volume_name'] or '<unset>'}")
 print(f"sql_warehouse_id: {params['sql_warehouse_id'] or '<unset>'}")
-print(f"lakebase_instance_name: {params['lakebase_instance_name'] or '<unset>'}")
+print(f"lakebase_project: {params['lakebase_project'] or '<unset>'}")
+print(f"lakebase_branch: {params['lakebase_branch'] or '<unset>'}")
 
 if not sp_client_id:
     raise RuntimeError("App validation failed: missing service principal client ID.")
@@ -97,7 +111,12 @@ experiment = ensure_experiment(
     w,
     target=target,
     experiment_id=params["experiment_id"] or None,
+    catalog_name=params["catalog_name"] or None,
+    schema_name=params["schema_name"] or None,
+    volume_name=params["volume_name"] or None,
 )
 print(f"mlflow_experiment: {experiment.name} ({experiment.experiment_id})")
+if getattr(experiment, "artifact_location", None):
+    print(f"artifact_location: {experiment.artifact_location}")
 
 print("\nApp deployment validation passed.")

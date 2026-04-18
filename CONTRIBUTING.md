@@ -20,14 +20,13 @@ This repository has two active workflows:
    cd dbx-unifiedchat
    ```
 
-2. Create a virtual environment and install the project with development dependencies:
+2. Install the app workspace dependencies:
    ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -e ".[dev]"
+   cd agent_app
+   uv sync --dev
    ```
 
-3. If your change touches Databricks integration, deployment, or app runtime, review the setup notes in `README.md` and `tests/README.md` before testing.
+3. If your change touches Databricks integration, deployment, or app runtime, review the setup notes in `README.md` and `agent_app/tests/README.md` before testing.
 
 4. For app-specific work, use the `agent_app/` workflow described in the repository README.
 
@@ -56,17 +55,15 @@ This repository has two active workflows:
 - Include type annotations for public functions.
 - Keep changes focused and easy to review.
 - Update documentation when behavior, configuration, or workflows change.
-- Follow the formatting and line-length settings in `pyproject.toml` (100 characters).
+- Follow the formatting and line-length settings in `agent_app/pyproject.toml` where applicable.
 
 ## Linting
 
-This repository uses `black`, `isort`, `flake8`, and `mypy`.
+This repository uses `black`, `flake8`, and the app-local test runner workflow.
 
 ```bash
-black .
-isort .
-flake8 .
-mypy src/multi_agent
+black agent_app etl
+flake8 agent_app
 ```
 
 ## Testing
@@ -74,22 +71,11 @@ mypy src/multi_agent
 Run the tests that match the scope of your change:
 
 ```bash
-# Root integration and end-to-end tests
-pytest tests/
-
-# App-specific tests
-pytest agent_app/tests/
-
-# Marker-based subsets
-pytest -m unit
-pytest -m integration
-pytest -m e2e
-
-# Coverage
-pytest --cov=src/multi_agent tests/
+cd agent_app
+uv run pytest tests/ -v
 ```
 
-Databricks workspace access is required for integration and end-to-end testing.
+Some tests require Databricks-aware configuration or access to workspace services.
 
 ## Pull Request Process
 
@@ -103,7 +89,7 @@ Databricks workspace access is required for integration and end-to-end testing.
 ## Security
 
 - Never commit credentials, tokens, or other secrets.
-- Use `.env.example` as the starting point for local configuration.
+- Use `agent_app/.env.example` as the starting point for local configuration.
 - Report security issues through coordinated disclosure. Do not use public issues or pull requests for vulnerabilities; see `SECURITY.md` and contact `security@databricks.com`.
 
 ## License

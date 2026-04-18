@@ -27,8 +27,8 @@ class NotebookDeployConfig:
     profile: str | None = None
     start_app: bool = False
     sync_workspace: bool = False
-    job_to_run: str | None = "full"
-    bundle_app_key: str = "agent_migration"
+    run_job: str | None = "full"
+    bundle_app_key: str = "dbx_unifiedchat_agent_app"
 
     @property
     def app_name(self) -> str:
@@ -83,7 +83,10 @@ def resolve_app_name(project_dir: Path, *, target: str, bundle_app_key: str) -> 
     if not raw_name:
         return f"dbx-unifiedchat-app-{target}"
     if isinstance(raw_name, str):
-        return raw_name.replace("${bundle.target}", target)
+        resolved_name = raw_name.replace("${bundle.target}", target)
+        if resolved_name == "${var.app_name}":
+            return resolve_bundle_var(project_dir, target, "app_name") or resolved_name
+        return resolved_name
     return str(raw_name)
 
 
@@ -119,6 +122,8 @@ def bundle_settings(project_dir: Path, target: str) -> dict[str, str | None]:
         "data_catalog_name": resolved.data_catalog_name,
         "data_schema_name": resolved.data_schema_name,
         "sql_warehouse_id": resolved.warehouse_id,
+        "lakebase_project": resolved.project,
+        "lakebase_branch": resolved.branch,
         "lakebase_instance_name": resolved.instance_name,
         "database_name": resolved.database_name,
         "genie_space_ids": ",".join(resolved.genie_space_ids or []),
@@ -220,7 +225,7 @@ def print_preflight_report(config: NotebookDeployConfig, report: PreflightReport
     print(f"  profile: {config.profile or '<workspace auth>'}")
     print(f"  effective_profile: {report.effective_profile or '<workspace auth>'}")
     print(f"  app_name: {config.app_name}")
-    print(f"  job_to_run: {config.job_to_run or '<none>'}")
+    print(f"  run_job: {config.run_job or '<none>'}")
     print(f"  sync_workspace: {config.sync_workspace}")
     print(f"  start_app: {config.start_app}")
     print()
@@ -251,8 +256,8 @@ def build_deploy_command(config: NotebookDeployConfig) -> str:
         command.extend(["--profile", config.profile])
     if config.sync_workspace:
         command.append("--sync-workspace")
-    if config.job_to_run:
-        command.extend(["--run-job", config.job_to_run])
+    if config.run_job:
+        command.extend(["--run-job", config.run_job])
     if config.start_app:
         command.append("--start-app")
     return _render_command(command)
@@ -271,13 +276,13 @@ def print_terminal_handoff(config: NotebookDeployConfig) -> None:
     print(f"  {build_deploy_command(config)}")
     print()
     print("Notes")
-    print(f"  - job_to_run widget     -> {config.job_to_run or '<none>'}")
+    print(f"  - run_job widget        -> {config.run_job or '<none>'}")
     print(f"  - sync_workspace widget -> {config.sync_workspace}")
     print(f"  - start_app widget      -> {config.start_app}")
     print("  - --skip-bootstrap is included for the Databricks web terminal flow")
-    print("  - use `prep`, `full`, or a bundle job key for `job_to_run`")
+    print("  - use `meta`, `infra`, `prep`, `val`, or `full` for `run_job`")
     print(
-        "  - discover raw job keys with: "
+        "  - discover exact job keys and descriptions with: "
         f"./scripts/deploy.sh --target {shlex.quote(config.target)} --skip-bootstrap --list-jobs"
     )
     print()
@@ -299,9 +304,11 @@ def bootstrap_lakebase_role(
     fail_ok: bool,
 ) -> list[tuple[str, bool, str | None]]:
     settings = bundle_settings(config.project_dir, config.target)
+    project = settings["lakebase_project"]
+    branch = settings["lakebase_branch"]
     instance_name = settings["lakebase_instance_name"]
-    if not instance_name:
-        print("Skipping Lakebase bootstrap: no lakebase_instance_name resolved.")
+    if not (instance_name or (project and branch)):
+        print("Skipping Lakebase bootstrap: no Lakebase connection resolved.")
         return []
 
     effective_profile = resolve_effective_profile(
@@ -314,7 +321,10 @@ def bootstrap_lakebase_role(
         )
         return []
 
-    print(f"Bootstrapping Lakebase role ({phase}) in {instance_name}...")
+    if project and branch:
+        print(f"Bootstrapping Lakebase role ({phase}) in project={project}, branch={branch}...")
+    else:
+        print(f"Bootstrapping Lakebase role ({phase}) in {instance_name}...")
     workspace_client = _workspace_client(effective_profile)
     results: list[tuple[str, bool, str | None]] = []
     for memory_type in ("langgraph-short-term", "langgraph-long-term"):
