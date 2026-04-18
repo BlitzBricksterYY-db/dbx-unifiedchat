@@ -403,7 +403,7 @@ class AgentConfig:
                 "Expected alphanumeric string (e.g., '148ccb90800933a1')"
             )
         
-        # Check Lakebase (critical for distributed Model Serving)
+        # Check Lakebase (critical for distributed deployed runtimes)
         if self.lakebase.project and not self.lakebase.branch:
             raise ValueError("LAKEBASE_BRANCH cannot be empty when LAKEBASE_PROJECT is set")
 
@@ -465,7 +465,7 @@ class AgentConfig:
         print(f"  Genie Space IDs: {len(self.table_metadata.genie_space_ids)} spaces")
         for i, sid in enumerate(self.table_metadata.genie_space_ids, 1):
             print(f"    {i}. {sid}")
-        print(f"\nModel Serving:")
+        print(f"\nRuntime Compatibility:")
         print(f"  Model Name: {self.model_serving.model_name}")
         print(f"  Endpoint Name: {self.model_serving.endpoint_name}")
         print(f"  Workload Size: {self.model_serving.workload_size}")
@@ -483,12 +483,12 @@ _config: Optional[AgentConfig] = None
 
 
 def is_databricks_apps() -> bool:
-    """Detect if running as a Databricks App (not Model Serving)."""
+    """Detect if running as a Databricks App."""
     return bool(os.environ.get("DATABRICKS_APP_NAME"))
 
 
 def is_databricks() -> bool:
-    """Detect if running on Databricks (Notebook, Job, or Model Serving) but NOT Apps."""
+    """Detect if running on Databricks compute outside the Databricks App runtime."""
     if is_databricks_apps():
         return False
     return (

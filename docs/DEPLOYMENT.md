@@ -113,7 +113,4 @@ GitHub Actions should deploy from the same place humans do:
 - Keep `project_dir` pointed at `agent_app`.
 - Treat the notebook as a control plane only; run the printed deploy command in the web terminal.
 
-## Legacy Notes
-
-The older Model Serving deployment materials remain as historical reference only.
-They are not part of the supported app deployment path.
+The previous root-level Model Serving deployment materials have been removed.

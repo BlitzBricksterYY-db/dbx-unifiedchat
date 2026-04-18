@@ -143,8 +143,8 @@ After successful ETL run, you should have:
 ## Configuration
 
 ETL uses the same configuration as the agent system:
-- **Databricks**: Uses `dev_config.yaml` or `prod_config.yaml`
-- **Local**: Uses `config.py` + `.env`
+- **Databricks/App bundle**: Uses `agent_app/databricks.yml`
+- **Local**: Uses `agent_app/.env` together with bundle-derived defaults
 
 Key configuration values:
 - `CATALOG_NAME`: Unity Catalog catalog name

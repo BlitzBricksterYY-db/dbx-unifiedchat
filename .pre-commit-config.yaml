@@ -3,20 +3,20 @@ repos:
     rev: 23.12.1
     hooks:
       - id: black
-        files: ^(src/|tests/|Notebooks/)
+        files: ^(agent_app/|etl/).+\.py$
   
   - repo: https://github.com/pycqa/flake8
     rev: 7.0.0
     hooks:
       - id: flake8
-        args: [--max-line-length=120]
-        files: ^(src/|tests/)
+        args: [--max-line-length=100]
+        files: ^agent_app/.+\.py$
   
   - repo: local
     hooks:
       - id: pytest-unit
-        name: Run unit tests
-        entry: pytest tests/ -m unit -v
+        name: Run app tests
+        entry: bash -lc 'cd agent_app && uv run pytest tests/ -v'
         language: system
         pass_filenames: false
         always_run: true

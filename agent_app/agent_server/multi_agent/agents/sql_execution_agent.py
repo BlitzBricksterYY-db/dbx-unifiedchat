@@ -7,7 +7,7 @@ using Databricks SQL Warehouse.
 PRODUCTION-READY DESIGN:
 - Uses databricks-sql-connector with unified authentication (Config + credentials_provider)
 - Automatically handles OAuth credentials when deployed with registered resources
-- Supports both development (notebook) and production (Model Serving) environments
+- Supports both development and deployed app environments
 
 AUTHENTICATION WITH AUTOMATIC PASSTHROUGH:
 When you register resources during agent deployment:
@@ -21,7 +21,7 @@ When you register resources during agent deployment:
 Databricks automatically:
 1. Creates a service principal for your agent
 2. Manages OAuth token generation and rotation
-3. Injects credentials into the Model Serving environment
+3. Injects credentials into the runtime environment
 
 The Config() class automatically reads workspace host and injected OAuth credentials,
 eliminating the need for manual DATABRICKS_HOST/DATABRICKS_TOKEN configuration.
@@ -30,7 +30,7 @@ Reference: https://docs.databricks.com/generative-ai/agent-framework/agent-authe
 
 LEGACY MANUAL AUTHENTICATION (if not using automatic passthrough):
 If you're not using resource registration, you can still manually configure:
-- DATABRICKS_HOST and DATABRICKS_TOKEN via Model Serving environment variables
+- DATABRICKS_HOST and DATABRICKS_TOKEN via environment variables
 - Config() will still read them from the environment
 """
 
@@ -48,7 +48,7 @@ class SQLExecutionAgent:
     PRODUCTION-READY DESIGN:
     - Uses databricks-sql-connector with unified authentication (Config + credentials_provider)
     - Automatically handles OAuth credentials when deployed with registered resources
-    - Supports both development (notebook) and production (Model Serving) environments
+    - Supports both development and deployed app environments
     
     AUTHENTICATION WITH AUTOMATIC PASSTHROUGH:
     When you register resources during agent deployment:
@@ -62,7 +62,7 @@ class SQLExecutionAgent:
     Databricks automatically:
     1. Creates a service principal for your agent
     2. Manages OAuth token generation and rotation
-    3. Injects credentials into the Model Serving environment
+    3. Injects credentials into the runtime environment
     
     The Config() class automatically reads workspace host and injected OAuth credentials,
     eliminating the need for manual DATABRICKS_HOST/DATABRICKS_TOKEN configuration.
@@ -71,7 +71,7 @@ class SQLExecutionAgent:
     
     LEGACY MANUAL AUTHENTICATION (if not using automatic passthrough):
     If you're not using resource registration, you can still manually configure:
-    - DATABRICKS_HOST and DATABRICKS_TOKEN via Model Serving environment variables
+    - DATABRICKS_HOST and DATABRICKS_TOKEN via environment variables
     - Config() will still read them from the environment
     """
     
@@ -164,10 +164,10 @@ class SQLExecutionAgent:
         2. Connection Resilience: Configures timeouts and retry logic for transient failures
         3. Proper Error Handling: Categorizes errors for better production debugging
         4. ANSI SQL Mode: Ensures consistent SQL behavior across environments
-        5. Model Serving Compatible: Works without Spark session via REST API
+        5. App Runtime Compatible: Works without Spark session via REST API
         
         Connection Configuration:
-        - Socket timeout: 900s (balances Model Serving 297s limit with warehouse query time)
+        - Socket timeout: 900s (balances app/runtime request limits with warehouse query time)
         - HTTP retries: 30 attempts with exponential backoff (1-60s)
         - Session config: ANSI mode enabled for SQL compliance
         
@@ -223,7 +223,7 @@ class SQLExecutionAgent:
         try:
             # Step 3: Initialize Databricks Config for unified authentication
             # BEST PRACTICE: Config() automatically reads workspace host and OAuth credentials
-            # - In Model Serving with automatic passthrough: reads injected service principal credentials
+            # - In deployed runtimes with automatic passthrough: reads injected service principal credentials
             # - In notebooks: reads from notebook context or environment variables
             # - With manual config: reads DATABRICKS_HOST and DATABRICKS_TOKEN from environment
             cfg = Config()
@@ -247,7 +247,7 @@ class SQLExecutionAgent:
                 session_configuration={
                     "ansi_mode": "true"  # Enable ANSI SQL compliance for consistent behavior
                 },
-                socket_timeout=900,  # 15 minutes - Model Serving has 297s limit, warehouse queries can be longer
+                socket_timeout=900,  # 15 minutes to accommodate longer warehouse queries
                 http_retry_delay_min=1,  # Minimum retry delay in seconds
                 http_retry_delay_max=60,  # Maximum retry delay in seconds
                 http_retry_max_redirects=5,  # Max HTTP redirects

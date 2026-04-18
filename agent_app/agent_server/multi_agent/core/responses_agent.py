@@ -95,13 +95,13 @@ _performance_metrics = {
 
 class SuperAgentHybridResponsesAgent(ResponsesAgent):
     """
-    Enhanced ResponsesAgent with both short-term and long-term memory for distributed Model Serving.
+    Enhanced ResponsesAgent with both short-term and long-term memory for the app runtime.
     
     Features:
     - Short-term memory (CheckpointSaver): Multi-turn conversations within a session
     - Long-term memory (DatabricksStore): User preferences across sessions with semantic search
     - Connection pooling and automatic credential rotation
-    - Works seamlessly in distributed Model Serving (multiple instances)
+    - Works across distributed runtime instances
     
     Memory Architecture:
     - Short-term: Stored per thread_id in Lakebase checkpoints table
@@ -256,7 +256,7 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
         """Extract user_id from request context.
         
         Priority:
-        1. Use user_id from chat context (preferred for Model Serving)
+        1. Use user_id from chat context (preferred in deployed runtimes)
         2. Use user_id from custom_inputs
         """
         if request.context and getattr(request.context, "user_id", None):
@@ -451,7 +451,7 @@ class SuperAgentHybridResponsesAgent(ResponsesAgent):
         Yields:
             ResponsesAgentStreamEvent for each step in the workflow
             
-        Usage in Model Serving (ALL scenarios use same format):
+        Usage in the deployed invocation runtime (all scenarios use the same format):
             # First query in a conversation
             POST /invocations
             {

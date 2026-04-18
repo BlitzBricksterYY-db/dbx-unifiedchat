@@ -1,8 +1,5 @@
 """
-Migrated multi-agent Genie system — async @invoke/@stream entry point.
-
-Converted from SuperAgentHybridResponsesAgent (Model Serving) to
-MLflow GenAI Server decorated functions (Databricks Apps).
+Multi-agent Genie system async @invoke/@stream entry point for Databricks Apps.
 """
 
 import atexit
