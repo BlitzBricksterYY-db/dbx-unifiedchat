@@ -198,6 +198,141 @@ export type ChartBuilderState = {
   showDescription: boolean;
 };
 
+export type ChartBuilderUiConfig = {
+  xAxisKind: 'dimension' | 'numeric' | 'any';
+  showYAxis: boolean;
+  yAxisLabel: string;
+  showSecondaryYAxis: boolean;
+  showGroupBy: boolean;
+  groupByLabel: string;
+  showZAxis: boolean;
+  zAxisLabel: string;
+  showAggregation: boolean;
+  showTimeBucket: boolean;
+  showTopN: boolean;
+  showSort: boolean;
+  showSmoothLines: boolean;
+};
+
+export function getChartBuilderUiConfig(chartType: ChartType): ChartBuilderUiConfig {
+  switch (chartType) {
+    case 'scatter':
+      return {
+        xAxisKind: 'numeric',
+        showYAxis: true,
+        yAxisLabel: 'Y axis',
+        showSecondaryYAxis: false,
+        showGroupBy: true,
+        groupByLabel: 'Color',
+        showZAxis: true,
+        zAxisLabel: 'Size',
+        showAggregation: false,
+        showTimeBucket: false,
+        showTopN: false,
+        showSort: false,
+        showSmoothLines: false,
+      };
+    case 'pie':
+      return {
+        xAxisKind: 'dimension',
+        showYAxis: true,
+        yAxisLabel: 'Value',
+        showSecondaryYAxis: false,
+        showGroupBy: false,
+        groupByLabel: 'Breakdown / Color',
+        showZAxis: false,
+        zAxisLabel: 'Size',
+        showAggregation: true,
+        showTimeBucket: false,
+        showTopN: true,
+        showSort: true,
+        showSmoothLines: false,
+      };
+    case 'heatmap':
+      return {
+        xAxisKind: 'dimension',
+        showYAxis: true,
+        yAxisLabel: 'Cell value',
+        showSecondaryYAxis: false,
+        showGroupBy: true,
+        groupByLabel: 'Y axis',
+        showZAxis: false,
+        zAxisLabel: 'Size',
+        showAggregation: true,
+        showTimeBucket: false,
+        showTopN: false,
+        showSort: false,
+        showSmoothLines: false,
+      };
+    case 'boxplot':
+      return {
+        xAxisKind: 'dimension',
+        showYAxis: true,
+        yAxisLabel: 'Distribution value',
+        showSecondaryYAxis: false,
+        showGroupBy: false,
+        groupByLabel: 'Breakdown / Color',
+        showZAxis: false,
+        zAxisLabel: 'Size',
+        showAggregation: false,
+        showTimeBucket: false,
+        showTopN: false,
+        showSort: false,
+        showSmoothLines: false,
+      };
+    case 'dualAxis':
+      return {
+        xAxisKind: 'dimension',
+        showYAxis: true,
+        yAxisLabel: 'Primary Y axis',
+        showSecondaryYAxis: true,
+        showGroupBy: false,
+        groupByLabel: 'Breakdown / Color',
+        showZAxis: false,
+        zAxisLabel: 'Size',
+        showAggregation: true,
+        showTimeBucket: true,
+        showTopN: true,
+        showSort: true,
+        showSmoothLines: true,
+      };
+    case 'line':
+    case 'area':
+    case 'stackedArea':
+      return {
+        xAxisKind: 'dimension',
+        showYAxis: true,
+        yAxisLabel: 'Y axis',
+        showSecondaryYAxis: false,
+        showGroupBy: true,
+        groupByLabel: 'Breakdown / Color',
+        showZAxis: false,
+        zAxisLabel: 'Size',
+        showAggregation: true,
+        showTimeBucket: true,
+        showTopN: true,
+        showSort: true,
+        showSmoothLines: true,
+      };
+    default:
+      return {
+        xAxisKind: 'dimension',
+        showYAxis: true,
+        yAxisLabel: 'Y axis',
+        showSecondaryYAxis: false,
+        showGroupBy: true,
+        groupByLabel: 'Breakdown / Color',
+        showZAxis: false,
+        zAxisLabel: 'Size',
+        showAggregation: true,
+        showTimeBucket: true,
+        showTopN: true,
+        showSort: true,
+        showSmoothLines: false,
+      };
+  }
+}
+
 const PALETTE_MAP: Record<string, string[]> = {
   default: ['#2563eb', '#14b8a6', '#9333ea', '#f59e0b', '#ef4444', '#6366f1'],
   cool: ['#0ea5e9', '#14b8a6', '#22c55e', '#8b5cf6', '#6366f1'],
@@ -289,8 +424,22 @@ export function validateBuilderState(
     if (yField?.kind !== 'numeric') issues.push('Scatter charts require a numeric Y axis.');
   }
 
+  if (state.chartType === 'heatmap') {
+    if (!state.groupByField) issues.push('Heatmaps require a Y-axis/category field.');
+    if (yField?.kind !== 'numeric') issues.push('Heatmaps require a numeric cell value field.');
+  }
+
+  if (state.chartType === 'boxplot') {
+    if (xField?.kind === 'numeric') issues.push('Boxplots need a category or time field on the X axis.');
+    if (yField?.kind !== 'numeric') issues.push('Boxplots require a numeric value field.');
+  }
+
   if (state.chartType === 'pie' && groupField) {
     issues.push('Pie charts use a single category field and do not support grouping.');
+  }
+
+  if (state.chartType === 'dualAxis' && !state.secondaryYAxisField) {
+    issues.push('Dual-axis charts require a secondary Y axis field.');
   }
 
   if (state.groupByField && groupField?.uniqueCount && groupField.uniqueCount > 12) {
@@ -306,6 +455,61 @@ export function validateBuilderState(
   }
 
   return { valid: issues.length === 0, issues };
+}
+
+export function normalizeBuilderStateForChartType(
+  state: ChartBuilderState,
+  fields: ChartField[],
+): ChartBuilderState {
+  const ui = getChartBuilderUiConfig(state.chartType);
+  const numericFields = fields.filter((field) => field.kind === 'numeric' && field.role !== 'id');
+  const dimensionFields = fields.filter((field) => field.kind !== 'numeric' || field.role === 'time' || field.role === 'dimension');
+  const isNumericField = (name: string) => numericFields.some((field) => field.name === name);
+  const isDimensionField = (name: string) => dimensionFields.some((field) => field.name === name);
+  const pickDimension = () => dimensionFields[0]?.name ?? pickDefaultXField(fields);
+  const pickNumeric = () => numericFields[0]?.name ?? pickDefaultYField(fields);
+  const pickAlternateNumeric = (exclude?: string) =>
+    numericFields.find((field) => field.name !== exclude)?.name ?? '';
+  const pickAlternateDimension = (exclude?: string) =>
+    dimensionFields.find((field) => field.name !== exclude)?.name ?? '';
+
+  const next = { ...state };
+
+  if (ui.xAxisKind === 'numeric') {
+    if (!isNumericField(next.xAxisField)) next.xAxisField = pickAlternateNumeric(next.yAxisField) || pickNumeric();
+  } else if (ui.xAxisKind === 'dimension') {
+    if (!isDimensionField(next.xAxisField)) next.xAxisField = pickDimension() || next.xAxisField;
+  }
+
+  if (ui.showYAxis) {
+    if (!isNumericField(next.yAxisField)) next.yAxisField = pickNumeric();
+  } else {
+    next.yAxisField = '';
+  }
+
+  if (!ui.showSecondaryYAxis) {
+    next.secondaryYAxisField = '';
+  } else if (!isNumericField(next.secondaryYAxisField) || next.secondaryYAxisField === next.yAxisField) {
+    next.secondaryYAxisField = pickAlternateNumeric(next.yAxisField);
+  }
+
+  if (!ui.showGroupBy) {
+    next.groupByField = '';
+  } else if (!isDimensionField(next.groupByField) || next.groupByField === next.xAxisField) {
+    next.groupByField = pickAlternateDimension(next.xAxisField);
+  }
+
+  if (!ui.showZAxis) {
+    next.zAxisField = '';
+  } else if (!isNumericField(next.zAxisField) || next.zAxisField === next.yAxisField) {
+    next.zAxisField = pickAlternateNumeric(next.yAxisField);
+  }
+
+  if (!ui.showTimeBucket) next.timeBucket = 'none';
+  if (!ui.showTopN) next.topN = null;
+  if (!ui.showSort) next.sortDirection = 'asc';
+
+  return next;
 }
 
 export function materializeChartSpecFromBuilder(
@@ -1094,10 +1298,10 @@ function buildSeriesConfig(
   fieldByName: Map<string, ChartField>,
   yField: string,
   secondaryField: string,
-) {
+): ChartSpec['config']['series'] {
   const primary = fieldByName.get(yField);
   const secondary = fieldByName.get(secondaryField);
-  const series = [];
+  const series: ChartSpec['config']['series'] = [];
   if (yField) {
     series.push({
       field: yField,
@@ -1319,7 +1523,7 @@ function normalizeLayoutFromBuilder(builder: ChartBuilderState): ChartSpec['conf
 function getSupportedTypesFromBuilder(
   builder: ChartBuilderState,
   xKind?: ChartField['kind'],
-) {
+): ChartType[] {
   if (xKind === 'date') return ['line', 'area', 'stackedArea', 'bar'];
   if (builder.groupByField) return ['bar', 'line', 'area', 'stackedBar', 'normalizedStackedBar'];
   return ['bar', 'line', 'scatter', 'pie', 'heatmap', 'boxplot'];

@@ -4,8 +4,10 @@ import assert from 'node:assert/strict';
 import {
   buildOption,
   createBuilderStateFromChart,
+  getChartBuilderUiConfig,
   getSelectableChartTypes,
   materializeChartSpecFromBuilder,
+  normalizeBuilderStateForChartType,
   parseChartSpec,
   parseChartWorkspace,
   validateBuilderState,
@@ -229,4 +231,69 @@ test('materializeChartSpecFromBuilder creates a normalized grouped chart from wo
   assert.equal(spec.config.groupByField, 'benefit_type');
   assert.equal(spec.chartData.length, 3);
   assert.match(spec.aggregationNote ?? '', /percent-of-total|Aggregated|Bucketed/i);
+});
+
+test('getChartBuilderUiConfig adapts controls by chart type', () => {
+  const scatter = getChartBuilderUiConfig('scatter');
+  assert.equal(scatter.xAxisKind, 'numeric');
+  assert.equal(scatter.showZAxis, true);
+  assert.equal(scatter.showAggregation, false);
+
+  const pie = getChartBuilderUiConfig('pie');
+  assert.equal(pie.showGroupBy, false);
+  assert.equal(pie.showSecondaryYAxis, false);
+  assert.equal(pie.showTopN, true);
+});
+
+test('normalizeBuilderStateForChartType clears incompatible fields', () => {
+  const workspace = parseChartWorkspace({
+    workspaceId: 'query-3',
+    title: 'Diagnosis distribution',
+    table: {
+      columns: ['diagnosis_code', 'description', 'total_diagnosis_count', 'unique_patient_count'],
+      rows: [
+        { diagnosis_code: 'Z00129', description: 'Routine exam', total_diagnosis_count: 1160, unique_patient_count: 202 },
+        { diagnosis_code: 'Z23', description: 'Immunization', total_diagnosis_count: 969, unique_patient_count: 197 },
+      ],
+      totalRows: 2,
+      previewRowCount: 2,
+      isPreview: false,
+      title: 'Diagnosis distribution',
+    },
+    fields: [
+      { name: 'diagnosis_code', label: 'Diagnosis Code', kind: 'text', role: 'dimension', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+      { name: 'description', label: 'Description', kind: 'text', role: 'dimension', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+      { name: 'total_diagnosis_count', label: 'Total Diagnosis Count', kind: 'numeric', role: 'measure', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+      { name: 'unique_patient_count', label: 'Unique Patient Count', kind: 'numeric', role: 'measure', format: 'number', uniqueCount: 2, uniqueRatio: 1 },
+    ],
+    charts: [
+      {
+        config: {
+          chartType: 'bar',
+          title: 'Diagnosis distribution',
+          xAxisField: 'diagnosis_code',
+          groupByField: 'description',
+          series: [{ field: 'total_diagnosis_count', name: 'Total Diagnosis Count', format: 'number', axis: 'primary' }],
+          style: { palette: 'default' },
+        },
+        chartData: [{ diagnosis_code: 'Z00129', total_diagnosis_count: 1160 }],
+      },
+    ],
+  });
+
+  assert.ok(workspace);
+  const builder = createBuilderStateFromChart(workspace!.charts[0], workspace!);
+
+  const pieState = normalizeBuilderStateForChartType(
+    { ...builder, chartType: 'pie', groupByField: 'description', secondaryYAxisField: 'unique_patient_count' },
+    workspace!.fields ?? [],
+  );
+  assert.equal(pieState.groupByField, '');
+  assert.equal(pieState.secondaryYAxisField, '');
+
+  const dualAxisState = normalizeBuilderStateForChartType(
+    { ...builder, chartType: 'dualAxis', secondaryYAxisField: 'total_diagnosis_count' },
+    workspace!.fields ?? [],
+  );
+  assert.equal(dualAxisState.secondaryYAxisField, 'unique_patient_count');
 });
