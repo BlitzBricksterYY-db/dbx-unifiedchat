@@ -527,7 +527,7 @@ def _execute_sql_fallback(sql_query: str, warehouse_id: str) -> Dict[str, Any]:
                 extracted_sql = sql_match.group(1).strip()
         
         # Enforce trailing LIMIT clause (not inner CTE LIMITs)
-        max_rows = 2000
+        max_rows = 1000
         trailing_limit = re.search(r'\s+LIMIT\s+(\d+)(?:\s+OFFSET\s+\d+)?\s*;?\s*$', extracted_sql, re.IGNORECASE)
         if trailing_limit:
             existing_limit = int(trailing_limit.group(1))

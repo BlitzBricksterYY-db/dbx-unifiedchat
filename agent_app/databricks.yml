@@ -25,10 +25,15 @@ variables:
     default: "a4ed2ccbda385db9"
 
   # Lakebase
-  lakebase_instance_name:
+  lakebase_project:
     default: "dbx-unifiedchat-state-db-${bundle.target}"
-  lakebase_capacity:
-    default: "CU_1"
+  lakebase_pg_version:
+    default: "17"
+  lakebase_branch:
+    # Runtime/app target branch. The bundle resource file only declares the
+    # project directly; `production` is auto-created, and any non-default
+    # branch should be paired with an explicit endpoint resource.
+    default: "production"
 
   # MLflow experiment
   experiment_id:
@@ -63,6 +68,8 @@ variables:
     default: "TRIGGERED"
 
   # App runtime
+  app_name:
+    default: "dbx-unifiedchat-app-${bundle.target}"
   chat_proxy_timeout_seconds:
     default: "300"
   sample_size:
@@ -112,8 +119,8 @@ targets:
       experiment_id: "4357851413903846"
       agent_keep_warm_interval_seconds: "600"
       sql_warehouse_id: "32f4d1aae5fcf8ca"
-      lakebase_instance_name: "multi-agent-genie-system-state-db-dev"
-      lakebase_capacity: "CU_1"
+      lakebase_project: "multi-agent-genie-system-state-db-dev"
+      lakebase_branch: "production"
       genie_space_ids: "01f11b27d1121e2bb00d6ecd846b1988,01f11b27d23a1ab195fa7ba8efc06d13,01f11b27d3ea149694cf608c3d278673"
 
   prod:
