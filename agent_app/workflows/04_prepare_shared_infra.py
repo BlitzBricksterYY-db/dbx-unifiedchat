@@ -49,6 +49,7 @@ _WIDGET_DEFAULTS = {
     "target": "dev",
     "catalog_name": "",
     "schema_name": "",
+    "volume_name": "",
     "data_catalog_name": "",
     "data_schema_name": "",
     "sql_warehouse_id": "",
@@ -67,6 +68,7 @@ app_name = params["app_name"] or f"dbx-unifiedchat-app-{params['target'] or 'dev
 target = params["target"] or "dev"
 catalog_name = params["catalog_name"] or None
 schema_name = params["schema_name"] or None
+volume_name = params["volume_name"] or None
 data_catalog_name = params["data_catalog_name"] or None
 data_schema_name = params["data_schema_name"] or None
 sql_warehouse_id = params["sql_warehouse_id"] or None
@@ -166,7 +168,14 @@ def ensure_experiment(
     *,
     target: str,
     experiment_id: Optional[str],
+    catalog_name: Optional[str],
+    schema_name: Optional[str],
+    volume_name: Optional[str],
 ):
+    artifact_location = None
+    if catalog_name and schema_name and volume_name:
+        artifact_location = f"dbfs:/Volumes/{catalog_name}/{schema_name}/{volume_name}"
+
     if experiment_id:
         experiment = mlflow.get_experiment(experiment_id)
         if experiment is not None:
@@ -174,6 +183,8 @@ def ensure_experiment(
                 "\nResolved MLflow experiment: "
                 f"{experiment.name} ({experiment.experiment_id})"
             )
+            if getattr(experiment, "artifact_location", None):
+                print(f"  artifact_location: {experiment.artifact_location}")
             return experiment
         print(
             "\nConfigured MLflow experiment "
@@ -188,17 +199,24 @@ def ensure_experiment(
     experiment_name = f"/Users/{user_name}/multi-agent-genie-{target}"
     experiment = mlflow.get_experiment_by_name(experiment_name)
     if experiment is None:
-        created_id = mlflow.create_experiment(experiment_name)
+        create_kwargs = {}
+        if artifact_location:
+            create_kwargs["artifact_location"] = artifact_location
+        created_id = mlflow.create_experiment(experiment_name, **create_kwargs)
         experiment = mlflow.get_experiment(created_id)
         print(
             "\nCreated MLflow experiment: "
             f"{experiment.name} ({experiment.experiment_id})"
         )
+        if getattr(experiment, "artifact_location", None):
+            print(f"  artifact_location: {experiment.artifact_location}")
     else:
         print(
             "\nResolved fallback MLflow experiment: "
             f"{experiment.name} ({experiment.experiment_id})"
         )
+        if getattr(experiment, "artifact_location", None):
+            print(f"  artifact_location: {experiment.artifact_location}")
     return experiment
 
 
@@ -257,6 +275,9 @@ ensure_experiment(
     w,
     target=target,
     experiment_id=params["experiment_id"] or None,
+    catalog_name=catalog_name,
+    schema_name=schema_name,
+    volume_name=volume_name,
 )
 
 print("\nShared infrastructure preparation complete.")
