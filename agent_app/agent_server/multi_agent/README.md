@@ -30,6 +30,18 @@ uv run pytest tests/ -v
 ./scripts/dev-local-hot-reload.sh
 ```
 
+## Runtime configuration
+
+This runtime has two configuration loading paths:
+
+- Databricks deployment/runtime: shared values originate from
+  `agent_app/databricks.yml`
+- Local development runtime: the process loads `agent_app/.env`
+
+The local dev scripts bridge those two by resolving shared target-aware values
+from `agent_app/databricks.yml` and materializing them into `agent_app/.env`
+before startup.
+
 ## Important neighboring modules
 
 | Path | Purpose |

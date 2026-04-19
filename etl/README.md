@@ -20,6 +20,18 @@ The ETL pipeline prepares enriched metadata and vector search index that agents 
 
 ## Three ETL Workflows
 
+The preferred repository workflow is to trigger ETL from the app bundle in
+`agent_app/`, because that uses the same target-aware configuration as the app
+itself.
+
+```bash
+cd ../agent_app
+./scripts/deploy.sh --target dev --run-job prep
+```
+
+Use the notebook and script-level workflows below when you need to iterate on
+or debug ETL logic directly.
+
 ### Workflow 1: Local ETL Testing 🧪
 
 Test ETL transformations locally with sample data before running on full dataset.
@@ -143,8 +155,11 @@ After successful ETL run, you should have:
 ## Configuration
 
 ETL uses the same configuration as the agent system:
-- **Databricks/App bundle**: Uses `agent_app/databricks.yml`
-- **Local**: Uses `agent_app/.env` together with bundle-derived defaults
+- **Shared config**: `agent_app/databricks.yml` is the maintained source for
+  target-aware ETL and app settings
+- **Local runtime**: `agent_app/.env` remains the local overlay used for
+  machine-specific runtime values, together with bundle-derived defaults synced
+  by the local scripts
 
 Key configuration values:
 - `CATALOG_NAME`: Unity Catalog catalog name
@@ -173,6 +188,7 @@ Key configuration values:
 
 For detailed troubleshooting:
 - See [../docs/ETL_GUIDE.md](../docs/ETL_GUIDE.md) for comprehensive guide
+- See [../docs/CONFIGURATION.md](../docs/CONFIGURATION.md) for the shared config model
 - Check Databricks workspace logs
 - Review Unity Catalog permissions
 
@@ -184,7 +200,7 @@ After ETL completes successfully:
 2. ✅ Test vector search index with sample query
 3. ✅ Proceed to **Agent Development**:
    - [Local Development](../docs/LOCAL_DEVELOPMENT.md)
-   - [Databricks Testing](../notebooks/README.md)
+   - [Agent App Workflow](../agent_app/README.md)
    - [Deployment](../docs/DEPLOYMENT.md)
 
 ---

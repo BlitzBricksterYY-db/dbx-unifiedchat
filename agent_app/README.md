@@ -68,6 +68,19 @@ manifest for this project. Direct Databricks Apps deployment via `databricks app
 or the App UI Deploy button is not the recommended deployment path here; use the
 bundle-driven `./scripts/deploy.sh` flow instead.
 
+## Configuration Model
+
+Use these two layers intentionally:
+
+- `databricks.yml` is the maintained shared config source for deploy targets and
+  shared app / ETL settings
+- `.env` is the local runtime overlay used by the Python and Node processes
+
+The local dev scripts resolve target-aware values from `databricks.yml`, then
+write the materialized runtime values into `.env` before launching the app.
+Change shared values in `databricks.yml`; reserve `.env` for local-only auth,
+runtime, and machine-specific overrides.
+
 ## Local Development Best Practice
 
 Use exactly one of the local dev entrypoints after the project virtualenv exists:

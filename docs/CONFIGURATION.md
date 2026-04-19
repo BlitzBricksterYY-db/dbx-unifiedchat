@@ -1,19 +1,39 @@
 # Configuration Guide
 
-This repository now has one active deployment configuration source of truth:
+This repository now has one maintained shared configuration source:
 
-- `agent_app/databricks.yml` for Databricks deployment targets and bundle variables
+- `agent_app/databricks.yml` for Databricks deployment targets and shared app settings used by both deploy flows and local bootstrap
 
-Local development still uses:
+Local development still materializes and reads:
 
-- `agent_app/.env` for local-only runtime settings
+- `agent_app/.env` for local runtime state, auth context, resolved database connection details, and local-only overrides
 
 ## Active Configuration Layers
 
 | Layer | File | Purpose |
 |------|------|---------|
-| Bundle deploy | `agent_app/databricks.yml` | Canonical dev/prod targets, ETL settings, app settings, Lakebase, warehouse, and Genie IDs |
-| Local runtime | `agent_app/.env` | Local development auth, ports, PG connection, and app runtime overrides |
+| Shared config | `agent_app/databricks.yml` | Canonical dev/prod targets plus shared ETL, app, Lakebase, warehouse, MLflow, and Genie settings |
+| Local runtime overlay | `agent_app/.env` | Local development auth, ports, PG connection, persisted target/profile selection, and optional local-only overrides |
+
+## Shared Config Model
+
+`agent_app/databricks.yml` is the canonical source for shared, target-aware
+configuration. Both `deploy.sh` and the local dev scripts resolve target and
+bundle variables from it.
+
+That said, local development is not fully `.env`-free:
+
+- the local dev scripts create or update `agent_app/.env`
+- they copy bundle-managed values from `agent_app/databricks.yml` into `.env`
+- they also store machine/runtime-specific values in `.env`, such as
+  `DATABRICKS_CONFIG_PROFILE`, `LOCAL_DATABRICKS_TARGET`, `PGHOST`, and `PGUSER`
+- the Python and Node local runtimes load `.env` directly at startup
+
+So the accurate model is:
+
+- `agent_app/databricks.yml` is the maintained shared config source
+- `agent_app/.env` is the local runtime overlay derived from that config plus
+  local machine-specific state
 
 ## Canonical Bundle Variables
 
@@ -53,14 +73,19 @@ Default behavior:
 
 For local development:
 
-1. copy `agent_app/.env.example` to `agent_app/.env`
-2. run `agent_app/scripts/dev-local.sh` or `agent_app/scripts/dev-local-hot-reload.sh`
-3. let those scripts backfill bundle-managed values from `agent_app/databricks.yml`
+1. run `agent_app/scripts/dev-local.sh` or `agent_app/scripts/dev-local-hot-reload.sh`
+2. let those scripts sync bundle-managed values from `agent_app/databricks.yml` into `agent_app/.env`
 
 Important distinction:
 
-- deployment settings belong in `agent_app/databricks.yml`
-- machine/user-specific local settings belong in `agent_app/.env`
+- shared environment-aware settings belong in `agent_app/databricks.yml`
+- machine/user-specific runtime settings belong in `agent_app/.env`
+- local app startup still reads `agent_app/.env` directly
+
+In practice, edit:
+
+- `agent_app/databricks.yml` when changing shared dev/prod targets or app/ETL settings
+- `agent_app/.env` only for local machine/runtime concerns that should not be shared
 
 ## How Deploy Scripts Resolve Config
 
@@ -91,7 +116,10 @@ as a workspace operator control plane, not a second config system.
 `dev-local.sh` and `dev-local-hot-reload.sh` read:
 
 - `agent_app/databricks.yml` for bundle defaults
-- `agent_app/.env` for local runtime values
+- `agent_app/.env` for remembered target/profile selection and local runtime values
+
+They also write back into `agent_app/.env` so the local Python and Node
+processes can start with a concrete environment file.
 
 ## Industry-Friendly Defaults
 
