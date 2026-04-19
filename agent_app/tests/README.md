@@ -26,3 +26,6 @@ uv run pytest tests/unit/test_lakebase_config.py -v
 
 - Run tests from `agent_app/` so imports resolve against the app package.
 - The previous root-level `tests/` suite has been removed.
+- Shared app settings come from `agent_app/databricks.yml`; local runtime
+  overrides still come from `agent_app/.env` when a test path depends on local
+  environment loading.
