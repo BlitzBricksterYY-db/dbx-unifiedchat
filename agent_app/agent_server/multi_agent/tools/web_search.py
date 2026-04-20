@@ -108,7 +108,8 @@ def _api_lookup_cpt(value: str) -> str:
         pass
     return ""
 
-
+#: ddgs currently NOT used in this project, keeping for backward compatibility.
+#   TODO: replace with a more professional/compliant search engine for industries, e.g., code lookup MCP servers.
 def web_search(query: str, max_results: int = 3) -> str:
     """Kept for backward compatibility. Performs a DuckDuckGo text search."""
     try:

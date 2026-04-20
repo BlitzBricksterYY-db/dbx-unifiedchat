@@ -4,6 +4,7 @@ import { z } from 'zod';
 export const chartTypes = [
   'bar',
   'line',
+  'histogram',
   'scatter',
   'pie',
   'stackedBar',
@@ -219,6 +220,22 @@ export type ChartBuilderUiConfig = {
 
 export function getChartBuilderUiConfig(chartType: ChartType): ChartBuilderUiConfig {
   switch (chartType) {
+    case 'histogram':
+      return {
+        xAxisKind: 'numeric',
+        showYAxis: true,
+        yAxisLabel: 'Value',
+        showSecondaryYAxis: false,
+        showGroupBy: false,
+        groupByLabel: 'Breakdown / Color',
+        showZAxis: false,
+        zAxisLabel: 'Size',
+        showAggregation: true,
+        showTimeBucket: false,
+        showTopN: false,
+        showSort: true,
+        showSmoothLines: false,
+      };
     case 'scatter':
       return {
         xAxisKind: 'numeric',
@@ -358,8 +375,14 @@ export function parseChartWorkspace(raw: unknown): ChartWorkspace | null {
 }
 
 export function getSelectableChartTypes(spec: ChartSpec): string[] {
-  const supported = spec.config.supportedChartTypes?.filter(Boolean);
-  return supported && supported.length > 0 ? supported : ['bar', 'line', 'scatter', 'pie'];
+  const supported = spec.config.supportedChartTypes?.filter(Boolean) ?? [];
+  const types = supported.length > 0 ? [...supported] : ['bar', 'line', 'scatter', 'pie'];
+  if (canSelectHistogram(spec) && !types.includes('histogram')) {
+    const barIndex = types.indexOf('bar');
+    if (barIndex >= 0) types.splice(barIndex + 1, 0, 'histogram');
+    else types.unshift('histogram');
+  }
+  return types;
 }
 
 export function getWorkspaceFields(workspace: ChartWorkspace): ChartField[] {
@@ -382,7 +405,7 @@ export function createBuilderStateFromChart(
     mode,
     title: chart.config.title ?? workspace.title,
     description: chart.config.description ?? '',
-    chartType: chart.config.chartType,
+    chartType: chart.config.transform?.type === 'histogram' ? 'histogram' : chart.config.chartType,
     xAxisField: defaultX ?? '',
     xAxisBinCount: resolveXAxisBinCount(chart.config.transform, defaultX ?? '', chart.config.chartType),
     yAxisField: primarySeries?.field ?? numericFields[0]?.name ?? '',
@@ -438,6 +461,12 @@ export function validateBuilderState(
     if (xField?.kind !== 'numeric') issues.push('Scatter charts require a numeric X axis.');
     if (yField?.kind !== 'numeric') issues.push('Scatter charts require a numeric Y axis.');
     if (state.zAxisField && zField?.kind !== 'numeric') issues.push('Scatter bubble size must use a numeric field.');
+  }
+
+  if (state.chartType === 'histogram') {
+    if (xField?.kind !== 'numeric') issues.push('Histograms require a numeric X axis.');
+    if (!numericBinningEnabled) issues.push('Histograms require numeric bins.');
+    if (yField?.kind !== 'numeric') issues.push('Histograms require a numeric value field.');
   }
 
   if (state.chartType === 'heatmap') {
@@ -529,7 +558,13 @@ export function normalizeBuilderStateForChartType(
   if (!ui.showTimeBucket) next.timeBucket = 'none';
   if (!ui.showTopN) next.topN = null;
   if (!ui.showSort) next.sortDirection = 'asc';
-  if (ui.xAxisKind === 'numeric' || !isNumericField(next.xAxisField)) next.xAxisBinCount = null;
+  if (state.chartType === 'histogram') {
+    next.xAxisBinCount = Number.isInteger(next.xAxisBinCount) && Number(next.xAxisBinCount) > 1
+      ? next.xAxisBinCount
+      : 12;
+  } else if (ui.xAxisKind === 'numeric' || !isNumericField(next.xAxisField)) {
+    next.xAxisBinCount = null;
+  }
 
   return next;
 }
@@ -566,6 +601,7 @@ export function materializeChartSpecFromBuilder(
   const existingSortBy = ((existing?.config as { sortBy?: { field?: string; order?: 'asc' | 'desc' } } | undefined)?.sortBy) ?? null;
 
   if (chartType === 'rankingSlope' || chartType === 'deltaComparison') {
+    const comparisonTopN = typeof builder.topN === 'number' && builder.topN > 0 ? builder.topN : null;
     const comparison = buildPeriodComparisonChartData(
       rows,
       xField,
@@ -573,7 +609,7 @@ export function materializeChartSpecFromBuilder(
       yField,
       builder.aggregation,
       chartType,
-      builder.topN,
+      comparisonTopN,
       existingSortBy,
     );
     chartData = comparison.chartData;
@@ -586,11 +622,16 @@ export function materializeChartSpecFromBuilder(
       periodField: groupField,
       ...(yField && yField !== 'count' ? { metric: yField } : {}),
       function: builder.aggregation,
-      topN: builder.topN ?? 10,
+      ...(comparisonTopN ? { topN: comparisonTopN } : {}),
       compareLabels: comparison.compareLabels,
     };
   } else if (chartType === 'scatter') {
     chartData = buildScatterChartData(rows, xField, yField, groupField, zField);
+  } else if (chartType === 'histogram') {
+    chartData = buildAggregatedChartData(rows, xField, yField, '', builder, '', 'none', effectiveNumericBinCount);
+    aggregated = true;
+    aggregationNote = `Bucketed ${prettifyLabel(xField)} into ${effectiveNumericBinCount ?? numericBinCount ?? 12} bins and aggregated ${prettifyLabel(yField)}`;
+    transform = { type: 'histogram', field: xField, bins: effectiveNumericBinCount ?? numericBinCount ?? 12, metric: yField, function: builder.aggregation };
   } else if (chartType === 'heatmap') {
     chartData = buildHeatmapChartData(rows, xField, groupField, yField, builder.aggregation, effectiveNumericBinCount);
     aggregated = true;
@@ -610,23 +651,25 @@ export function materializeChartSpecFromBuilder(
       ? { type: 'histogram', field: xField, bins: effectiveNumericBinCount, metric: yField, function: builder.aggregation }
       : { type: 'boxplot', field: yField };
   } else if (chartType === 'pie') {
+    const pieTopN = typeof builder.topN === 'number' && builder.topN > 0
+      ? Math.min(builder.topN, 6)
+      : 6;
     chartData = buildAggregatedChartData(rows, xField, yField, '', builder, '', 'none', effectiveNumericBinCount);
-    chartData = applyTopN(chartData, xField, yField, Math.min(builder.topN ?? 6, 6));
+    chartData = applyTopN(chartData, xField, yField, pieTopN);
     aggregated = true;
     aggregationNote = effectiveNumericBinCount
       ? `Bucketed ${prettifyLabel(xField)} into ${effectiveNumericBinCount} bins and aggregated ${prettifyLabel(yField)}`
       : `Aggregated ${prettifyLabel(yField)} by ${prettifyLabel(xField)}`;
-    if (effectiveNumericBinCount) {
-      transform = { type: 'histogram', field: xField, bins: effectiveNumericBinCount, metric: yField, function: builder.aggregation };
-    }
+    aggregationNote = `${aggregationNote} • Top ${pieTopN} categories`;
+    transform = effectiveNumericBinCount
+      ? { type: 'histogram', field: xField, bins: effectiveNumericBinCount, metric: yField, function: builder.aggregation, topN: pieTopN }
+      : { type: 'topN', metric: yField, n: pieTopN };
   } else {
     const bucket = shouldBucketTime(builder, xMeta) ? builder.timeBucket : 'none';
+    const shouldNormalizeGrouped = Boolean(groupField && layout === 'normalized');
     chartData = buildAggregatedChartData(rows, xField, yField, groupField, builder, secondaryField, bucket, effectiveNumericBinCount);
     aggregated = chartData.length > 0;
-    if (groupField && layout === 'normalized') {
-      chartData = normalizeGroupedPercent(chartData, xField, groupField, [yField, secondaryField].filter(Boolean));
-      aggregationNote = `Converted grouped values to percent-of-total within each ${prettifyLabel(xField)}`;
-    } else if (bucket !== 'none') {
+    if (bucket !== 'none') {
       aggregationNote = `Bucketed ${prettifyLabel(yField)} by ${bucket}`;
       transform = { type: 'timeBucket', field: xField, bucket, metric: yField, function: builder.aggregation };
     } else if (effectiveNumericBinCount) {
@@ -635,12 +678,16 @@ export function materializeChartSpecFromBuilder(
     } else {
       aggregationNote = `Aggregated ${prettifyLabel(yField)} by ${prettifyLabel(xField)}`;
     }
-    if (builder.topN && xMeta?.kind !== 'numeric' && chartData.length > builder.topN) {
+    if (builder.topN && (xMeta?.kind !== 'numeric' || Boolean(effectiveNumericBinCount)) && chartData.length > builder.topN) {
       chartData = applyTopN(chartData, xField, yField, builder.topN, groupField, secondaryField || undefined);
       aggregationNote = `${aggregationNote} • Top ${builder.topN} categories`;
       transform = transform
         ? { ...transform, topN: builder.topN }
         : { type: 'topN', metric: yField, n: builder.topN };
+    }
+    if (shouldNormalizeGrouped) {
+      chartData = normalizeGroupedPercent(chartData, xField, groupField, [yField, secondaryField].filter(Boolean));
+      aggregationNote = `Converted grouped values to percent-of-total within each ${prettifyLabel(xField)}${builder.topN ? ` • Top ${builder.topN} categories` : ''}`;
     }
   }
 
@@ -734,6 +781,7 @@ export function buildOption(spec: ChartSpec, overrideType?: string): EChartsOpti
     : undefined;
   const type = (requestedType ?? config.chartType) as ChartType;
 
+  if (type === 'histogram') return buildCartesianOption(spec, 'bar');
   if (type === 'heatmap') return buildHeatmapOption(spec);
   if (type === 'boxplot') return buildBoxplotOption(spec);
   if (type === 'rankingSlope') return buildRankingSlopeOption(spec);
@@ -816,7 +864,16 @@ function buildHeatmapOption(spec: ChartSpec): EChartsOption {
     series: [
       {
         type: 'heatmap',
-        data: values,
+        data: spec.chartData.map((row) => ({
+          value: [
+            xValues.indexOf(String(row[xField] ?? '')),
+            yValues.indexOf(String(row[yField] ?? '')),
+            Number(row[valueField] ?? 0),
+          ],
+          name: `${String(row[xField] ?? '')} / ${String(row[yField] ?? '')}`,
+          xValue: String(row[xField] ?? ''),
+          groupValue: String(row[yField] ?? ''),
+        })),
         label: { show: spec.config.style?.showLabels ?? false },
         emphasis: { itemStyle: { shadowBlur: 8 } },
       },
@@ -992,16 +1049,23 @@ function buildScatterOption(spec: ChartSpec): EChartsOption {
         },
         label: { show: spec.config.style?.showLabels ?? false },
         itemStyle: spec.config.style?.color ? { color: spec.config.style.color } : undefined,
-        data: groupRows.map((row) => (sizeField
-          ? [
-              Number(row[xField] ?? 0),
-              Number(row[yField] ?? 0),
-              Number.isFinite(Number(row[sizeField] ?? 0)) ? Number(row[sizeField] ?? 0) : 0,
-            ]
-          : [
-              Number(row[xField] ?? 0),
-              Number(row[yField] ?? 0),
-            ])),
+        data: groupRows.map((row) => ({
+          value: sizeField
+            ? [
+                Number(row[xField] ?? 0),
+                Number(row[yField] ?? 0),
+                Number.isFinite(Number(row[sizeField] ?? 0)) ? Number(row[sizeField] ?? 0) : 0,
+              ]
+            : [
+                Number(row[xField] ?? 0),
+                Number(row[yField] ?? 0),
+              ],
+          name: String(row[xField] ?? ''),
+          xValue: String(row[xField] ?? ''),
+          yValue: String(row[yField] ?? ''),
+          ...(sizeField ? { zValue: String(row[sizeField] ?? '') } : {}),
+          ...(groupField ? { groupValue: String(row[groupField] ?? '') } : {}),
+        })),
       };
     }),
   };
@@ -1581,13 +1645,16 @@ function buildPeriodComparisonChartData(
   const trimmedRows = topN && topN > 0 ? rankedRows.slice(0, topN) : rankedRows;
   const baseNote = chartType === 'rankingSlope'
     ? `Compared ${comparisonRows.length} entities across ${startLabel} and ${endLabel} with rank alignment`
-    : `Computed deltas across ${startLabel} and ${endLabel}`;
+    : `Computed deltas for ${comparisonRows.length} entities across ${startLabel} and ${endLabel}`;
+  const topNNote = topN && topN > 0 && trimmedRows.length < comparisonRows.length
+    ? `; showing top ${trimmedRows.length}`
+    : '';
   return {
     chartData: trimmedRows,
     compareLabels,
     aggregationNote: excludedEntities > 0
-      ? `${baseNote}; excluded ${excludedEntities} entities without both periods`
-      : baseNote,
+      ? `${baseNote}${topNNote}; excluded ${excludedEntities} entities without both periods`
+      : `${baseNote}${topNNote}`,
   };
 }
 
@@ -1659,7 +1726,10 @@ function applyTopN(
   groupField = '',
   secondaryField?: string,
 ) {
-  if (rows.length <= limit) return rows;
+  const distinctXCount = groupField
+    ? new Set(rows.map((row) => String(row[xField] ?? ''))).size
+    : rows.length;
+  if (distinctXCount <= limit) return rows;
   const sorted = [...rows].sort((left, right) => numeric(right[yField]) - numeric(left[yField]));
   const topRows = sorted.slice(0, limit);
   const restRows = sorted.slice(limit);
@@ -1676,8 +1746,24 @@ function applyTopN(
     return [...topRows, rolled];
   }
 
+  const rowsByX = new Map<string, Array<Record<string, unknown>>>();
+  const totalsByX = new Map<string, number>();
+  for (const row of rows) {
+    const xValue = String(row[xField] ?? '');
+    if (!rowsByX.has(xValue)) rowsByX.set(xValue, []);
+    rowsByX.get(xValue)!.push(row);
+    totalsByX.set(xValue, (totalsByX.get(xValue) ?? 0) + numeric(row[yField]));
+  }
+
+  const topXValues = Array.from(totalsByX.entries())
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, limit)
+    .map(([xValue]) => xValue);
+  const topXSet = new Set(topXValues);
+  const topGroupedRows = topXValues.flatMap((xValue) => rowsByX.get(xValue) ?? []);
+  const restGroupedRows = rows.filter((row) => !topXSet.has(String(row[xField] ?? '')));
   const otherByGroup = new Map<string, Record<string, unknown>>();
-  for (const row of restRows) {
+  for (const row of restGroupedRows) {
     const group = String(row[groupField] ?? '');
     if (!otherByGroup.has(group)) {
       otherByGroup.set(group, { [xField]: 'Other', [groupField]: group, [yField]: 0, ...(secondaryField ? { [secondaryField]: 0 } : {}) });
@@ -1686,7 +1772,7 @@ function applyTopN(
     current[yField] = numeric(current[yField]) + numeric(row[yField]);
     if (secondaryField) current[secondaryField] = numeric(current[secondaryField]) + numeric(row[secondaryField]);
   }
-  return [...topRows, ...Array.from(otherByGroup.values())];
+  return [...topGroupedRows, ...Array.from(otherByGroup.values())];
 }
 
 function resolveAggregation(transform: ChartSpec['config']['transform']): ChartBuilderState['aggregation'] {
@@ -1729,8 +1815,9 @@ function getSupportedTypesFromBuilder(
   if (builder.chartType === 'heatmap' || builder.chartType === 'boxplot' || builder.chartType === 'rankingSlope' || builder.chartType === 'deltaComparison') {
     return [builder.chartType];
   }
+  if (builder.chartType === 'histogram') return ['histogram', 'bar', 'line'];
   if (builder.chartType === 'dualAxis' || builder.secondaryYAxisField) return ['dualAxis', 'bar', 'line'];
-  if (numericBinCount && builder.chartType !== 'scatter') return ['bar', 'line'];
+  if (numericBinCount && builder.chartType !== 'scatter') return ['histogram', 'bar', 'line'];
   if (builder.chartType === 'normalizedStackedBar') return ['normalizedStackedBar', 'stackedBar', 'bar'];
   if (builder.chartType === 'stackedArea') return ['stackedArea', 'area', 'line'];
   if (builder.chartType === 'stackedBar') return ['stackedBar', 'bar', 'line'];
@@ -1763,6 +1850,18 @@ function resolveBuilderXAxisField(
     return transform.field;
   }
   return xAxisField ?? pickDefaultXField(fields);
+}
+
+function canSelectHistogram(spec: ChartSpec): boolean {
+  const chartType = spec.config.chartType;
+  if (['scatter', 'pie', 'heatmap', 'boxplot', 'dualAxis', 'rankingSlope', 'deltaComparison'].includes(chartType)) return false;
+  if (spec.config.groupByField) return false;
+  const xField = spec.config.transform?.type === 'histogram'
+    ? String(spec.config.transform.field ?? '')
+    : String(spec.config.xAxisField ?? '');
+  if (!xField) return false;
+  const rows = spec.downloadData ?? spec.chartData;
+  return rows.some((row) => Number.isFinite(Number(row[xField] ?? NaN)));
 }
 
 function resolveNumericBinCount(builder: ChartBuilderState, field?: ChartField) {
