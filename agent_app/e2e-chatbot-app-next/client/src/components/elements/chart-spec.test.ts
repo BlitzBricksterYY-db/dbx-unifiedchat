@@ -786,6 +786,72 @@ test('validateBuilderState rejects non-numeric scatter bubble size fields', () =
   assert.match(result.issues.join(' '), /bubble size must use a numeric field/i);
 });
 
+test('materializeChartSpecFromBuilder supports one-variable boxplots without an x-axis field', () => {
+  const workspace = parseChartWorkspace({
+    workspaceId: 'query-boxplot-single',
+    title: 'Spend Distribution',
+    table: {
+      columns: ['paid_amount'],
+      rows: [
+        { paid_amount: 10 },
+        { paid_amount: 20 },
+        { paid_amount: 30 },
+        { paid_amount: 40 },
+      ],
+      totalRows: 4,
+      previewRowCount: 4,
+      isPreview: false,
+      title: 'Spend Distribution',
+    },
+    fields: [
+      { name: 'paid_amount', label: 'Paid Amount', kind: 'numeric', role: 'currency', format: 'currency', uniqueCount: 4, uniqueRatio: 1 },
+    ],
+    charts: [
+      {
+        config: {
+          chartType: 'boxplot',
+          title: 'Spend Distribution',
+          xAxisField: null,
+          series: [{ field: 'paid_amount', name: 'Paid Amount', format: 'currency', axis: 'primary' }],
+          transform: { type: 'boxplot', field: 'paid_amount' },
+          style: { palette: 'default' },
+        },
+        chartData: [
+          { label: 'Paid Amount', min: 10, q1: 15, median: 25, q3: 35, max: 40 },
+        ],
+      },
+    ],
+  });
+
+  assert.ok(workspace);
+  const builder = createBuilderStateFromChart(workspace!.charts[0], workspace!);
+  assert.equal(builder.xAxisField, '');
+
+  const validation = validateBuilderState(
+    { ...builder, chartType: 'boxplot', xAxisField: '', yAxisField: 'paid_amount' },
+    workspace!,
+  );
+  assert.equal(validation.valid, true);
+
+  const spec = materializeChartSpecFromBuilder(
+    workspace!,
+    { ...builder, chartType: 'boxplot', xAxisField: '', yAxisField: 'paid_amount' },
+    workspace!.charts[0],
+    'manual',
+  );
+
+  assert.equal(spec.config.chartType, 'boxplot');
+  assert.equal(spec.config.xAxisField, null);
+  assert.equal(spec.config.transform?.type, 'boxplot');
+  assert.deepEqual(spec.chartData, [
+    { label: 'Paid Amount', min: 10, q1: 17.5, median: 25, q3: 32.5, max: 40 },
+  ]);
+
+  const option = buildOption(spec);
+  assert.deepEqual((option.xAxis as any)?.data, ['Paid Amount']);
+  assert.deepEqual((option.series as any)?.[0]?.data, [[10, 17.5, 25, 32.5, 40]]);
+});
+
 test('buildOption creates a dual-axis config', () => {
   const spec = parseChartSpec({
     config: {
