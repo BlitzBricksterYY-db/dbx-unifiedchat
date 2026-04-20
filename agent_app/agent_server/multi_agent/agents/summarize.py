@@ -213,6 +213,9 @@ def _build_visualization_workspace_payload(
     result_item = entry["result"]
     columns = result_item.get("columns", [])
     workspace_id = f"query-{idx + 1}"
+    description = " ".join((entry.get("sql_explanation") or "").split()) or label
+    if len(description) > 160:
+        description = f"{description[:157].rstrip()}..."
 
     data_cache_key = cache_put(columns, full_rows)
 
@@ -248,14 +251,14 @@ def _build_visualization_workspace_payload(
     return {
         "workspaceId": workspace_id,
         "title": label,
-        "description": entry.get("sql_explanation") or "",
+        "description": description,
         "table": table_payload,
         "charts": [chart_payload],
         "fields": _infer_workspace_fields(columns, preview_rows),
         "sourceMeta": {
             "queryIndex": idx + 1,
             "label": label,
-            "sqlExplanation": entry.get("sql_explanation"),
+            "sqlExplanation": None,
             "rowGrainHint": entry.get("row_grain_hint"),
             "previewLimited": source_row_count > len(preview_rows),
             "totalRows": source_row_count,
@@ -499,18 +502,20 @@ class _SimpleSummarizeAgent:
 2. Explains what the system did (planning, SQL generation, execution)
 3. For multi-part questions with multiple queries:
    - Explain each sub-question that was addressed
+   - Use a separate subsection for each query/result pair
    - Show each SQL query in its own code block with a clear label
    - Present each query's results in a clear, readable format (preferably as a markdown table)
-   - Provide insights and analysis for each result
-   - Synthesize an overall conclusion combining insights from all queries
+   - After each query's results, include a clearly labeled `Insights` subsection for that specific result before moving to the next query
+   - Do not merge per-query insights together; every query/result must have its own distinct insight commentary, even if the result is small, empty, or partially successful
+   - End with a separate clearly labeled `Overall Insights` or `Overall Conclusion` subsection that synthesizes patterns, contrasts, and takeaways across all queries
 4. For single queries:
    - Print out SQL synthesis explanation if any SQL was generated
    - Print out the SQL query in a code block
    - Print out the result in a readable format (preferably as a markdown table)
-   - Provide insights and analysis for the result
+   - Include a clearly labeled `Insights` subsection for the result
 5. States the outcome (success with X rows, error, needs clarification, etc.)
 
-Use markdown formatting for readability. Keep it clear and user-friendly. 
+Use markdown formatting for readability. Keep it clear and user-friendly.
 """
         
         return prompt

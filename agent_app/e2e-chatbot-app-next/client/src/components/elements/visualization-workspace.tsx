@@ -24,6 +24,7 @@ import {
   getWorkspaceFields,
   materializeChartSpecFromBuilder,
   normalizeBuilderStateForChartType,
+  restoreSavedCharts,
   validateBuilderState,
   type ChartBuilderState,
   type ChartSpec,
@@ -55,10 +56,7 @@ function loadSavedCharts(key: string | null, fallback: ChartSpec[]): ChartSpec[]
   if (!key) return fallback;
   try {
     const raw = localStorage.getItem(key);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    }
+    if (raw) return restoreSavedCharts(raw, fallback);
   } catch { /* ignore corrupt data */ }
   return fallback;
 }
@@ -114,6 +112,15 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
       setCharts(updater);
     },
     [],
+  );
+
+  const hydratedWorkspace = useMemo(
+    () => ({
+      ...workspace,
+      charts,
+      fields: getWorkspaceFields(workspace),
+    }),
+    [charts, workspace],
   );
 
   const replaceChart = useCallback((chartIndex: number, nextChart: ChartSpec) => {
@@ -243,15 +250,6 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
     if (!modified.current || !storageKey) return;
     try { localStorage.setItem(storageKey, JSON.stringify(charts)); } catch {}
   }, [charts, storageKey]);
-
-  const hydratedWorkspace = useMemo(
-    () => ({
-      ...workspace,
-      charts,
-      fields: getWorkspaceFields(workspace),
-    }),
-    [charts, workspace],
-  );
 
   const currentChart = charts[builderChartIndex] ?? charts[0];
   const previewChart = useMemo(() => {
