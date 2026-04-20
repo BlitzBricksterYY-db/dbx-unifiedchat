@@ -374,6 +374,15 @@ export function parseChartWorkspace(raw: unknown): ChartWorkspace | null {
   return result.success ? result.data : null;
 }
 
+export function restoreSavedCharts(raw: unknown, fallback: ChartSpec[]): ChartSpec[] {
+  const parsed = typeof raw === 'string' ? safeParseJson(raw) : raw;
+  if (!Array.isArray(parsed) || parsed.length === 0) return fallback;
+  const restored = parsed
+    .map((item) => parseChartSpec(item))
+    .filter((item): item is ChartSpec => item !== null);
+  return restored.length === parsed.length && restored.length > 0 ? restored : fallback;
+}
+
 export function getSelectableChartTypes(spec: ChartSpec): string[] {
   const supported = spec.config.supportedChartTypes?.filter(Boolean) ?? [];
   const types = supported.length > 0 ? [...supported] : ['bar', 'line', 'scatter', 'pie'];
