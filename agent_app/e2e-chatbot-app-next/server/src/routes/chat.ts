@@ -673,6 +673,11 @@ chatRouter.post('/', requireAuth, async (req: Request, res: Response) => {
         // Write clarification data so the client can show a structured modal.
         if (clarificationData) {
           writer.write({ type: 'data-clarification', data: clarificationData });
+          // Clarification turns intentionally pause waiting for a follow-up.
+          // Keep the backend checkpoint resumable, but stop advertising this
+          // SSE stream as an active resumable stream so reconnects do not
+          // replay the old clarification payload and popup.
+          streamCache.clearActiveStream(id);
         }
         // Write traceId so the client knows whether feedback is supported.
         writer.write({ type: 'data-traceId', data: traceId });
