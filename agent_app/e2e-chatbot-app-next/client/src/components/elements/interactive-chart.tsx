@@ -182,6 +182,8 @@ type InteractiveChartProps = {
 type ChartSelection = {
   xValue: string;
   groupValue?: string;
+  yValue?: string;
+  zValue?: string;
   seriesName?: string;
   left: number;
   top: number;
@@ -193,17 +195,137 @@ function parseGroupFromSeriesName(seriesName?: string) {
   return match?.[2] || undefined;
 }
 
-function matchesSelection(
+type ChartClickParams = {
+  componentType?: string;
+  name?: string;
+  seriesName?: string;
+  value?: unknown;
+  data?: unknown;
+  event?: { event?: MouseEvent };
+};
+
+function readEventDataRecord(data: unknown): Record<string, unknown> | null {
+  return data && typeof data === 'object' && !Array.isArray(data)
+    ? (data as Record<string, unknown>)
+    : null;
+}
+
+export function matchesSelection(
   row: Record<string, unknown>,
   spec: ChartSpec,
   selection: ChartSelection | null,
 ) {
   if (!selection) return true;
+  const chartType = spec.config.chartType ?? '';
   const xField = spec.config.xAxisField ?? '';
-  if (xField && String(row[xField] ?? '') !== selection.xValue) return false;
+  const transform = spec.config.transform as Record<string, unknown> | null | undefined;
+  if (xField && String(row[xField] ?? '') !== selection.xValue) {
+    const transformType = String(transform?.type ?? '');
+    if (transformType === 'timeBucket') {
+      const sourceField = String(transform?.field ?? xField);
+      const bucket = String(transform?.bucket ?? '');
+      if (bucketValue(row[sourceField], bucket) !== selection.xValue) return false;
+    } else if (transformType === 'histogram') {
+      const sourceField = String(transform?.field ?? xField);
+      const range = parseNumericBucketRange(selection.xValue);
+      const rawValue = Number(row[sourceField]);
+      if (!range || !Number.isFinite(rawValue) || rawValue < range.start || rawValue > range.end) return false;
+    } else {
+      return false;
+    }
+  }
   const groupField = spec.config.groupByField ?? '';
   if (selection.groupValue && groupField && String(row[groupField] ?? '') !== selection.groupValue) return false;
+  const yField = spec.config.series[0]?.field ?? '';
+  if (chartType === 'scatter' && selection.yValue && yField && String(row[yField] ?? '') !== selection.yValue) return false;
+  const zField = spec.config.zAxisField ?? '';
+  if (chartType === 'scatter' && selection.zValue && zField && String(row[zField] ?? '') !== selection.zValue) return false;
   return true;
+}
+
+function parseNumericBucketRange(label: string): { start: number; end: number } | null {
+  const match = label.trim().match(/^(-?\d+(?:\.\d+)?)\s*[-–]\s*(-?\d+(?:\.\d+)?)$/);
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  return Number.isFinite(start) && Number.isFinite(end) ? { start, end } : null;
+}
+
+function bucketValue(value: unknown, bucket: string): string | null {
+  const date = toDate(value);
+  if (!date) return null;
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth() + 1;
+  const day = date.getUTCDate();
+  if (bucket === 'day') return `${year}-${pad(month)}-${pad(day)}`;
+  if (bucket === 'week') {
+    const start = new Date(Date.UTC(year, date.getUTCMonth(), day));
+    const firstDay = start.getUTCDay() || 7;
+    start.setUTCDate(start.getUTCDate() - firstDay + 1);
+    return `${start.getUTCFullYear()}-W${pad(getIsoWeek(start))}`;
+  }
+  if (bucket === 'month') return `${year}-${pad(month)}`;
+  if (bucket === 'quarter') return `${year}-Q${Math.floor((month - 1) / 3) + 1}`;
+  if (bucket === 'year') return `${year}`;
+  return null;
+}
+
+function toDate(value: unknown): Date | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  const date = new Date(String(value ?? ''));
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function pad(value: number) {
+  return String(value).padStart(2, '0');
+}
+
+function getIsoWeek(date: Date) {
+  const target = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const dayNumber = target.getUTCDay() || 7;
+  target.setUTCDate(target.getUTCDate() + 4 - dayNumber);
+  const yearStart = new Date(Date.UTC(target.getUTCFullYear(), 0, 1));
+  return Math.ceil((((target.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+}
+
+export function extractSelectionFromClick(
+  spec: ChartSpec,
+  params: ChartClickParams,
+  left: number,
+  top: number,
+): ChartSelection | null {
+  if (params.componentType !== 'series') return null;
+  const data = readEventDataRecord(params.data);
+  const point = Array.isArray(params.value) ? params.value : [];
+  const xValue = spec.config.chartType === 'rankingSlope' && params.seriesName
+    ? params.seriesName
+    : typeof data?.xValue === 'string'
+      ? data.xValue
+      : String(params.name ?? point[0] ?? '');
+  if (!xValue) return null;
+  const groupValue = typeof data?.groupValue === 'string'
+    ? data.groupValue
+    : parseGroupFromSeriesName(params.seriesName);
+  const yValue = typeof data?.yValue === 'string'
+    ? data.yValue
+    : spec.config.chartType === 'scatter' && point.length > 1
+      ? String(point[1] ?? '')
+      : undefined;
+  const zValue = typeof data?.zValue === 'string'
+    ? data.zValue
+    : spec.config.chartType === 'scatter' && point.length > 2
+      ? String(point[2] ?? '')
+      : undefined;
+
+  return {
+    xValue,
+    groupValue,
+    yValue,
+    zValue,
+    seriesName: params.seriesName,
+    left,
+    top,
+  };
 }
 
 function buildSelectionPrompt(spec: ChartSpec, selection: ChartSelection) {
@@ -344,26 +466,15 @@ export function InteractiveChart({
   }, [contextSelection]);
 
   const chartEvents = useMemo(() => ({
-    click: (params: {
-      componentType?: string;
-      name?: string;
-      seriesName?: string;
-      event?: { event?: MouseEvent };
-    }) => {
-      if (params.componentType !== 'series') return;
+    click: (params: ChartClickParams) => {
       const rect = containerRef.current?.getBoundingClientRect();
       const nativeEvent = params.event?.event;
       const left = rect && nativeEvent ? nativeEvent.clientX - rect.left : 16;
       const top = rect && nativeEvent ? nativeEvent.clientY - rect.top : 16;
-      setContextSelection({
-        xValue: String(params.name ?? ''),
-        groupValue: parseGroupFromSeriesName(params.seriesName),
-        seriesName: params.seriesName,
-        left,
-        top,
-      });
+      const selection = extractSelectionFromClick(spec, params, left, top);
+      if (selection) setContextSelection(selection);
     },
-  }), []);
+  }), [spec]);
 
   return (
     <div ref={containerRef} className="my-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900">
