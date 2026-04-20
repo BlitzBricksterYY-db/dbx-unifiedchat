@@ -442,22 +442,12 @@ def test_chart_generator_sql_summary_handles_union_all():
     summary = generator._summarize_sql_expression(
         parse_one_fn(
         """
-        SELECT
-            service_year,
-            'medical' AS claim_type,
-            COUNT(DISTINCT claim_id) AS claim_count,
-            SUM(paid_amount) AS total_paid
+        SELECT service_year, paid_amount
         FROM medical_claims
-        GROUP BY service_year
         UNION ALL
-        SELECT
-            service_year,
-            'pharmacy' AS claim_type,
-            COUNT(DISTINCT rx_claim_id) AS claim_count,
-            SUM(paid_amount) AS total_paid
+        SELECT service_year, paid_amount
         FROM pharmacy_claims
-        GROUP BY service_year
-        ORDER BY service_year, claim_type
+        ORDER BY service_year
         LIMIT 25
         """
         ),
@@ -466,49 +456,7 @@ def test_chart_generator_sql_summary_handles_union_all():
 
     assert "combines 2 SELECT branches via UNION ALL" in summary
     assert "ordered by service_year" in summary
-    assert "medical.claim_count=COUNT(DISTINCT claim_id)" in summary
-    assert "pharmacy.claim_count=COUNT(DISTINCT rx_claim_id)" in summary
     assert "limit 25" in summary
-
-
-def test_chart_generator_sql_summary_uses_metric_aliases_for_chart_context():
-    generator = ChartGenerator(llm=None)  # type: ignore[arg-type]
-    _parse_error, exp_module, parse_one_fn = _load_sqlglot()
-    if parse_one_fn is None or exp_module is None:
-        pytest.skip("sqlglot is not importable in this pytest harness")
-
-    summary = generator._summarize_sql_expression(
-        parse_one_fn(
-        """
-        WITH patient_claims AS (
-            SELECT
-                member_id,
-                COUNT(DISTINCT claim_id) AS total_claims,
-                COUNT(DISTINCT patient_id) AS patient_count,
-                ROUND(
-                    100.0 * COUNT(DISTINCT patient_id)
-                    / SUM(COUNT(DISTINCT patient_id)) OVER (),
-                    2
-                ) AS percentage
-            FROM encounters
-            WHERE service_year = 2024
-            GROUP BY member_id
-        )
-        SELECT
-            total_claims,
-            patient_count,
-            percentage
-        FROM patient_claims
-        ORDER BY total_claims DESC
-        """
-        ),
-        exp_module,
-    )
-
-    assert "metrics" in summary
-    assert "patient_count=COUNT(DISTINCT patient_id)" in summary
-    assert "percentage=ROUND(" in summary
-    assert "COUNT(DISTINCT ec.patient" not in summary
 
 
 def test_chart_generator_without_llm_prefers_time_series_rollup():

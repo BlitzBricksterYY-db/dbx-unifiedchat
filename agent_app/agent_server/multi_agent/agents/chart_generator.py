@@ -605,17 +605,10 @@ Rules:
         if expression.args.get("distinct"):
             bits.append("uses DISTINCT")
 
-        metric_summary = self._summarize_select_metrics(expression, exp_module)
-        if not metric_summary and with_clause and getattr(with_clause, "expressions", None):
-            metric_summary = self._summarize_with_clause_metrics(with_clause, exp_module)
-        if metric_summary:
-            bits.append(metric_summary)
-
-        group_clause = expression.args.get("group")
-        if group_clause and getattr(group_clause, "expressions", None):
-            group_fields = ", ".join(self._compact_sql(group.sql(), 32) for group in group_clause.expressions[:3])
-            suffix = " +" if len(group_clause.expressions) > 3 else ""
-            bits.append(f"grouped by {group_fields}{suffix}")
+        aggregate_names = [self._compact_sql(agg.sql(), 28) for agg in expression.find_all(exp_module.AggFunc)]
+        if aggregate_names:
+            suffix = " +" if len(aggregate_names) > 3 else ""
+            bits.append(f"aggregates {', '.join(aggregate_names[:3])}{suffix}")
 
         join_count = len(expression.args.get("joins") or [])
         if join_count:
@@ -626,9 +619,15 @@ Rules:
         if expression.find(exp_module.Window):
             bits.append("uses window functions")
 
+        group_clause = expression.args.get("group")
+        if group_clause and getattr(group_clause, "expressions", None):
+            group_fields = ", ".join(self._compact_sql(group.sql(), 24) for group in group_clause.expressions[:3])
+            suffix = " +" if len(group_clause.expressions) > 3 else ""
+            bits.append(f"grouped by {group_fields}{suffix}")
+
         order_clause = expression.args.get("order")
         if order_clause and getattr(order_clause, "expressions", None):
-            order_fields = ", ".join(self._compact_sql(item.sql(), 36) for item in order_clause.expressions[:2])
+            order_fields = ", ".join(self._compact_sql(item.sql(), 28) for item in order_clause.expressions[:2])
             suffix = " +" if len(order_clause.expressions) > 2 else ""
             bits.append(f"ordered by {order_fields}{suffix}")
 
@@ -638,7 +637,7 @@ Rules:
             if limit_value is not None:
                 bits.append(f"limit {limit_value.sql()}")
 
-        return self._finalize_sql_summary(bits)
+        return "; ".join(bits[:5])[:260]
 
     def _summarize_set_operation(self, expression: Any, exp_module: Any) -> str:
         bits: List[str] = []
@@ -656,7 +655,7 @@ Rules:
 
         order_clause = expression.args.get("order")
         if order_clause and getattr(order_clause, "expressions", None):
-            order_fields = ", ".join(self._compact_sql(item.sql(), 36) for item in order_clause.expressions[:2])
+            order_fields = ", ".join(self._compact_sql(item.sql(), 28) for item in order_clause.expressions[:2])
             suffix = " +" if len(order_clause.expressions) > 2 else ""
             bits.append(f"ordered by {order_fields}{suffix}")
 
@@ -668,90 +667,18 @@ Rules:
 
         aggregate_names: List[str] = []
         for branch in branches:
-            branch_label = self._infer_select_branch_label(branch, exp_module)
-            branch_metric_summary = self._summarize_select_metrics(branch, exp_module)
-            if branch_metric_summary:
-                metric_clause = branch_metric_summary.removeprefix("metrics ")
-                for metric in metric_clause.split(", "):
-                    labeled_metric = f"{branch_label}.{metric}" if branch_label else metric
-                    if labeled_metric not in aggregate_names:
-                        aggregate_names.append(labeled_metric)
+            for agg in branch.find_all(exp_module.AggFunc):
+                agg_sql = self._compact_sql(agg.sql(), 28)
+                if agg_sql not in aggregate_names:
+                    aggregate_names.append(agg_sql)
                 if len(aggregate_names) >= 3:
                     break
             if len(aggregate_names) >= 3:
                 break
         if aggregate_names:
-            suffix = " +" if len(aggregate_names) > 3 else ""
-            bits.append(f"branch metrics {', '.join(aggregate_names[:3])}{suffix}")
+            bits.append(f"branch aggregates {', '.join(aggregate_names)}")
 
-        return self._finalize_sql_summary(bits)
-
-    def _summarize_select_metrics(self, expression: Any, exp_module: Any) -> str:
-        metric_bits: List[str] = []
-        select_expressions = list(getattr(expression, "expressions", None) or [])
-        for select_item in select_expressions:
-            raw_expression = select_item.this if isinstance(select_item, exp_module.Alias) else select_item
-            agg_expression = None
-            if isinstance(raw_expression, exp_module.AggFunc):
-                agg_expression = raw_expression
-            elif hasattr(raw_expression, "find"):
-                agg_expression = raw_expression.find(exp_module.AggFunc)
-            if agg_expression is None:
-                continue
-
-            alias = str(getattr(select_item, "alias_or_name", "") or "").strip()
-            metric_expr = self._compact_sql(
-                raw_expression.sql() if alias else agg_expression.sql(),
-                48,
-            )
-            metric_bit = f"{alias}={metric_expr}" if alias else metric_expr
-            if metric_bit not in metric_bits:
-                metric_bits.append(metric_bit)
-            if len(metric_bits) >= 3:
-                break
-
-        if not metric_bits:
-            return ""
-        return f"metrics {', '.join(metric_bits[:3])}"
-
-    def _summarize_with_clause_metrics(self, with_clause: Any, exp_module: Any) -> str:
-        for cte in reversed(list(getattr(with_clause, "expressions", None) or [])):
-            cte_body = getattr(cte, "this", None)
-            if cte_body is None:
-                continue
-            if isinstance(cte_body, exp_module.Select):
-                metric_summary = self._summarize_select_metrics(cte_body, exp_module)
-            elif hasattr(cte_body, "find"):
-                select = cte_body.find(exp_module.Select)
-                metric_summary = self._summarize_select_metrics(select, exp_module) if select else ""
-            else:
-                metric_summary = ""
-            if metric_summary:
-                return metric_summary
-        return ""
-
-    def _infer_select_branch_label(self, expression: Any, exp_module: Any) -> str:
-        select_expressions = list(getattr(expression, "expressions", None) or [])
-        for select_item in select_expressions:
-            if not isinstance(select_item, exp_module.Alias):
-                continue
-            raw_expression = getattr(select_item, "this", None)
-            if isinstance(raw_expression, exp_module.Literal) and getattr(raw_expression, "is_string", False):
-                literal_value = str(getattr(raw_expression, "this", "") or "").strip()
-                if literal_value:
-                    return self._compact_sql(literal_value, 20)
-
-        table_iter = getattr(expression, "find_all", None)
-        if callable(table_iter):
-            for table in expression.find_all(exp_module.Table):
-                table_name = getattr(table, "name", None) or getattr(table, "this", None)
-                table_label = str(table_name or "").strip()
-                if table_label:
-                    return self._compact_sql(table_label, 24)
-        return ""
-
-    def _finalize_sql_summary(self, bits: List[str]) -> str:
-        return "; ".join(bits[:7])[:360]
+        return "; ".join(bits[:5])[:260]
 
     def _flatten_set_operation_branches(self, expression: Any, exp_module: Any) -> List[Any]:
         if not isinstance(expression, exp_module.SetOperation):
@@ -805,9 +732,9 @@ Rules:
             flags=re.IGNORECASE,
         )
         if aggregates:
-            metric_bits = [f"{fn.lower()}({self._compact_sql(arg, 40)})" for fn, arg in aggregates[:3]]
+            metric_bits = [f"{fn.lower()}({self._compact_sql(arg, 28)})" for fn, arg in aggregates[:3]]
             suffix = " +" if len(aggregates) > 3 else ""
-            bits.append(f"metrics {', '.join(metric_bits)}{suffix}")
+            bits.append(f"aggregates {', '.join(metric_bits)}{suffix}")
 
         join_count = len(re.findall(r"\bjoin\b", lowered))
         if join_count:
@@ -819,17 +746,17 @@ Rules:
 
         group_match = re.search(r"\bgroup by\b\s+(.*?)(?=\bhaving\b|\border by\b|\blimit\b|$)", normalized, flags=re.IGNORECASE)
         if group_match:
-            bits.append(f"grouped by {self._compact_sql(group_match.group(1), 96)}")
+            bits.append(f"grouped by {self._compact_sql(group_match.group(1), 72)}")
 
         order_match = re.search(r"\border by\b\s+(.*?)(?=\blimit\b|$)", normalized, flags=re.IGNORECASE)
         if order_match:
-            bits.append(f"ordered by {self._compact_sql(order_match.group(1), 96)}")
+            bits.append(f"ordered by {self._compact_sql(order_match.group(1), 72)}")
 
         limit_match = re.search(r"\blimit\b\s+(\d+)", lowered)
         if limit_match:
             bits.append(f"limit {limit_match.group(1)}")
 
-        return self._finalize_sql_summary(bits)
+        return "; ".join(bits[:5])[:260]
 
     def _compact_sql(self, text: str, limit: int = 72) -> str:
         compacted = re.sub(r"\s+", " ", text).strip()
