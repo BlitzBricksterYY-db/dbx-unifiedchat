@@ -971,6 +971,127 @@ test.describe('Agent Settings', () => {
     });
   });
 
+  test('should not reconnect a stale clarification stream after answering the modal', async ({
+    adaContext,
+  }) => {
+    test.setTimeout(60_000);
+
+    const { page } = adaContext;
+    const chatPage = new ChatPage(page);
+    const postRequests: Array<{ id: string; messageText?: string }> = [];
+    let resumeStreamRequests = 0;
+
+    await page.route('**/api/chat/*/stream', async (route) => {
+      resumeStreamRequests += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: `${[
+          { type: 'start', messageId: crypto.randomUUID() },
+          { type: 'start-step' },
+          { type: 'text-start', id: 'replayed-clarification' },
+          {
+            type: 'text-delta',
+            id: 'replayed-clarification',
+            delta: 'Clarification required before continuing.',
+          },
+          { type: 'text-end', id: 'replayed-clarification' },
+          { type: 'finish-step' },
+          {
+            type: 'data-clarification',
+            data: {
+              reason: 'Which member trend do you want by month?',
+              options: ['Monthly member count', 'Monthly member spend'],
+            },
+          },
+          { type: 'data-traceId', data: 'tr-stale-clarification-stream' },
+        ]
+          .map((event) => `data: ${JSON.stringify(event)}`)
+          .join('\n\n')}\n\ndata: [DONE]\n\n`,
+      });
+    });
+
+    await page.route('**/api/chat*', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback();
+        return;
+      }
+
+      const body = route.request().postDataJSON() as {
+        id: string;
+        message?: {
+          parts?: Array<{ type?: string; text?: string }>;
+        };
+      };
+
+      const messageText = body.message?.parts?.find(
+        (part) => part.type === 'text',
+      )?.text;
+      postRequests.push({ id: body.id, messageText });
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body:
+          postRequests.length === 1
+            ? `${[
+                { type: 'start', messageId: crypto.randomUUID() },
+                { type: 'start-step' },
+                { type: 'text-start', id: 'clarification-text' },
+                {
+                  type: 'text-delta',
+                  id: 'clarification-text',
+                  delta: 'Clarification required before continuing.',
+                },
+                { type: 'text-end', id: 'clarification-text' },
+                { type: 'finish-step' },
+                {
+                  type: 'data-clarification',
+                  data: {
+                    reason: 'Which member trend do you want by month?',
+                    options: ['Monthly member count', 'Monthly member spend'],
+                  },
+                },
+                { type: 'data-traceId', data: 'tr-clarification-test' },
+              ]
+                .map((event) => `data: ${JSON.stringify(event)}`)
+                .join('\n\n')}\n\ndata: [DONE]\n\n`
+            : buildUiMessageStream(['Final summary after clarification.']),
+      });
+    });
+
+    await chatPage.createNewChat();
+    await chatPage.sendUserMessage('show member trend');
+    await chatPage.isGenerationComplete();
+    await expect.poll(() => postRequests.length).toBe(1);
+
+    const chatId = postRequests[0]?.id;
+    expect(chatId).toBeTruthy();
+
+    await page.evaluate(async ({ currentChatId }) => {
+      await fetch('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          id: currentChatId,
+          message: {
+            id: crypto.randomUUID(),
+            role: 'user',
+            parts: [{ type: 'text', text: 'Monthly member count' }],
+          },
+          selectedChatModel: 'chat-model',
+          selectedVisibilityType: 'private',
+        }),
+      });
+    }, { currentChatId: chatId });
+
+    await expect.poll(() => postRequests.length).toBe(2);
+    expect(postRequests[1]?.messageText).toBe('Monthly member count');
+    expect(resumeStreamRequests).toBe(0);
+  });
+
   test('should isolate settings across multiple open tabs', async ({
     adaContext,
   }) => {

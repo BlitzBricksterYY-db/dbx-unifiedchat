@@ -747,6 +747,7 @@ function ChartBuilderSheet({
                     value={builderState.xAxisField}
                     onChange={(value) => updateBuilder('xAxisField', value)}
                     fields={xAxisFields}
+                    allowEmpty={Boolean(ui.allowEmptyXAxis)}
                   />
                 </BuilderRow>
                 {showNumericBins && (
