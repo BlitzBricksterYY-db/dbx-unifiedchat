@@ -66,7 +66,11 @@ const chartWorkspaceRequestSchema = z.object({
       transform: z.any().optional().nullable(),
       style: z.any().optional().nullable(),
     }),
-  }),
+    aggregated: z.boolean().optional(),
+    aggregationNote: z.string().optional().nullable(),
+    totalRows: z.number().optional(),
+    meta: z.record(z.string(), z.unknown()).optional().nullable(),
+  }).passthrough(),
   request: z.string().min(1),
   mode: z.enum(['replace', 'add']).default('replace'),
 });
@@ -106,6 +110,13 @@ chartWorkspaceRouter.post('/rechart', requireAuth, async (req: Request, res: Res
         sqlQuery: workspace.table.sql ?? '',
         rowGrainHint: workspace.sourceMeta?.rowGrainHint ?? '',
         dataCacheKey: workspace.sourceMeta?.dataCacheKey ?? '',
+        currentChart: {
+          config: existingChart.config,
+          aggregated: existingChart.aggregated,
+          aggregationNote: existingChart.aggregationNote,
+          totalRows: existingChart.totalRows,
+          meta: existingChart.meta,
+        },
         mode,
       });
 
@@ -179,6 +190,7 @@ async function rechartViaPython({
   sqlQuery,
   rowGrainHint,
   dataCacheKey,
+  currentChart,
   mode,
 }: {
   url: string;
@@ -190,6 +202,7 @@ async function rechartViaPython({
   sqlQuery: string;
   rowGrainHint: string;
   dataCacheKey: string;
+  currentChart: Record<string, unknown>;
   mode: string;
 }): Promise<Record<string, unknown> | null> {
   const body: Record<string, unknown> = {
@@ -200,6 +213,7 @@ async function rechartViaPython({
     description,
     sql_query: sqlQuery,
     row_grain_hint: rowGrainHint,
+    current_chart: currentChart,
     mode,
   };
 

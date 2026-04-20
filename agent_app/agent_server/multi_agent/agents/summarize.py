@@ -213,6 +213,9 @@ def _build_visualization_workspace_payload(
     result_item = entry["result"]
     columns = result_item.get("columns", [])
     workspace_id = f"query-{idx + 1}"
+    description = " ".join((entry.get("sql_explanation") or "").split()) or label
+    if len(description) > 160:
+        description = f"{description[:157].rstrip()}..."
 
     data_cache_key = cache_put(columns, full_rows)
 
@@ -248,14 +251,14 @@ def _build_visualization_workspace_payload(
     return {
         "workspaceId": workspace_id,
         "title": label,
-        "description": entry.get("sql_explanation") or "",
+        "description": description,
         "table": table_payload,
         "charts": [chart_payload],
         "fields": _infer_workspace_fields(columns, preview_rows),
         "sourceMeta": {
             "queryIndex": idx + 1,
             "label": label,
-            "sqlExplanation": entry.get("sql_explanation"),
+            "sqlExplanation": None,
             "rowGrainHint": entry.get("row_grain_hint"),
             "previewLimited": source_row_count > len(preview_rows),
             "totalRows": source_row_count,

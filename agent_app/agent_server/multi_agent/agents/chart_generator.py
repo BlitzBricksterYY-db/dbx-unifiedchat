@@ -445,6 +445,7 @@ class ChartGenerator:
         sql_query = result_context.get("sql_query") or ""
         sql_summary = self._summarize_sql(sql_query)
         row_grain_hint = result_context.get("row_grain_hint") or ""
+        current_chart = result_context.get("current_chart")
         context_lines = [
             f"User query: {original_query}",
             f"Result label: {label}",
@@ -455,6 +456,13 @@ class ChartGenerator:
             context_lines.append(f"Result explanation: {sql_explanation}")
         if row_grain_hint:
             context_lines.append(f"Row grain hint: {row_grain_hint}")
+        if current_chart:
+            context_lines.extend(
+                [
+                    "Current chart metadata:",
+                    json.dumps(current_chart, default=_json_default),
+                ]
+            )
         context_lines.extend(
             [
                 f"Columns: {columns}",

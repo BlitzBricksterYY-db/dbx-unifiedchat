@@ -24,6 +24,7 @@ class RechartRequest(BaseModel):
     description: str = ""
     sql_query: str = ""
     row_grain_hint: str = ""
+    current_chart: Optional[Dict[str, Any]] = None
     mode: str = "replace"
     data_cache_key: Optional[str] = None
 
@@ -96,6 +97,7 @@ async def rechart(request: RechartRequest) -> RechartResponse:
                 "sql_query": request.sql_query or None,
                 "sql_explanation": request.description or None,
                 "row_grain_hint": request.row_grain_hint or None,
+                "current_chart": request.current_chart or None,
             },
         )
 
