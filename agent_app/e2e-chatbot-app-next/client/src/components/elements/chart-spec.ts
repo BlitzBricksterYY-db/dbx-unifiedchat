@@ -204,6 +204,7 @@ export type ChartBuilderState = {
 
 export type ChartBuilderUiConfig = {
   xAxisKind: 'dimension' | 'numeric' | 'any';
+  allowEmptyXAxis?: boolean;
   showYAxis: boolean;
   yAxisLabel: string;
   showSecondaryYAxis: boolean;
@@ -223,6 +224,7 @@ export function getChartBuilderUiConfig(chartType: ChartType): ChartBuilderUiCon
     case 'histogram':
       return {
         xAxisKind: 'numeric',
+        allowEmptyXAxis: false,
         showYAxis: true,
         yAxisLabel: 'Value',
         showSecondaryYAxis: false,
@@ -239,6 +241,7 @@ export function getChartBuilderUiConfig(chartType: ChartType): ChartBuilderUiCon
     case 'scatter':
       return {
         xAxisKind: 'numeric',
+        allowEmptyXAxis: false,
         showYAxis: true,
         yAxisLabel: 'Y axis',
         showSecondaryYAxis: false,
@@ -255,6 +258,7 @@ export function getChartBuilderUiConfig(chartType: ChartType): ChartBuilderUiCon
     case 'pie':
       return {
         xAxisKind: 'dimension',
+        allowEmptyXAxis: false,
         showYAxis: true,
         yAxisLabel: 'Value',
         showSecondaryYAxis: false,
@@ -271,6 +275,7 @@ export function getChartBuilderUiConfig(chartType: ChartType): ChartBuilderUiCon
     case 'heatmap':
       return {
         xAxisKind: 'dimension',
+        allowEmptyXAxis: false,
         showYAxis: true,
         yAxisLabel: 'Cell value',
         showSecondaryYAxis: false,
@@ -287,6 +292,7 @@ export function getChartBuilderUiConfig(chartType: ChartType): ChartBuilderUiCon
     case 'boxplot':
       return {
         xAxisKind: 'dimension',
+        allowEmptyXAxis: true,
         showYAxis: true,
         yAxisLabel: 'Distribution value',
         showSecondaryYAxis: false,
@@ -303,6 +309,7 @@ export function getChartBuilderUiConfig(chartType: ChartType): ChartBuilderUiCon
     case 'dualAxis':
       return {
         xAxisKind: 'dimension',
+        allowEmptyXAxis: false,
         showYAxis: true,
         yAxisLabel: 'Primary Y axis',
         showSecondaryYAxis: true,
@@ -321,6 +328,7 @@ export function getChartBuilderUiConfig(chartType: ChartType): ChartBuilderUiCon
     case 'stackedArea':
       return {
         xAxisKind: 'dimension',
+        allowEmptyXAxis: false,
         showYAxis: true,
         yAxisLabel: 'Y axis',
         showSecondaryYAxis: false,
@@ -337,6 +345,7 @@ export function getChartBuilderUiConfig(chartType: ChartType): ChartBuilderUiCon
     default:
       return {
         xAxisKind: 'dimension',
+        allowEmptyXAxis: false,
         showYAxis: true,
         yAxisLabel: 'Y axis',
         showSecondaryYAxis: false,
@@ -447,8 +456,9 @@ export function validateBuilderState(
   const fields = getWorkspaceFields(workspace);
   const fieldByName = new Map(fields.map((field) => [field.name, field]));
   const issues: string[] = [];
+  const xAxisRequired = !(state.chartType === 'boxplot' && !state.xAxisField);
 
-  if (!state.xAxisField) issues.push('Choose an X axis field.');
+  if (xAxisRequired && !state.xAxisField) issues.push('Choose an X axis field.');
   if (!state.yAxisField && state.chartType !== 'pie' && state.chartType !== 'rankingSlope' && state.chartType !== 'deltaComparison') {
     issues.push('Choose a primary Y axis field.');
   }
@@ -537,7 +547,11 @@ export function normalizeBuilderStateForChartType(
   if (ui.xAxisKind === 'numeric') {
     if (!isNumericField(next.xAxisField)) next.xAxisField = pickAlternateNumeric(next.yAxisField) || pickNumeric();
   } else if (ui.xAxisKind === 'dimension') {
-    if (!isAllowedDimensionXAxisField(next.xAxisField)) next.xAxisField = pickDimension() || next.xAxisField;
+    if (ui.allowEmptyXAxis && !next.xAxisField) {
+      next.xAxisField = '';
+    } else if (!isAllowedDimensionXAxisField(next.xAxisField)) {
+      next.xAxisField = pickDimension() || next.xAxisField;
+    }
   }
 
   if (ui.showYAxis) {
@@ -587,7 +601,9 @@ export function materializeChartSpecFromBuilder(
   const fields = getWorkspaceFields(workspace);
   const rows = workspace.table.rows;
   const fieldByName = new Map(fields.map((field) => [field.name, field]));
-  const xField = builder.xAxisField || pickDefaultXField(fields);
+  const xField = builder.chartType === 'boxplot' && !builder.xAxisField
+    ? ''
+    : (builder.xAxisField || pickDefaultXField(fields));
   const yField = builder.yAxisField || pickDefaultYField(fields);
   const secondaryField = builder.secondaryYAxisField || '';
   const groupField = builder.groupByField || '';
@@ -716,7 +732,7 @@ export function materializeChartSpecFromBuilder(
       chartType,
       title: builder.title.trim() || workspace.title,
       description: description || undefined,
-      xAxisField: xField,
+      xAxisField: chartType === 'boxplot' && !xField ? null : xField,
       yAxisField: chartType === 'heatmap' ? (groupField || null) : null,
       zAxisField: zField || null,
       groupByField: groupField || null,
@@ -891,7 +907,7 @@ function buildHeatmapOption(spec: ChartSpec): EChartsOption {
 }
 
 function buildBoxplotOption(spec: ChartSpec): EChartsOption {
-  const xField = spec.config.xAxisField ?? 'label';
+  const xField = spec.config.xAxisField || 'label';
   const labels = spec.chartData.map((row) => String(row[xField] ?? ''));
   const data = spec.chartData.map((row) => [
     Number(row.min ?? 0),
@@ -1673,8 +1689,21 @@ function buildBoxplotChartData(
   yField: string,
   numericBinCount: number | null = null,
 ) {
+  const labelField = xField || 'label';
   const numericBinner = numericBinCount ? createNumericBinner(rows, xField, numericBinCount) : null;
   const grouped = new Map<string, { values: number[]; sortValue: unknown }>();
+  if (!xField) {
+    const values = rows.map((row) => numeric(row[yField])).filter((value) => !Number.isNaN(value)).sort((a, b) => a - b);
+    if (values.length === 0) return [];
+    return [{
+      [labelField]: prettifyLabel(yField),
+      min: values[0] ?? 0,
+      q1: quantile(values, 0.25),
+      median: quantile(values, 0.5),
+      q3: quantile(values, 0.75),
+      max: values[values.length - 1] ?? 0,
+    }];
+  }
   for (const row of rows) {
     const xAxisValue = numericBinner
       ? numericBinner(row[xField])
@@ -1687,7 +1716,7 @@ function buildBoxplotChartData(
     .map(([label, entry]) => {
       const sorted = entry.values.filter((value) => !Number.isNaN(value)).sort((a, b) => a - b);
       return {
-        [xField]: label,
+        [labelField]: label,
         min: sorted[0] ?? 0,
         q1: quantile(sorted, 0.25),
         median: quantile(sorted, 0.5),
@@ -1855,6 +1884,9 @@ function resolveBuilderXAxisField(
   xAxisField: string | null | undefined,
   fields: ChartField[],
 ) {
+  if (transform?.type === 'boxplot' && !xAxisField) {
+    return '';
+  }
   if (transform?.type === 'histogram' && typeof transform.field === 'string' && transform.field) {
     return transform.field;
   }

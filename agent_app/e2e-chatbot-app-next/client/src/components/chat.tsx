@@ -94,6 +94,7 @@ export function Chat({
   // Single counter for resume attempts - reset when stream parts are received
   const resumeAttemptCountRef = useRef(0);
   const maxResumeAttempts = 3;
+  const clarificationDataSeenRef = useRef(false);
 
   const abortController = useRef<AbortController | null>(new AbortController());
   useEffect(() => {
@@ -151,6 +152,7 @@ export function Chat({
       api: '/api/chat',
       fetch: fetchWithAbort,
       prepareSendMessagesRequest({ messages, id, body }) {
+        clarificationDataSeenRef.current = false;
         const lastMessage = messages.at(-1);
         const isUserMessage = lastMessage?.role === 'user';
         const currentAgentSettings = agentSettingsRef.current;
@@ -194,6 +196,7 @@ export function Chat({
         setUsage(dataPart.data as LanguageModelUsage);
       }
       if (dataPart.type === 'data-clarification' && dataPart.data) {
+        clarificationDataSeenRef.current = true;
         setClarification(
           dataPart.data as ClarificationData,
         );
@@ -241,8 +244,12 @@ export function Chat({
       // 3. We haven't exceeded max resume attempts
       const streamIncomplete = lastPartRef.current?.type !== 'finish';
       // Clarification turns intentionally end without a finish part, so only
-      // retry on actual disconnects or stream errors.
-      const shouldResume = streamIncomplete && (isDisconnect || isError);
+      // retry on actual disconnects or stream errors, and never reconnect a
+      // stream that already delivered a clarification interrupt payload.
+      const shouldResume =
+        streamIncomplete &&
+        !clarificationDataSeenRef.current &&
+        (isDisconnect || isError);
 
       if (shouldResume && resumeAttemptCountRef.current < maxResumeAttempts) {
         console.log(
