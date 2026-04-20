@@ -153,19 +153,28 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
   const updateChartType = useCallback((chartIndex: number, nextType: string) => {
     const currentChart = charts[chartIndex];
     if (!currentChart || currentChart.config.chartType === nextType) return;
-    replaceChart(chartIndex, {
-      ...currentChart,
-      config: {
-        ...currentChart.config,
+    const nextBuilder = normalizeBuilderStateForChartType(
+      {
+        ...createBuilderStateFromChart(currentChart, hydratedWorkspace),
         chartType: nextType as ChartSpec['config']['chartType'],
       },
+      getWorkspaceFields(hydratedWorkspace),
+    );
+    const nextChart = materializeChartSpecFromBuilder(
+      hydratedWorkspace,
+      nextBuilder,
+      currentChart,
+      'manual',
+    );
+    replaceChart(chartIndex, {
+      ...nextChart,
       meta: {
-        ...currentChart.meta,
+        ...nextChart.meta,
         source: 'manual',
         rationale: 'Switched chart type from toolbar controls.',
       },
     });
-  }, [charts, replaceChart]);
+  }, [charts, hydratedWorkspace, replaceChart]);
 
   const undoChart = useCallback((chartIndex: number) => {
     const currentChart = charts[chartIndex];
@@ -720,6 +729,7 @@ function ChartBuilderSheet({
                   >
                     <option value="bar">Bar</option>
                     <option value="line">Line</option>
+                    <option value="histogram">Histogram</option>
                     <option value="area">Area</option>
                     <option value="stackedBar">Stacked bar</option>
                     <option value="normalizedStackedBar">100% stacked bar</option>

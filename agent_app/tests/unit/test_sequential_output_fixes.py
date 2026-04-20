@@ -718,6 +718,39 @@ def test_chart_generator_histogram_ignores_nan_values():
     assert sum(row["count"] for row in payload["chartData"]) == 4
 
 
+def test_chart_generator_histogram_supports_count_distinct_metric():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "bar",
+          "title": "Distinct Patients by Age Bucket",
+          "xAxisField": "age",
+          "series": [{"field": "patient_id", "name": "Patient", "format": "number"}],
+          "transform": {"type": "histogram", "field": "age", "bins": 2, "metric": "patient_id", "function": "count_distinct"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["age", "patient_id"],
+        data=[
+            {"age": 10, "patient_id": "A"},
+            {"age": 12, "patient_id": "B"},
+            {"age": 20, "patient_id": "A"},
+            {"age": 22, "patient_id": "C"},
+        ],
+        original_query="Distinct patients by age bucket",
+    )
+
+    assert payload is not None
+    assert payload["config"]["xAxisField"] == "bucket"
+    assert payload["config"]["series"][0]["field"] == "patient_id"
+    assert payload["config"]["transform"]["function"] == "count_distinct"
+    assert sum(row["patient_id"] for row in payload["chartData"]) == 4
+
+
 def test_chart_generator_llm_numeric_x_axis_is_bucketed_to_histogram():
     llm = StubLlm(
         """

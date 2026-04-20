@@ -56,7 +56,7 @@ SUPPORTED_TRANSFORMS = (
     "deltaComparison",
 )
 SUPPORTED_TIME_BUCKETS = ("day", "week", "month", "quarter", "year")
-SUPPORTED_AGGREGATIONS = ("sum", "avg", "count", "min", "max")
+SUPPORTED_AGGREGATIONS = ("sum", "avg", "count", "count_distinct", "min", "max")
 SERIES_RENDER_TYPES = ("bar", "line", "area")
 _DEDUPED_METRIC_TOKENS = (
     "total_",
@@ -1098,13 +1098,26 @@ Rules:
             if not field or kinds.get(field) != "numeric":
                 notes.append("Skipped invalid histogram field; using fallback chart")
                 return None
+            explicit_metric = self._coerce_field(raw_transform.get("metric"), columns)
             normalized["field"] = field
             normalized["bins"] = _clamp_int(raw_transform.get("bins"), default=12, minimum=5, maximum=20)
+            normalized["metric"] = explicit_metric
+            normalized["function"] = (
+                raw_transform.get("function")
+                if raw_transform.get("function") in SUPPORTED_AGGREGATIONS
+                else ("count" if not explicit_metric else "sum")
+            )
+            synthetic_field = explicit_metric or "count"
+            synthetic_name = "Count"
+            if explicit_metric and normalized["function"] == "count_distinct":
+                synthetic_name = f"Distinct {explicit_metric.replace('_', ' ').title()} Count"
+            elif explicit_metric and normalized["function"] != "count":
+                synthetic_name = explicit_metric.replace("_", " ").title()
             normalized["syntheticSeries"] = [
                 {
-                    "field": "count",
-                    "name": "Count",
-                    "format": "number",
+                    "field": synthetic_field,
+                    "name": synthetic_name,
+                    "format": "number" if normalized["function"] in {"count", "count_distinct"} else self._infer_format(explicit_metric or "count"),
                     "chartType": None,
                     "axis": "primary",
                 }
@@ -1553,7 +1566,7 @@ Rules:
         if transform_type == "timeBucket":
             return self._agg_time_bucket(data, config, transform, result_context)
         if transform_type == "histogram":
-            return self._agg_histogram(data, transform)
+            return self._agg_histogram(data, transform, result_context)
         if transform_type == "percentOfTotal":
             return self._agg_percent_of_total(data, config, transform, result_context)
         if transform_type == "heatmap":
@@ -1728,34 +1741,53 @@ Rules:
         self,
         data: List[Dict[str, Any]],
         transform: Dict[str, Any],
+        result_context: Dict[str, Any],
     ) -> Tuple[List[Dict], str]:
         field = transform["field"]
         bins = transform.get("bins", 12)
-        values = sorted(
-            value
-            for value in (_numeric(row.get(field)) for row in data if row.get(field) is not None)
-            if math.isfinite(value)
-        )
+        metric = transform.get("metric")
+        function = transform.get("function", "count")
+        numeric_rows = [
+            (row, _numeric(row.get(field)))
+            for row in data
+            if row.get(field) is not None
+        ]
+        numeric_rows = [(row, value) for row, value in numeric_rows if math.isfinite(value)]
+        values = sorted(value for _, value in numeric_rows)
         if not values:
             return [], "No numeric values available for histogram"
         lo, hi = values[0], values[-1]
+        value_field = metric or "count"
         if math.isclose(lo, hi):
-            return [{"bucket": f"{lo:g}", "bucketStart": lo, "bucketEnd": hi, "count": len(values)}], "Single-value histogram"
+            rows = [row for row, _ in numeric_rows]
+            values_for_metric = [_numeric(row.get(metric, 0)) for row in rows] if metric else []
+            aggregated_value = (
+                _aggregate_values(values_for_metric, function, metric, rows, result_context, self._should_dedupe_metric)
+                if metric
+                else float(len(rows))
+            )
+            return [{"bucket": f"{lo:g}", "bucketStart": lo, "bucketEnd": hi, value_field: aggregated_value}], "Single-value histogram"
         width = (hi - lo) / bins
-        counts = [0 for _ in range(bins)]
-        for value in values:
+        bucket_rows: List[List[Dict[str, Any]]] = [[] for _ in range(bins)]
+        for row, value in numeric_rows:
             index = min(int((value - lo) / width), bins - 1)
-            counts[index] += 1
+            bucket_rows[index].append(row)
         chart_data = []
-        for index, count in enumerate(counts):
+        for index, rows in enumerate(bucket_rows):
             start = lo + index * width
             end = lo + (index + 1) * width
+            values_for_metric = [_numeric(row.get(metric, 0)) for row in rows] if metric else []
+            aggregated_value = (
+                _aggregate_values(values_for_metric, function, metric, rows, result_context, self._should_dedupe_metric)
+                if metric
+                else float(len(rows))
+            )
             chart_data.append(
                 {
                     "bucket": f"{start:.1f}–{end:.1f}",
                     "bucketStart": start,
                     "bucketEnd": end,
-                    "count": count,
+                    value_field: aggregated_value,
                 }
             )
         return chart_data, f"Histogram with {bins} bins for {field}"
@@ -2708,6 +2740,8 @@ def _aggregate_values(
     result_context: Dict[str, Any],
     dedupe_checker: Any,
 ) -> float:
+    if function == "count_distinct":
+        return float(len({str(row.get(field, "")) for row in rows if row.get(field) not in (None, "")}))
     if not values:
         return 0.0
     if function == "count":
