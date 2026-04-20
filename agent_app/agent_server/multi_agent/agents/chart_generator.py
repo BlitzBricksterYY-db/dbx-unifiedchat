@@ -529,6 +529,7 @@ Return ONLY valid JSON (no markdown, no explanation):
 
 Examples for EACH chart type:
 - Trend over time: chartType=line, xAxisField="service_date", transform={{"type":"timeBucket","field":"service_date","bucket":"month","metric":"paid_amount","function":"sum"}}
+- Pre-aggregated count trend: if rows already contain claim_count/member_count/etc, use transform={{"type":"timeBucket","field":"year","bucket":"year","metric":"claim_count","function":"sum"}} instead of counting rows
 - Stacked area trend: chartType=stackedArea, layout=stacked, xAxisField="service_date", groupByField="benefit_type", transform={{"type":"timeBucket","field":"service_date","bucket":"quarter","metric":"paid_amount","function":"sum"}}
 - Distribution histogram: chartType=bar, transform={{"type":"histogram","field":"paid_amount","bins":12}}
 - Top N categories: chartType=bar, transform={{"type":"topN","metric":"total_paid_amount","n":10,"otherLabel":"Other"}}, sortBy={{"field":"total_paid_amount","order":"desc"}}
@@ -551,6 +552,7 @@ Rules:
 - If a date field exists, prefer line, area, or stackedArea over bar
 - If the x-axis is a continuous numeric field such as age, cost, score, or length_of_stay, prefer histogram bins instead of plotting raw numeric values as categories
 - Do NOT use a high-cardinality numeric field as a categorical x-axis unless you are intentionally binning it with histogram
+- If a metric is already an aggregated count-like field such as claim_count, member_count, diagnosis_count, or total_count, use sum/count_distinct/avg/etc on that metric as appropriate; do NOT use function="count" unless you truly mean counting input rows
 - If <=6 categories with one metric, consider pie
 - If two categorical dimensions with a metric, consider heatmap
 - For heatmaps, you may set transform.xOrder and transform.yOrder to "asc" or "desc" for axis ordering
@@ -1099,6 +1101,11 @@ Rules:
                 if raw_transform.get("function") in SUPPORTED_AGGREGATIONS
                 else ("count" if not metric else "sum")
             )
+            if metric and normalized["function"] == "count" and _is_count_like_metric_name(metric):
+                normalized["function"] = "sum"
+                notes.append(
+                    f"Converted timeBucket aggregation for pre-aggregated metric '{metric}' from count to sum"
+                )
             return normalized
 
         if transform_type == "histogram":
@@ -1728,6 +1735,7 @@ Rules:
             grouped[(bucket_label, group_value)].append(row)
 
         chart_data: List[Dict[str, Any]] = []
+        coerced_metrics: set[str] = set()
         for (bucket_label, group_value), rows in sorted(grouped.items(), key=lambda item: item[0][0]):
             row_out: Dict[str, Any] = {config["xAxisField"]: bucket_label}
             if group_field:
@@ -1737,10 +1745,23 @@ Rules:
                     row_out["count"] = len(rows)
                     continue
                 values = [_numeric(r.get(field_name, 0)) for r in rows]
-                row_out[field_name] = _aggregate_values(values, function, field_name, rows, result_context, self._should_dedupe_metric)
+                effective_function = function
+                if effective_function == "count" and _is_count_like_metric_name(field_name):
+                    effective_function = "sum"
+                    coerced_metrics.add(field_name)
+                row_out[field_name] = _aggregate_values(
+                    values,
+                    effective_function,
+                    field_name,
+                    rows,
+                    result_context,
+                    self._should_dedupe_metric,
+                )
             chart_data.append(row_out)
 
         note = f"Bucketed {len(chart_data)} points by {bucket}"
+        if coerced_metrics:
+            note += "; used sum instead of count for pre-aggregated metrics: " + ", ".join(sorted(coerced_metrics))
         if skipped_rows:
             note += f"; skipped {skipped_rows} rows with unparseable {field} values"
         return chart_data, note
@@ -2763,6 +2784,20 @@ def _aggregate_values(
     if dedupe_checker(field, rows, result_context):
         return max(values)
     return sum(values)
+
+
+def _is_count_like_metric_name(field: str) -> bool:
+    lowered = field.lower()
+    if lowered in {"count", "cnt", "num", "number"}:
+        return True
+    return (
+        lowered.endswith(("_count", "_cnt", "_num", "_number"))
+        or lowered.startswith(("count_", "cnt_", "num_", "number_"))
+        or "_count_" in lowered
+        or "_cnt_" in lowered
+        or "_num_" in lowered
+        or "_number_" in lowered
+    )
 
 
 def _quartiles(values: Sequence[float]) -> Tuple[float, float, float]:

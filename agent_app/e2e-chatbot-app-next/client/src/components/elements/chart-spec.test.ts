@@ -10,6 +10,7 @@ import {
   normalizeBuilderStateForChartType,
   parseChartSpec,
   parseChartWorkspace,
+  restoreSavedCharts,
   validateBuilderState,
 } from './chart-spec';
 
@@ -91,6 +92,37 @@ test('parseChartSpec accepts null compareLabels from backend payloads', () => {
 
   assert.ok(spec);
   assert.equal(spec.config.compareLabels, null);
+});
+
+test('restoreSavedCharts falls back when persisted charts are stale or invalid', () => {
+  const fallback = [
+    parseChartSpec({
+      config: {
+        chartType: 'line',
+        title: 'Fallback chart',
+        xAxisField: 'service_year',
+        series: [{ field: 'claim_count', name: 'Claim Count', format: 'number' }],
+      },
+      chartData: [{ service_year: '2024', claim_count: 10 }],
+    }),
+  ].filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+  const restored = restoreSavedCharts(
+    JSON.stringify([
+      {
+        config: {
+          chartType: 'line',
+          title: 'Broken saved chart',
+          xAxisField: 'service_year',
+          series: [],
+        },
+        chartData: [{ service_year: '2024', claim_count: 10 }],
+      },
+    ]),
+    fallback,
+  );
+
+  assert.deepEqual(restored, fallback);
 });
 
 test('buildOption creates a heatmap config', () => {

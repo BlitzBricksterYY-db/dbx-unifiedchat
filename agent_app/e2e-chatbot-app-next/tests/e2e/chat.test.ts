@@ -412,6 +412,10 @@ test.describe('Interactive Charts', () => {
   }) => {
     const { page } = adaContext;
     const chatPage = new ChatPage(page);
+    const pageErrors: string[] = [];
+    page.on('pageerror', (error) => {
+      pageErrors.push(String(error?.stack || error));
+    });
     const assistantContent = `Here is a workspace.\n\n\`\`\`viz-workspace\n${JSON.stringify({
       workspaceId: 'query-1',
       title: 'Monthly spend',
@@ -563,6 +567,7 @@ test.describe('Interactive Charts', () => {
       });
     });
 
+    await clearAppLocalStorage(page);
     await chatPage.createNewChat();
     await chatPage.sendUserMessage('Show monthly spend workspace');
     await chatPage.isGenerationComplete();
@@ -578,6 +583,8 @@ test.describe('Interactive Charts', () => {
 
     await expect(page.getByText('Paid amount by benefit type').first()).toBeVisible();
     await expect(page.getByRole('button', { name: 'Show details' })).toBeVisible();
+    await expect(page.getByText('[Chart unavailable]')).toHaveCount(0);
+    expect(pageErrors).toEqual([]);
   });
 });
 

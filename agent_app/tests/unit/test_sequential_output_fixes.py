@@ -79,6 +79,20 @@ class StubLlm:
         yield SimpleNamespace(content=self._content)
 
 
+class PromptCapturingLlm(StubLlm):
+    def __init__(self, content: str):
+        super().__init__(content)
+        self.prompts: list[str] = []
+
+    def invoke(self, prompt: str):
+        self.prompts.append(prompt)
+        return super().invoke(prompt)
+
+    def stream(self, prompt: str):
+        self.prompts.append(prompt)
+        yield SimpleNamespace(content=self._content)
+
+
 class NonConcurrentLlm:
     def __init__(self, content: str, delay: float = 0.05):
         self._content = content
@@ -664,6 +678,75 @@ def test_chart_generator_time_bucket_rolls_up_monthly_values():
         {"service_date": "2024-02", "paid_amount": 25.0},
     ]
     assert "Bucketed" in payload["aggregationNote"]
+
+
+def test_chart_generator_time_bucket_sums_preaggregated_count_metrics():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "line",
+          "title": "Pharmacy Claims by Year",
+          "xAxisField": "year",
+          "series": [{"field": "claim_count", "name": "Claim Count", "format": "number"}],
+          "transform": {"type": "timeBucket", "field": "year", "bucket": "year", "metric": "claim_count", "function": "count"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["year", "claim_count"],
+        data=[
+            {"year": "2022-01-01T00:00:00+00:00", "claim_count": 22883},
+            {"year": "2021-01-01T00:00:00+00:00", "claim_count": 22173},
+            {"year": "2020-01-01T00:00:00+00:00", "claim_count": 21137},
+            {"year": "2019-01-01T00:00:00+00:00", "claim_count": 21132},
+            {"year": "2018-01-01T00:00:00+00:00", "claim_count": 15408},
+        ],
+        original_query="How many pharmacy claims were filled in each year?",
+    )
+
+    assert payload is not None
+    assert payload["config"]["transform"]["function"] == "sum"
+    assert payload["chartData"] == [
+        {"year": "2018", "claim_count": 15408},
+        {"year": "2019", "claim_count": 21132},
+        {"year": "2020", "claim_count": 21137},
+        {"year": "2021", "claim_count": 22173},
+        {"year": "2022", "claim_count": 22883},
+    ]
+    assert "pre-aggregated metric 'claim_count' from count to sum" in payload["aggregationNote"]
+
+
+def test_chart_generator_prompt_warns_against_counting_preaggregated_metrics():
+    llm = PromptCapturingLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "line",
+          "title": "Pharmacy Claims by Year",
+          "xAxisField": "year",
+          "series": [{"field": "claim_count", "name": "Claim Count", "format": "number"}],
+          "transform": {"type": "timeBucket", "field": "year", "bucket": "year", "metric": "claim_count", "function": "sum"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["year", "claim_count"],
+        data=[
+            {"year": "2022-01-01T00:00:00+00:00", "claim_count": 22883},
+            {"year": "2021-01-01T00:00:00+00:00", "claim_count": 22173},
+        ],
+        original_query="How many pharmacy claims were filled in each year?",
+    )
+
+    assert payload is not None
+    assert llm.prompts
+    assert 'do NOT use function="count" unless you truly mean counting input rows' in llm.prompts[-1]
+    assert 'claim_count, member_count, diagnosis_count, or total_count' in llm.prompts[-1]
 
 
 def test_chart_generator_histogram_builds_count_bins():
