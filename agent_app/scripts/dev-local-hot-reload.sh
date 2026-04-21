@@ -304,7 +304,7 @@ if [[ -n "$EXPERIMENT_ID" ]]; then
   success "MLFLOW_EXPERIMENT_ID=$EXPERIMENT_ID (feedback enabled)"
 else
   warn "MLFLOW_EXPERIMENT_ID not set — feedback widget will be disabled"
-  warn "Run 'uv run quickstart' to create an experiment"
+  warn "Set MLFLOW_EXPERIMENT_ID in databricks.yml or .env to enable feedback"
 fi
 
 success ".env configured at $ENV_FILE"
