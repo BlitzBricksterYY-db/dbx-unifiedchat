@@ -15,10 +15,13 @@ cd agent_app
 
 # Prepare the local virtualenv and install dev dependencies
 uv sync --dev
-
-# Create local config from the example if needed
-cp .env.example .env
 ```
+
+The local dev scripts (`./scripts/dev-local.sh` and
+`./scripts/dev-local-hot-reload.sh`) will create `agent_app/.env` on first run
+and backfill bundle-managed settings from `databricks.yml`. After the initial
+run, update `agent_app/.env` with any local auth or machine-specific values
+you need to override.
 
 ### Recommended commands
 

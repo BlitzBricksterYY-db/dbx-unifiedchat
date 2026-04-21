@@ -266,8 +266,8 @@ section "Configuring .env"
 cd "$APP_DIR"
 
 if [[ ! -f "$ENV_FILE" ]]; then
-  cp .env.example "$ENV_FILE"
-  info "Created .env from .env.example"
+  touch "$ENV_FILE"
+  info "Created empty .env (values will be hydrated from databricks.yml)"
 fi
 
 set_env_value "LOCAL_DATABRICKS_TARGET" "$TARGET"
