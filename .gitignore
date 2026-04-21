@@ -1,7 +1,5 @@
 # Environment and Secrets
 .env
-.env.example
-agent_app/.env.example
 .databricks
 
 # Python

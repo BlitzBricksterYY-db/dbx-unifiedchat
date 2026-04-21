@@ -31,9 +31,13 @@ That said, local development is not fully `.env`-free:
 
 So the accurate model is:
 
-- `agent_app/databricks.yml` is the maintained shared config source
-- `agent_app/.env` is the local runtime overlay derived from that config plus
-  local machine-specific state
+- `agent_app/databricks.yml` is the committed, public-safe baseline consumed by
+  local bootstrap and bundle commands
+- `agent_app/databricks.local.yml` is the gitignored private copy of your real
+  values; copy what you need from there back into `agent_app/databricks.yml`
+  before local dev or deployment
+- `agent_app/.env` is the local runtime overlay derived from `databricks.yml`
+  plus local machine-specific state
 
 ## Canonical Bundle Variables
 

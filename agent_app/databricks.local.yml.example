@@ -1,0 +1,40 @@
+# clone thie example file and rename as "databricks.local.yml" under the same folder; 
+# use "databricks.local.yml" for keeping your real settings (gitignored, safe for repo pull/push). 
+
+bundle:
+  name: multi_agent_genie_app
+
+targets:
+  dev:
+    workspace:
+      profile: "<your-dev-profile>"
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      catalog_name: "<your-dev-catalog-name>"
+      schema_name: "<your-dev-schema-name>"
+      data_catalog_name: "<your-dev-data-catalog-name>"
+      data_schema_name: "<your-dev-data-schema-name>"
+      sql_warehouse_id: "<your-dev-sql-warehouse-id>"
+      lakebase_project: "<your-dev-lakebase-project>"
+      lakebase_branch: "production"
+      experiment_id: "<your-dev-mlflow-experiment-id>"
+      genie_space_ids: "<your-dev-comma-separated-genie-space-ids>"
+      app_name: "<your-app-name-dev>"
+      app_logo_url: "https://example.com/path/to/your-logo.png"
+
+  prod:
+    workspace:
+      profile: "<your-prod-profile>"
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      catalog_name: "<your-prod-catalog-name>"
+      schema_name: "<your-prod-schema-name>"
+      data_catalog_name: "<your-prod-data-catalog-name>"
+      data_schema_name: "<your-prod-data-schema-name>"
+      sql_warehouse_id: "<your-prod-sql-warehouse-id>"
+      lakebase_project: "<your-prod-lakebase-project>"
+      lakebase_branch: "production"
+      experiment_id: "<your-prod-mlflow-experiment-id>"
+      genie_space_ids: "<your-prod-comma-separated-genie-space-ids>"
+      app_name: "<your-app-name-prod>"
+      app_logo_url: "https://example.com/path/to/your-logo.png"

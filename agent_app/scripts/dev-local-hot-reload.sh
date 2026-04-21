@@ -161,6 +161,7 @@ context = {
     "BUNDLE_UC_FUNCTION_NAMES": resolve_bundle_var("uc_function_names"),
     "BUNDLE_SQL_WAREHOUSE_ID": resolve_bundle_var("sql_warehouse_id"),
     "BUNDLE_GENIE_SPACE_IDS": resolve_bundle_var("genie_space_ids"),
+    "BUNDLE_APP_LOGO_URL": resolve_bundle_var("app_logo_url"),
     "BUNDLE_EXPERIMENT_ID": resolve_bundle_var("experiment_id"),
 }
 
@@ -266,8 +267,8 @@ section "Configuring .env"
 cd "$APP_DIR"
 
 if [[ ! -f "$ENV_FILE" ]]; then
-  cp .env.example "$ENV_FILE"
-  info "Created .env from .env.example"
+  touch "$ENV_FILE"
+  info "Created empty .env (values will be hydrated from databricks.yml)"
 fi
 
 set_env_value "LOCAL_DATABRICKS_TARGET" "$TARGET"
@@ -279,6 +280,7 @@ set_env_value "DATABRICKS_CONFIG_PROFILE" "$PROFILE"
 [[ -n "$BUNDLE_UC_FUNCTION_NAMES" ]] && set_env_value "UC_FUNCTION_NAMES" "$BUNDLE_UC_FUNCTION_NAMES"
 [[ -n "$BUNDLE_SQL_WAREHOUSE_ID" ]] && set_env_value "SQL_WAREHOUSE_ID" "$BUNDLE_SQL_WAREHOUSE_ID"
 [[ -n "$BUNDLE_GENIE_SPACE_IDS" ]] && set_env_value "GENIE_SPACE_IDS" "$BUNDLE_GENIE_SPACE_IDS"
+[[ -n "$BUNDLE_APP_LOGO_URL" ]] && set_env_value "APP_LOGO_URL" "$BUNDLE_APP_LOGO_URL"
 if [[ -n "$BUNDLE_LAKEBASE_PROJECT" && -n "$BUNDLE_LAKEBASE_BRANCH" ]]; then
   set_env_value "LAKEBASE_AUTOSCALING_PROJECT" "$BUNDLE_LAKEBASE_PROJECT"
   set_env_value "LAKEBASE_AUTOSCALING_BRANCH" "$BUNDLE_LAKEBASE_BRANCH"

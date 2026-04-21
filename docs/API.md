@@ -78,12 +78,15 @@ These are the primary backend modules to edit when changing behavior.
 
 ### Bundle configuration
 
-`agent_app/databricks.yml` is the source of truth for:
+`agent_app/databricks.yml` is the committed configuration consumed by:
 
 - deployment targets
 - app resource variables
 - ETL and validation job settings
 - SQL Warehouse, Genie, Lakebase, and MLflow defaults
+
+Keep private real values in `agent_app/databricks.local.yml`, then copy the
+values you need into `agent_app/databricks.yml` before local dev or deployment.
 
 ### Local runtime configuration
 

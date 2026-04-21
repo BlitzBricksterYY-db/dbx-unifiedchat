@@ -122,6 +122,7 @@ def bundle_settings(project_dir: Path, target: str) -> dict[str, str | None]:
         "data_catalog_name": resolved.data_catalog_name,
         "data_schema_name": resolved.data_schema_name,
         "sql_warehouse_id": resolved.warehouse_id,
+        "app_logo_url": resolve_bundle_var(project_dir, target, "app_logo_url"),
         "lakebase_project": resolved.project,
         "lakebase_branch": resolved.branch,
         "lakebase_instance_name": resolved.instance_name,

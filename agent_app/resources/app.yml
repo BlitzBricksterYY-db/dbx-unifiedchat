@@ -9,6 +9,8 @@ resources:
         env:
           - name: CHAT_PROXY_TIMEOUT_SECONDS
             value: ${var.chat_proxy_timeout_seconds}
+          - name: APP_LOGO_URL
+            value: ${var.app_logo_url}
           - name: CATALOG_NAME
             value: ${var.catalog_name}
           - name: SCHEMA_NAME
@@ -79,7 +81,7 @@ resources:
           experiment:
             experiment_id: ${var.experiment_id}
             permission: 'CAN_MANAGE'
-                    # SQL warehouse
+        # SQL warehouse
         - name: 'sql-warehouse'
           sql_warehouse:
             id: ${var.sql_warehouse_id}
