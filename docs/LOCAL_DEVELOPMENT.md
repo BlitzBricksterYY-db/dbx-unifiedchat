@@ -16,11 +16,22 @@ git clone <repo-url>
 cd KUMC_POC_hlsfieldtemp/agent_app
 
 uv sync --dev
-cp .env.example .env
+cp databricks.local.yml.example databricks.local.yml
 ```
 
-Then update `agent_app/.env` with your local auth and machine-specific values.
-The local scripts will backfill bundle-managed settings from `databricks.yml`.
+Replace the placeholder values in `agent_app/databricks.local.yml` with your
+real workspace values, then copy the values you need into
+`agent_app/databricks.yml` before running the local scripts. In this repo,
+`databricks.local.yml` is a private reference file only; it is not read
+automatically by the scripts or `databricks bundle` commands. After pulling
+future updates from the repo, re-check `agent_app/databricks.yml` and copy your
+private values from `agent_app/databricks.local.yml` back into it as needed.
+
+The local dev scripts (`./scripts/dev-local.sh` and
+`./scripts/dev-local-hot-reload.sh`) will create `agent_app/.env` on first run
+and backfill bundle-managed settings from `databricks.yml`. After the initial
+run, update `agent_app/.env` with any local auth or machine-specific values
+you need to override.
 
 ## Recommended Local Commands
 

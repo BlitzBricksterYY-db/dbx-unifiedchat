@@ -128,11 +128,13 @@ It now owns:
 * shared Lakebase / Unity Catalog bootstrap
 * deployment validation
 
-`agent_app/databricks.yml` is the single maintained shared config source for
-target-aware app settings across deployment and local bootstrap. Local
-development still uses `agent_app/.env` as a materialized runtime file for
-machine-specific values, auth context, resolved database connection details,
-and any local-only overrides.
+`agent_app/databricks.yml` is the committed, public-safe baseline consumed by
+the local bootstrap and bundle deploy flow. Keep real workspace-specific values
+in `agent_app/databricks.local.yml` (gitignored), then copy the values you need
+back into `agent_app/databricks.yml` before local development or deployment.
+Local development still uses `agent_app/.env` as a materialized runtime file
+for machine-specific values, auth context, resolved database connection
+details, and any local-only overrides.
 
 From a local terminal or CI runner:
 
@@ -250,12 +252,11 @@ See [Testing Guide](agent_app/tests/README.md) for detailed testing documentatio
 
 ## Configuration
 
-This repository uses one maintained shared config source plus a local runtime
-overlay:
+This repository uses a committed bundle baseline plus a local runtime overlay:
 
 | Configuration | Scope | Purpose |
 |--------------|-------|---------|
-| `agent_app/databricks.yml` | Shared deploy + local bootstrap config | Canonical dev/prod targets and shared app, ETL, Lakebase, warehouse, MLflow, and Genie settings |
+| `agent_app/databricks.yml` | Public-safe deploy + local bootstrap baseline | Canonical dev/prod targets and shared app, ETL, Lakebase, warehouse, MLflow, and Genie settings used by scripts and bundle commands |
 | `agent_app/.env` | Local app runtime overlay | Local runtime/auth values plus bundle-derived settings materialized by the local dev scripts |
 
 Update shared environment-aware settings in `agent_app/databricks.yml`. Treat

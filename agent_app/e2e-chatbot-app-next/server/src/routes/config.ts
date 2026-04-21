@@ -12,6 +12,7 @@ export const configRouter: RouterType = Router();
 
 let cachedResources: {
   workspaceHost: string | null;
+  appLogoUrl: string | null;
   genieSpaces: Array<{ id: string; name: string; url: string }>;
   mlflowExperiment: { id: string; url: string } | null;
 } | null = null;
@@ -89,6 +90,7 @@ async function resolveResources() {
     }),
   );
 
+  const appLogoUrl = process.env.APP_LOGO_URL || null;
   const experimentId = process.env.MLFLOW_EXPERIMENT_ID;
   const mlflowExperiment = experimentId
     ? {
@@ -99,7 +101,7 @@ async function resolveResources() {
       }
     : null;
 
-  cachedResources = { workspaceHost, genieSpaces, mlflowExperiment };
+  cachedResources = { workspaceHost, appLogoUrl, genieSpaces, mlflowExperiment };
   return cachedResources;
 }
 
@@ -116,6 +118,7 @@ configRouter.get('/', async (_req: Request, res: Response) => {
       feedback: !!process.env.MLFLOW_EXPERIMENT_ID,
     },
     resources: {
+      appLogoUrl: resources.appLogoUrl,
       genieSpaces: resources.genieSpaces,
       mlflowExperiment: resources.mlflowExperiment,
     },

@@ -58,7 +58,7 @@ reconciliation step.
 - CI: run `./scripts/deploy.sh ... --ci`, optionally with `--skip-bootstrap`
   when the runner is already prepared
 
-The bundle source of truth is:
+The bundle inputs committed to the repo are:
 
 - `databricks.yml`
 - `resources/*.yml`
@@ -72,14 +72,21 @@ bundle-driven `./scripts/deploy.sh` flow instead.
 
 Use these two layers intentionally:
 
-- `databricks.yml` is the maintained shared config source for deploy targets and
-  shared app / ETL settings
+- `databricks.yml` is the committed, public-safe baseline used by local dev
+  scripts and bundle commands
+- `databricks.local.yml` is your gitignored private copy of real workspace-
+  specific values
 - `.env` is the local runtime overlay used by the Python and Node processes
 
 The local dev scripts resolve target-aware values from `databricks.yml`, then
 write the materialized runtime values into `.env` before launching the app.
-Change shared values in `databricks.yml`; reserve `.env` for local-only auth,
-runtime, and machine-specific overrides.
+`databricks.local.yml` is not read automatically by the scripts or Databricks
+bundle commands in this repo. Treat it as your private source of truth: create
+it from `databricks.local.yml.example`, keep your real values there, and copy
+the values you need into `databricks.yml` before local development or
+deployment. After pulling future repo updates, re-check `databricks.yml` and
+copy your private values from `databricks.local.yml` back into it as needed.
+Reserve `.env` for local-only auth, runtime, and machine-specific overrides.
 
 ## Local Development Best Practice
 

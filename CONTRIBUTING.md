@@ -89,7 +89,10 @@ Some tests require Databricks-aware configuration or access to workspace service
 ## Security
 
 - Never commit credentials, tokens, or other secrets.
-- Use `agent_app/.env.example` as the starting point for local configuration.
+- Let the local dev scripts (`agent_app/scripts/dev-local.sh` or
+  `agent_app/scripts/dev-local-hot-reload.sh`) create and hydrate
+  `agent_app/.env` from `agent_app/databricks.yml`; only add secret or
+  machine-specific overrides after the initial run.
 - Report security issues through coordinated disclosure. Do not use public issues or pull requests for vulnerabilities; see `SECURITY.md` and contact `security@databricks.com`.
 
 ## License

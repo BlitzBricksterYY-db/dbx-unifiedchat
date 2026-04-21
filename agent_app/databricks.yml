@@ -8,25 +8,32 @@ include:
   - resources/*.yml
 
 variables:
+  # Public-safe baseline only.
+  # Replace these placeholders in this file before local dev or bundle deploy.
+  # Keep your private working values in `databricks.local.yml` (gitignored) and
+  # manually copy the relevant values back here when needed.
+
   # Canonical Unity Catalog settings
   catalog_name:
-    default: "serverless_dbx_unifiedchat_catalog"
+    default: "<shared-catalog-name>"
   schema_name:
-    default: "multi_agent_genie"
+    default: "<shared-schema-name>"
   data_catalog_name:
-    default: "healthverity_claims_sample_patient_dataset"
+    default: "<shared-data-catalog-name>"
   data_schema_name:
-    default: "hv_claims_sample"
+    default: "<shared-data-schema-name>"
   uc_function_names:
     default: "get_space_summary,get_table_overview,get_column_detail,get_space_instructions,get_space_details"
 
   # Canonical SQL warehouse setting
+  # Common override: replace per workspace/environment.
   sql_warehouse_id:
-    default: "a4ed2ccbda385db9"
+    default: "<shared-sql-warehouse-id>"
 
+  # Autoscaling Lakebase project
   # Lakebase
   lakebase_project:
-    default: "dbx-unifiedchat-state-db-${bundle.target}"
+    default: "<shared-lakebase-project-${bundle.target}>"
   lakebase_pg_version:
     default: "17"
   lakebase_branch:
@@ -36,8 +43,9 @@ variables:
     default: "production"
 
   # MLflow experiment
+  # Common override: replace when routing feedback to a different experiment.
   experiment_id:
-    default: "2377237249204444"
+    default: "<shared-mlflow-experiment-id>"
 
   # LLM endpoints
   llm_endpoint:
@@ -68,8 +76,12 @@ variables:
     default: "TRIGGERED"
 
   # App runtime
+  # Common override: rename per environment if needed.
   app_name:
-    default: "dbx-unifiedchat-app-${bundle.target}"
+    default: "<app-name-${bundle.target}>"
+  # Common override: branding/logo shown in the UI greeting screen.
+  app_logo_url:
+    default: "https://raw.githubusercontent.com/databricks-solutions/dbx-unifiedchat/main/docs/logos/dbx-unifiedchat-logo-pacman-eating-data.png"
   chat_proxy_timeout_seconds:
     default: "300"
   sample_size:
@@ -94,51 +106,50 @@ variables:
     default: "600"
 
   # Genie spaces
-  # genie_space_id_1:
-  #   default: "01f11b27d1121e2bb00d6ecd846b1988"
-  # genie_space_id_2:
-  #   default: "01f11b27d23a1ab195fa7ba8efc06d13"
-  # genie_space_id_3:
-  #   default: "01f11b27d3ea149694cf608c3d278673"
+  # Common override: set this to the comma-separated Genie spaces for the target.
   genie_space_ids:
-    default: "01f106e1239d14b28d6ab46f9c15e540,01f106e121e7173d8cf84bb80e842d6c,01f106e120b718e084598e92dcf14d4e"
+    default: "<comma-separated-genie-space-ids>"
 
 targets:
   dev:
     default: true
     mode: development
     workspace:
-      profile: dev
+      profile: "<dev-profile>"
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
     variables:
-      catalog_name: "serverless_dbx_unifiedchat_dev_catalog"
-      schema_name: "multi_agent_genie"
-      data_catalog_name: "healthverity_claims_sample_patient_dataset_dev"
-      data_schema_name: "hv_claims_sample"
-      uc_function_names: "get_space_summary,get_table_overview,get_column_detail,get_space_instructions,get_space_details"
-      experiment_id: "4357851413903846"
+      catalog_name: "<dev-catalog-name>"
+      schema_name: "<dev-schema-name>"
+      data_catalog_name: "<dev-data-catalog-name>"
+      data_schema_name: "<dev-data-schema-name>"
+      uc_function_names: "<dev-comma-separated-uc-function-names>"
+      experiment_id: "<dev-mlflow-experiment-id>"
       agent_keep_warm_interval_seconds: "600"
-      sql_warehouse_id: "32f4d1aae5fcf8ca"
-      lakebase_project: "multi-agent-genie-system-state-db-dev"
+      sql_warehouse_id: "<dev-sql-warehouse-id>"
+      lakebase_project: "<dev-lakebase-project>"
       lakebase_branch: "production"
-      genie_space_ids: "01f11b27d1121e2bb00d6ecd846b1988,01f11b27d23a1ab195fa7ba8efc06d13,01f11b27d3ea149694cf608c3d278673"
+      genie_space_ids: "<dev-comma-separated-genie-space-ids>"
 
   prod:
+    default: false
     mode: production
     workspace:
-      profile: prod
+      profile: "<prod-profile>"
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
     variables:
-      catalog_name: "serverless_dbx_unifiedchat_catalog"
-      schema_name: "multi_agent_genie"
-      experiment_id: "2377237249204444"
+      # Common production overrides - replace only what differs from the shared defaults.
+      # app_name: "your-app-name-prod"
+      # app_logo_url: "https://example.com/path/to/your-logo.png"
+      catalog_name: "<prod-catalog-name>"
+      schema_name: "<prod-schema-name>"
+      data_catalog_name: "<prod-data-catalog>"
+      data_schema_name: "<prod-data-schema>"
+      experiment_id: "<prod-mlflow-experiment-id>"
       agent_keep_warm_interval_seconds: "600"
-      # sql_warehouse_id: "<prod-warehouse-id>"
-      # Override these per-environment as needed:
-      # genie_space_id_1: "<prod-space-id>"
-      # genie_space_id_2: "<prod-space-id>"
-      # genie_space_id_3: "<prod-space-id>"
-      # genie_space_ids: "<comma-separated-prod-ids>"
+      lakebase_project: "<prod-lakebase-project>"
+      lakebase_branch: "production"
+      sql_warehouse_id: "<prod-warehouse-id>"
+      genie_space_ids: "<prod-comma-separated-genie-space-ids>"
 
 sync:
   paths:
