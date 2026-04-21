@@ -1,6 +1,13 @@
 import { motion } from 'framer-motion';
+import { useAppConfig } from '@/contexts/AppConfigContext';
+
+const DEFAULT_APP_LOGO_URL =
+  'https://raw.githubusercontent.com/databricks-solutions/dbx-unifiedchat/main/docs/logos/dbx-unifiedchat-logo-pacman-eating-data.png';
 
 export const Greeting = () => {
+  const { appLogoUrl } = useAppConfig();
+  const logoUrl = appLogoUrl || DEFAULT_APP_LOGO_URL;
+
   return (
     <div
       key="overview"
@@ -15,7 +22,7 @@ export const Greeting = () => {
         className="mb-6"
       >
         <img
-          src="https://raw.githubusercontent.com/databricks-solutions/dbx-unifiedchat/main/docs/logos/dbx-unifiedchat-logo-pacman-eating-data.png"
+          src={logoUrl}
           alt="dbx-unifiedchat logo"
           className="h-24 w-auto drop-shadow-lg"
         />

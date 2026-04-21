@@ -16,7 +16,16 @@ git clone <repo-url>
 cd KUMC_POC_hlsfieldtemp/agent_app
 
 uv sync --dev
+cp databricks.local.yml.example databricks.local.yml
 ```
+
+Replace the placeholder values in `agent_app/databricks.local.yml` with your
+real workspace values, then copy the values you need into
+`agent_app/databricks.yml` before running the local scripts. In this repo,
+`databricks.local.yml` is a private reference file only; it is not read
+automatically by the scripts or `databricks bundle` commands. After pulling
+future updates from the repo, re-check `agent_app/databricks.yml` and copy your
+private values from `agent_app/databricks.local.yml` back into it as needed.
 
 The local dev scripts (`./scripts/dev-local.sh` and
 `./scripts/dev-local-hot-reload.sh`) will create `agent_app/.env` on first run

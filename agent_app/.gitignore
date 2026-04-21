@@ -124,6 +124,7 @@ celerybeat.pid
 
 # Environments
 .env
+databricks.local.yml
 .venv
 env/
 venv/

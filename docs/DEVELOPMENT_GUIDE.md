@@ -15,7 +15,17 @@ cd agent_app
 
 # Prepare the local virtualenv and install dev dependencies
 uv sync --dev
+
+# Create a private copy for your real workspace-specific values
+cp databricks.local.yml.example databricks.local.yml
 ```
+
+Replace the placeholders in `agent_app/databricks.local.yml` with your real
+values, then copy the values you need into `agent_app/databricks.yml` before
+running local dev or bundle deploy commands. `databricks.local.yml` is not read
+automatically by the scripts in this repo. After pulling future repo updates,
+re-check `agent_app/databricks.yml` and copy your private values from
+`agent_app/databricks.local.yml` back into it as needed.
 
 The local dev scripts (`./scripts/dev-local.sh` and
 `./scripts/dev-local-hot-reload.sh`) will create `agent_app/.env` on first run
@@ -79,7 +89,7 @@ GitHub Actions now validates and deploys the same bundle from `agent_app/`:
 - deploy `dev` from `develop`
 - deploy `prod` from `main`
 
-## Current source of truth
+## Supported Project Surfaces
 
 The supported project surfaces are:
 

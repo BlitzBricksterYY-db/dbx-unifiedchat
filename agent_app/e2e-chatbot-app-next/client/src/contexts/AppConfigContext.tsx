@@ -19,6 +19,7 @@ interface ConfigResponse {
     feedback: boolean;
   };
   resources?: {
+    appLogoUrl: string | null;
     genieSpaces: GenieSpaceResource[];
     mlflowExperiment: MlflowExperimentResource | null;
   };
@@ -32,6 +33,7 @@ interface AppConfigContextType {
   feedbackEnabled: boolean;
   genieSpaces: GenieSpaceResource[];
   mlflowExperiment: MlflowExperimentResource | null;
+  appLogoUrl: string | null;
 }
 
 const AppConfigContext = createContext<AppConfigContextType | undefined>(
@@ -55,6 +57,7 @@ export function AppConfigProvider({ children }: { children: ReactNode }) {
     error,
     chatHistoryEnabled: data?.features.chatHistory ?? true,
     feedbackEnabled: data?.features.feedback ?? false,
+    appLogoUrl: data?.resources?.appLogoUrl ?? null,
     genieSpaces: data?.resources?.genieSpaces ?? [],
     mlflowExperiment: data?.resources?.mlflowExperiment ?? null,
   };
