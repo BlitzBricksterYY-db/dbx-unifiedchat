@@ -407,6 +407,82 @@ test.describe('Interactive Charts', () => {
     await expect(content).toContainText('"chartType":"bar"');
   });
 
+  test('should render fallback visualization workspaces with a paginated table', async ({
+    adaContext,
+  }) => {
+    const { page } = adaContext;
+    const chatPage = new ChatPage(page);
+    const assistantText = `Here is a workspace.\n\n\`\`\`viz-workspace\n${JSON.stringify({
+      workspaceId: 'query-fallback',
+      title: 'Fallback workspace',
+      description: 'Workspace fallback for table-only results.',
+      table: {
+        columns: ['patient_id'],
+        rows: Array.from({ length: 12 }, (_, index) => ({ patient_id: `patient-${String(index + 1).padStart(2, '0')}` })),
+        totalRows: 12,
+        previewRowCount: 12,
+        isPreview: false,
+        filename: 'results.csv',
+        title: 'Fallback workspace',
+        sql: 'SELECT patient_id FROM claims LIMIT 12',
+        sqlFilename: 'query.sql',
+      },
+      fields: [
+        { name: 'patient_id', label: 'Patient Id', kind: 'text', role: 'id', format: 'number', uniqueCount: 12, uniqueRatio: 1 },
+      ],
+      charts: [
+        {
+          config: {
+            chartType: 'bar',
+            title: 'Fallback workspace',
+            xAxisField: '__workspace_fallback__',
+            series: [{ field: 'row_count', name: 'Rows', format: 'number', axis: 'primary' }],
+            supportedChartTypes: ['bar'],
+            toolbox: true,
+            style: { palette: 'default', showLegend: false, showLabels: true, showGridLines: true, showTitle: true, showDescription: false, smoothLines: false },
+          },
+          chartData: [{ __workspace_fallback__: 'Rows', row_count: 12 }],
+          downloadData: [{ __workspace_fallback__: 'Rows', row_count: 12 }],
+          totalRows: 12,
+          aggregated: true,
+          aggregationNote: 'Chart generation returned no payload; showing the table preview with a fallback summary chart.',
+          meta: {
+            source: 'fallback',
+            fallbackApplied: true,
+            chartId: 'query-fallback-chart-1',
+            sourceTableId: 'query-fallback',
+            sourceRowCount: 12,
+          },
+        },
+      ],
+      sourceMeta: {
+        queryIndex: 1,
+        label: 'Fallback workspace',
+        previewLimited: false,
+        totalRows: 12,
+      },
+    })}\n\`\`\`\n`;
+
+    await mockThreadApi(page, () => assistantText);
+    await clearAppLocalStorage(page);
+    await chatPage.createNewChat();
+    await chatPage.sendUserMessage('Show fallback workspace');
+    await chatPage.isGenerationComplete();
+
+    const { content } = await chatPage.getRecentAssistantMessage();
+    await expect(content.getByRole('button', { name: 'Hide table' })).toBeVisible();
+    await expect(content.getByRole('button', { name: 'Show SQL' })).toBeVisible();
+    await expect(content.getByText('Showing 1-10 of 12')).toBeVisible();
+    await expect(content.getByText('patient-01')).toBeVisible();
+    await expect(content.getByText('patient-11')).toHaveCount(0);
+
+    await content.getByRole('button', { name: 'Next' }).click();
+
+    await expect(content.getByText('Showing 11-12 of 12')).toBeVisible();
+    await expect(content.getByText('patient-11')).toBeVisible();
+    await expect(content.getByText('patient-12')).toBeVisible();
+  });
+
   test('should render a visualization workspace with ask/customize actions', async ({
     adaContext,
   }) => {
