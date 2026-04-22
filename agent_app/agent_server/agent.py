@@ -10,7 +10,7 @@ import os
 import sys
 import threading
 import time
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Optional
 from uuid import uuid4
 
 import litellm
@@ -512,6 +512,40 @@ def _make_json_serializable(obj):
         return f"<{type(obj).__name__}>"
 
 
+def _extract_merged_state(app: Any, run_config: dict, last_state: dict) -> dict:
+    merged_state: dict[str, Any] = {}
+
+    if isinstance(last_state, dict):
+        merged_state.update(last_state)
+        for value in last_state.values():
+            if isinstance(value, dict):
+                for key, nested_value in value.items():
+                    merged_state.setdefault(key, nested_value)
+
+    try:
+        latest_state = app.get_state(run_config)
+    except Exception:
+        logger.debug("Unable to fetch merged workflow state for trace outputs", exc_info=True)
+        return merged_state
+
+    state_values = getattr(latest_state, "values", None)
+    if isinstance(state_values, dict):
+        merged_state.update(state_values)
+
+    return merged_state
+
+
+def _build_summary_trace_metadata(summary: Optional[str]) -> dict[str, Any]:
+    if not summary:
+        return {}
+    workspace_count = summary.count("```viz-workspace")
+    return {
+        "final_summary_length": len(summary),
+        "has_viz_workspace": workspace_count > 0,
+        "viz_workspace_count": workspace_count,
+    }
+
+
 _CUSTOM_FORMATTERS = {
     "agent_thinking": lambda d: f"{d['agent'].upper()}: {d['content']}",
     "agent_start": lambda d: f"Starting {d['agent']} agent for: {d.get('query', '')}",
@@ -876,12 +910,13 @@ Guidelines:
                         last_state = {}
                         continue
 
+                trace_state = _extract_merged_state(app, run_config, last_state)
                 workflow_output: dict = {"status": "completed"}
-                if summary := last_state.get("final_summary"):
-                    workflow_output["final_summary"] = summary
-                if sql := last_state.get("sql_query"):
+                if summary := trace_state.get("final_summary"):
+                    workflow_output.update(_build_summary_trace_metadata(summary))
+                if sql := trace_state.get("sql_query"):
                     workflow_output["sql_query"] = sql
-                if er := last_state.get("execution_result"):
+                if er := trace_state.get("execution_result"):
                     workflow_output["execution_result_status"] = er.get("status")
                     workflow_output["row_count"] = er.get("row_count")
                 span.set_outputs(workflow_output)
@@ -1110,13 +1145,21 @@ Guidelines:
         f"Workflow completed (thread: {thread_id}) "
         f"TTFT={first_token_time - workflow_start_time if first_token_time else 'N/A'}s, TTCL={ttcl:.3f}s"
     )
-    request_span.set_outputs(
-        {
-            "thread_id": thread_id,
-            "request_id": request_id,
-            "ttft_seconds": first_token_time - workflow_start_time if first_token_time else None,
-            "ttcl_seconds": ttcl,
-            "first_token_emitted": first_token_time is not None,
-        }
-    )
+    final_state = {}
+    try:
+        final_app = _get_compiled_workflow_app()
+        final_state = _extract_merged_state(final_app, run_config, {})
+    except Exception:
+        logger.debug("Unable to fetch final workflow state for request span outputs", exc_info=True)
+
+    request_output = {
+        "thread_id": thread_id,
+        "request_id": request_id,
+        "ttft_seconds": first_token_time - workflow_start_time if first_token_time else None,
+        "ttcl_seconds": ttcl,
+        "first_token_emitted": first_token_time is not None,
+    }
+    if final_summary := final_state.get("final_summary"):
+        request_output.update(_build_summary_trace_metadata(final_summary))
+    request_span.set_outputs(request_output)
     request_span.end()

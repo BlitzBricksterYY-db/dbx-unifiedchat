@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import sys
 import types
+from collections import defaultdict
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -24,6 +25,11 @@ def _noop_context_manager(*_args, **_kwargs):
 mlflow_stub = types.ModuleType("mlflow")
 mlflow_stub.update_current_trace = lambda *args, **kwargs: None
 mlflow_stub.start_span = lambda *args, **kwargs: _noop_context_manager()
+mlflow_stub.start_span_no_context = lambda *args, **kwargs: SimpleNamespace(
+    set_inputs=lambda *_a, **_k: None,
+    set_outputs=lambda *_a, **_k: None,
+    end=lambda: None,
+)
 mlflow_stub.langchain = SimpleNamespace(autolog=lambda **_kwargs: None)
 sys.modules.setdefault("mlflow", mlflow_stub)
 
@@ -34,6 +40,10 @@ mlflow_entities_stub.SpanType = SimpleNamespace(
     RETRIEVER="retriever",
 )
 sys.modules.setdefault("mlflow.entities", mlflow_entities_stub)
+
+mlflow_tracing_provider_stub = types.ModuleType("mlflow.tracing.provider")
+mlflow_tracing_provider_stub.with_active_span = _noop_context_manager
+sys.modules.setdefault("mlflow.tracing.provider", mlflow_tracing_provider_stub)
 
 agent_server_decorators_stub = types.ModuleType("mlflow.genai.agent_server")
 agent_server_decorators_stub.get_request_headers = lambda: {}
@@ -220,3 +230,72 @@ def test_stream_handler_retries_once_on_recoverable_checkpointer_error(monkeypat
         and event.item["content"][0]["text"].strip() == "Recovered after retry"
         for event in events
     )
+
+
+def test_stream_handler_persists_summary_metadata_to_trace_outputs(monkeypatch):
+    captured_outputs = defaultdict(list)
+
+    class RecordingSpan:
+        def __init__(self, name):
+            self.name = name
+
+        def set_inputs(self, *_args, **_kwargs):
+            return None
+
+        def set_outputs(self, payload):
+            captured_outputs[self.name].append(payload)
+
+        def end(self):
+            return None
+
+    @contextmanager
+    def active_span(span):
+        yield span
+
+    class SuccessfulCompiledAppWithSummary:
+        def get_state(self, _run_config):
+            return SimpleNamespace(
+                tasks=[],
+                values={
+                    "final_summary": "Summary with ```viz-workspace\\n{\"workspaceId\":\"query-1\"}\\n```",
+                    "execution_result": {"status": "success", "row_count": 2},
+                },
+            )
+
+        def stream(self, *_args, **_kwargs):
+            yield ((), "custom", {"type": "summary_start", "content": "Generating summary..."})
+            yield ((), "custom", {"type": "text_delta", "content": "Summary with chart"})
+            yield ((), "custom", {"type": "summary_complete", "content": "Summary complete"})
+            yield (
+                (),
+                "updates",
+                {
+                    "summarize": {
+                        "messages": [_AIMessage(content="Summary with chart", id="ai-final")],
+                        "final_summary": "Summary with chart",
+                    }
+                },
+            )
+
+    app = SuccessfulCompiledAppWithSummary()
+
+    monkeypatch.setattr(agent_module, "_get_compiled_workflow_app", lambda: app)
+    monkeypatch.setattr(
+        agent_module.mlflow,
+        "start_span_no_context",
+        lambda name, **_kwargs: RecordingSpan(name),
+        raising=False,
+    )
+    monkeypatch.setattr(agent_module, "with_active_span", active_span)
+
+    events = asyncio.run(_collect_events())
+
+    assert any(getattr(event, "type", "") == "response.output_text.delta" for event in events)
+    assert captured_outputs["langgraph_workflow"][-1]["final_summary_length"] > 0
+    assert captured_outputs["langgraph_workflow"][-1]["has_viz_workspace"] is True
+    assert captured_outputs["langgraph_workflow"][-1]["viz_workspace_count"] == 1
+    assert "final_summary" not in captured_outputs["langgraph_workflow"][-1]
+    assert captured_outputs["chat_request"][-1]["final_summary_length"] > 0
+    assert captured_outputs["chat_request"][-1]["has_viz_workspace"] is True
+    assert captured_outputs["chat_request"][-1]["viz_workspace_count"] == 1
+    assert "final_summary" not in captured_outputs["chat_request"][-1]

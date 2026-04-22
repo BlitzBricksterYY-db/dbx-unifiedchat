@@ -267,6 +267,64 @@ def _build_visualization_workspace_payload(
     }
 
 
+def _build_fallback_chart_payload(
+    label: str,
+    source_row_count: int,
+    reason: str,
+) -> Dict[str, Any]:
+    return {
+        "config": {
+            "chartType": "bar",
+            "title": label,
+            "description": None,
+            "xAxisField": "__workspace_fallback__",
+            "groupByField": None,
+            "yAxisField": None,
+            "zAxisField": None,
+            "series": [
+                {
+                    "field": "row_count",
+                    "name": "Rows",
+                    "format": "number",
+                    "chartType": None,
+                    "axis": "primary",
+                }
+            ],
+            "layout": None,
+            "sortBy": None,
+            "toolbox": True,
+            "supportedChartTypes": ["bar"],
+            "referenceLines": [],
+            "compareLabels": None,
+            "transform": None,
+            "style": {
+                "palette": "default",
+                "showLegend": False,
+                "showLabels": True,
+                "showGridLines": True,
+                "showTitle": True,
+                "showDescription": False,
+                "smoothLines": False,
+            },
+        },
+        "chartData": [{"__workspace_fallback__": "Rows", "row_count": source_row_count}],
+        "downloadData": [{"__workspace_fallback__": "Rows", "row_count": source_row_count}],
+        "totalRows": source_row_count,
+        "aggregated": True,
+        "aggregationNote": reason,
+        "meta": {
+            "source": "fallback",
+            "rationale": "Rendered workspace fallback because chart generation was unavailable.",
+            "confidence": 0.35,
+            "description": reason,
+            "normalizationNotes": [reason],
+            "fallbackApplied": True,
+            "candidateFields": {"dimensions": [], "measures": ["row_count"]},
+            "businessInsight": "Table preview remains available even when automatic chart generation fails.",
+        },
+    }
+
+
 def get_cached_summarize_agent():
     """
     Get or create cached ResultSummarizeAgent instance.
@@ -690,21 +748,48 @@ def summarize_node(state: AgentState) -> dict:
 
         future_entry = chart_futures.get(idx)
         if not future_entry:
+            preview_rows = data[:MAX_PREVIEW_ROWS]
+            source_row_count = result_item.get("row_count") or len(data)
+            payload = _build_fallback_chart_payload(
+                label=entry.get("label") or f"Query {idx + 1}",
+                source_row_count=source_row_count,
+                reason="Chart generation was unavailable; showing the table preview with a fallback summary chart.",
+            )
+            workspace_payload = _build_visualization_workspace_payload(
+                entry=entry,
+                chart_payload=payload,
+                preview_rows=preview_rows,
+                full_rows=data,
+                source_row_count=source_row_count,
+                total_entries=len(artifact_entries),
+            )
+            workspace_json = _json.dumps(workspace_payload, default=str)
+            workspace_block = f"\n\n```viz-workspace\n{workspace_json}\n```\n"
+            summary += workspace_block
+            writer({"type": "text_delta", "content": workspace_block})
+            print(f"✓ Visualization workspace fallback inserted for result {idx} ({len(workspace_json)} bytes)")
             continue
         _future_meta, future = future_entry
 
         try:
+            preview_rows = data[:MAX_PREVIEW_ROWS]
+            source_row_count = result_item.get("row_count") or len(data)
+            fallback_reason = ""
             payload = future.result(timeout=30)
             if not payload:
+                fallback_reason = (
+                    "Chart generation returned no payload; showing the table preview with a fallback summary chart."
+                )
                 print(
                     "⚠ Chart generation returned no payload for result "
                     f"{idx} ({entry.get('label') or f'Query {idx + 1}'}) "
-                    f"columns={columns}"
+                    f"columns={columns}; using workspace fallback"
                 )
-                continue
-
-            preview_rows = data[:MAX_PREVIEW_ROWS]
-            source_row_count = result_item.get("row_count") or len(data)
+                payload = _build_fallback_chart_payload(
+                    label=entry.get("label") or f"Query {idx + 1}",
+                    source_row_count=source_row_count,
+                    reason=fallback_reason,
+                )
             workspace_payload = _build_visualization_workspace_payload(
                 entry=entry,
                 chart_payload=payload,
@@ -722,8 +807,28 @@ def summarize_node(state: AgentState) -> dict:
             print(
                 "⚠ Chart generation failed for result "
                 f"{idx} ({entry.get('label') or f'Query {idx + 1}'}) "
-                f"columns={columns}: {e}"
+                f"columns={columns}: {e}; using workspace fallback"
             )
+            preview_rows = data[:MAX_PREVIEW_ROWS]
+            source_row_count = result_item.get("row_count") or len(data)
+            payload = _build_fallback_chart_payload(
+                label=entry.get("label") or f"Query {idx + 1}",
+                source_row_count=source_row_count,
+                reason=f"Chart generation failed with error: {e}",
+            )
+            workspace_payload = _build_visualization_workspace_payload(
+                entry=entry,
+                chart_payload=payload,
+                preview_rows=preview_rows,
+                full_rows=data,
+                source_row_count=source_row_count,
+                total_entries=len(artifact_entries),
+            )
+            workspace_json = _json.dumps(workspace_payload, default=str)
+            workspace_block = f"\n\n```viz-workspace\n{workspace_json}\n```\n"
+            summary += workspace_block
+            writer({"type": "text_delta", "content": workspace_block})
+            print(f"✓ Visualization workspace fallback inserted for result {idx} ({len(workspace_json)} bytes)")
     if chart_pool:
         chart_pool.shutdown(wait=False)
 
