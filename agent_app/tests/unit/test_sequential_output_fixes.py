@@ -59,6 +59,7 @@ from agent_server.multi_agent.agents.chart_generator import (
     SUPPORTED_TRANSFORMS,
     _load_sqlglot,
 )
+from agent_server.multi_agent.agents import summarize as summarize_module
 from agent_server.multi_agent.agents.sql_execution import _append_remaining_skipped_artifacts
 from agent_server.multi_agent.agents.summarize import (
     _build_artifact_entries,
@@ -666,6 +667,65 @@ def test_build_visualization_workspace_payload_groups_table_and_chart():
     assert workspace["description"] == "Aggregated paid amount by month."
     assert workspace["sourceMeta"]["sqlExplanation"] is None
 
+
+def test_summarize_node_emits_workspace_fallback_when_chart_generation_returns_none(monkeypatch):
+    emitted = []
+
+    class StubSummarizeAgent:
+        def generate_summary(self, _context, writer=None):
+            if writer:
+                writer({"type": "text_delta", "content": "Summary body"})
+            return "Summary body"
+
+    class NullChartGenerator:
+        def generate_chart(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(summarize_module, "get_stream_writer", lambda: emitted.append)
+    monkeypatch.setattr(summarize_module, "get_cached_summarize_agent", lambda: StubSummarizeAgent())
+    monkeypatch.setattr(summarize_module, "_get_cached_chart_generator", lambda: NullChartGenerator())
+    monkeypatch.setattr(
+        summarize_module,
+        "get_config",
+        lambda: SimpleNamespace(
+            llm=SimpleNamespace(
+                summarize_endpoint="summary-endpoint",
+                chart_endpoint="chart-endpoint",
+                detect_code_lookup_endpoint="lookup-endpoint",
+            )
+        ),
+    )
+
+    result = summarize_module.summarize_node(
+        {
+            "original_query": "Show claims by month",
+            "messages": [],
+            "execution_results": [
+                {
+                    "success": True,
+                    "status": "success",
+                    "query_label": "Claims by month",
+                    "columns": ["service_month", "claim_count"],
+                    "result": [
+                        {"service_month": "2024-01", "claim_count": 10},
+                        {"service_month": "2024-02", "claim_count": 12},
+                    ],
+                    "row_count": 2,
+                    "sql": "SELECT service_month, claim_count FROM claims",
+                }
+            ],
+        }
+    )
+
+    assert "```viz-workspace" in result["final_summary"]
+    assert '"workspaceId": "query-1"' in result["final_summary"]
+    assert '"source": "fallback"' in result["final_summary"]
+    assert any(
+        event.get("type") == "text_delta" and "```viz-workspace" in event.get("content", "")
+        for event in emitted
+    )
+
+
 def test_chart_generator_frequency_rewrites_to_count_series():
     llm = StubLlm(
         """
@@ -885,6 +945,41 @@ def test_chart_generator_histogram_supports_count_distinct_metric():
     assert payload["config"]["series"][0]["field"] == "patient_id"
     assert payload["config"]["transform"]["function"] == "count_distinct"
     assert sum(row["patient_id"] for row in payload["chartData"]) == 4
+
+
+def test_chart_generator_time_bucket_supports_count_distinct_id_metric():
+    llm = StubLlm(
+        """
+        {
+          "plottable": true,
+          "chartType": "stackedArea",
+          "title": "Distinct Claims by Month",
+          "xAxisField": "date_service",
+          "groupByField": "claim_type",
+          "series": [{"field": "claim_id", "name": "Claims", "format": "number", "chartType": "area"}],
+          "transform": {"type": "timeBucket", "field": "date_service", "bucket": "month", "metric": "claim_id", "function": "count_distinct"}
+        }
+        """
+    )
+    generator = ChartGenerator(llm=llm)  # type: ignore[arg-type]
+
+    payload = generator.generate_chart(
+        columns=["date_service", "claim_id", "claim_type"],
+        data=[
+            {"date_service": "2024-01-01", "claim_id": "A", "claim_type": "medical"},
+            {"date_service": "2024-01-15", "claim_id": "A", "claim_type": "medical"},
+            {"date_service": "2024-01-20", "claim_id": "B", "claim_type": "medical"},
+            {"date_service": "2024-02-01", "claim_id": "C", "claim_type": "pharmacy"},
+        ],
+        original_query="Show distinct claims by month",
+    )
+
+    assert payload is not None
+    assert payload["config"]["chartType"] == "stackedArea"
+    assert payload["config"]["transform"]["function"] == "count_distinct"
+    assert payload["config"]["series"][0]["field"] == "claim_id"
+    assert any(row["claim_type"] == "medical" and row["claim_id"] == 2.0 for row in payload["chartData"])
+    assert any(row["claim_type"] == "pharmacy" and row["claim_id"] == 1.0 for row in payload["chartData"])
 
 
 def test_chart_generator_llm_numeric_x_axis_is_bucketed_to_histogram():

@@ -1179,6 +1179,21 @@ Rules:
                 notes.append(
                     f"Converted timeBucket aggregation for pre-aggregated metric '{metric}' from count to sum"
                 )
+            if metric and normalized["function"] in {"count", "count_distinct"}:
+                synthetic_name = "Count"
+                if normalized["function"] == "count_distinct":
+                    synthetic_name = f"Distinct {metric.replace('_', ' ').title()} Count"
+                elif metric != "count":
+                    synthetic_name = metric.replace("_", " ").title()
+                normalized["syntheticSeries"] = [
+                    {
+                        "field": metric,
+                        "name": synthetic_name,
+                        "format": "number",
+                        "chartType": None,
+                        "axis": "primary",
+                    }
+                ]
             return normalized
 
         if transform_type == "histogram":

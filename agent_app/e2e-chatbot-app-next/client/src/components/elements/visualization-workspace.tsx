@@ -76,6 +76,10 @@ function buildInitialChartHistory(charts: ChartSpec[], workspaceId: string): Cha
 
 export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProps) {
   const messageId = useMessageId();
+  const prefersTablePreview = useMemo(
+    () => workspace.charts.some((chart) => chart.meta?.source === 'fallback' || chart.meta?.fallbackApplied),
+    [workspace.charts],
+  );
   const storageKey = messageId
     ? `viz-ws-${messageId}-${workspace.workspaceId}`
     : null;
@@ -84,8 +88,8 @@ export function VisualizationWorkspace({ workspace }: VisualizationWorkspaceProp
     [storageKey, workspace.charts],
   );
 
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [isTableVisible, setIsTableVisible] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(prefersTablePreview);
+  const [isTableVisible, setIsTableVisible] = useState(prefersTablePreview);
   const [charts, setCharts] = useState<ChartSpec[]>(initialCharts);
   const [chartHistory, setChartHistory] = useState<ChartHistoryState>(
     () => buildInitialChartHistory(initialCharts, workspace.workspaceId),
