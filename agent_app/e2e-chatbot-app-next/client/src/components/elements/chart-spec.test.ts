@@ -915,6 +915,52 @@ test('parseChartWorkspace accepts grouped visualization payloads', () => {
   assert.equal(workspace?.table.columns[0], 'service_month');
 });
 
+test('parseChartWorkspace accepts fallback workspace charts so table previews still render', () => {
+  const workspace = parseChartWorkspace({
+    workspaceId: 'query-fallback',
+    title: 'Fallback Workspace',
+    description: 'Rendered when chart generation does not return a chart payload.',
+    table: {
+      columns: ['patient_id'],
+      rows: Array.from({ length: 12 }, (_, index) => ({ patient_id: `patient-${index + 1}` })),
+      totalRows: 12,
+      previewRowCount: 12,
+      isPreview: false,
+      filename: 'results.csv',
+      title: 'Fallback Workspace',
+    },
+    fields: [
+      { name: 'patient_id', label: 'Patient Id', kind: 'text', role: 'id', format: 'number', uniqueCount: 12, uniqueRatio: 1 },
+    ],
+    charts: [
+      {
+        config: {
+          chartType: 'bar',
+          title: 'Fallback Workspace',
+          xAxisField: '__workspace_fallback__',
+          series: [{ field: 'row_count', name: 'Rows', format: 'number', axis: 'primary' }],
+          style: { palette: 'default' },
+        },
+        chartData: [{ __workspace_fallback__: 'Rows', row_count: 12 }],
+        downloadData: [{ __workspace_fallback__: 'Rows', row_count: 12 }],
+        meta: {
+          source: 'fallback',
+          fallbackApplied: true,
+          sourceTableId: 'query-fallback',
+        },
+      },
+    ],
+    sourceMeta: {
+      totalRows: 12,
+      previewLimited: false,
+    },
+  });
+
+  assert.ok(workspace);
+  assert.equal(workspace?.charts[0]?.meta?.source, 'fallback');
+  assert.equal(workspace?.table.rows.length, 12);
+});
+
 test('materializeChartSpecFromBuilder creates a normalized grouped chart from workspace rows', () => {
   const workspace = parseChartWorkspace({
     workspaceId: 'query-2',

@@ -19,6 +19,7 @@ export const chartTypes = [
 ] as const;
 
 const chartFormats = ['currency', 'number', 'percent'] as const;
+const chartSources = ['auto', 'manual', 'natural-language', 'fallback'] as const;
 const fieldKinds = ['numeric', 'date', 'text'] as const;
 const fieldRoles = ['dimension', 'measure', 'time', 'id', 'currency', 'percent', 'unknown'] as const;
 const chartFormatSchema = z.enum(chartFormats).optional();
@@ -84,7 +85,7 @@ const chartMetaSchema = z
   .object({
     chartId: z.string().optional(),
     sourceTableId: z.string().optional(),
-    source: z.enum(['auto', 'manual', 'natural-language']).optional(),
+    source: z.enum(chartSources).optional(),
     rationale: z.string().optional().nullable(),
     confidence: z.number().min(0).max(1).optional().nullable(),
     previewLimited: z.boolean().optional(),
