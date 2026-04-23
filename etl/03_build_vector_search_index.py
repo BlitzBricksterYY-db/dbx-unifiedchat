@@ -121,7 +121,7 @@ print(f"✓ Endpoint '{vs_endpoint_name}' is online and ready")
 
 # COMMAND ----------
 
-# DBTITLE 1,Create Delta Sync Vector Search Index
+# DBTITLE 1,Create or Sync Delta Sync Vector Search Index
 
 print(f"Creating vector search index: {index_name}")
 print(f"  Source: {source_table_name}")
@@ -132,25 +132,23 @@ print(f"  Embedding model: {embedding_model}")
 try:
     # Check if index already exists
     try:
-        existing_index = client.get_index(index_name=index_name)
-        print(f"Index '{index_name}' already exists. Deleting and recreating...")
-        client.delete_index(index_name=index_name)
-        time.sleep(5)  # Wait for deletion to complete
+        index = client.get_index(index_name=index_name)
+        print(f"Index '{index_name}' already exists. Triggering sync...")
+        index.sync()
     except Exception:
         print(f"Index does not exist, creating new...")
+        # Create new index with metadata filters
+        index = client.create_delta_sync_index(
+            endpoint_name=vs_endpoint_name,
+            source_table_name=source_table_name,
+            index_name=index_name,
+            pipeline_type=pipeline_type,
+            primary_key="chunk_id",
+            embedding_source_column="searchable_content",
+            embedding_model_endpoint_name=embedding_model
+        )
     
-    # Create new index with metadata filters
-    index = client.create_delta_sync_index(
-        endpoint_name=vs_endpoint_name,
-        source_table_name=source_table_name,
-        index_name=index_name,
-        pipeline_type=pipeline_type,
-        primary_key="chunk_id",
-        embedding_source_column="searchable_content",
-        embedding_model_endpoint_name=embedding_model
-    )
-    
-    print(f"✓ Vector search index creation initiated: {index_name}")
+    print(f"✓ Vector search index creation/sync initiated: {index_name}: {index}")
     print(f"  Metadata fields available for filtering:")
     print(f"    - chunk_type (space_summary, table_overview, column_detail)")
     print(f"    - table_name, column_name")
