@@ -101,6 +101,55 @@ from databricks_langchain import (
 _genie_agent_pool: Dict[str, Any] = {}
 
 
+def _message_content_to_text(content: Any) -> str:
+    """Normalize LangChain message content into a plain text string."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(part for part in parts if part)
+    return str(content or "")
+
+
+def _get_recent_assistant_texts(messages: List[Any], limit: int = 2) -> List[str]:
+    """Collect the most recent assistant-authored text messages."""
+    assistant_texts: List[str] = []
+
+    for message in reversed(messages or []):
+        role = getattr(message, "type", None)
+        if role is None and isinstance(message, dict):
+            role = message.get("role")
+
+        if role not in {"ai", "assistant"}:
+            continue
+
+        if isinstance(message, dict):
+            content = message.get("content")
+            text = _message_content_to_text(content).strip()
+        else:
+            text_attr = getattr(message, "text", None)
+            if isinstance(text_attr, str):
+                text = text_attr.strip()
+            else:
+                content = getattr(message, "content", "")
+                text = _message_content_to_text(content).strip()
+        if not text:
+            continue
+
+        assistant_texts.append(text)
+        if len(assistant_texts) >= limit:
+            break
+
+    return list(reversed(assistant_texts))
+
+
 def get_or_create_genie_agent(space_id: str, space_title: str, description: str):
     """
     Get existing Genie agent from pool or create new one if not cached.
@@ -302,8 +351,10 @@ Use your available UC function tools to gather metadata intelligently.
         
         # Extract SQL and explanation from response
         if result and "messages" in result:
-            final_content = result["messages"][-1].content
-            original_content = final_content
+            assistant_texts = _get_recent_assistant_texts(result["messages"], limit=2)
+            final_content = assistant_texts[-1] if assistant_texts else _message_content_to_text(result["messages"][-1].content)
+            explanation_source = "\n\n".join(assistant_texts) if assistant_texts else final_content
+            original_content = explanation_source
             
             sql_query = None
             has_sql = False
@@ -316,8 +367,6 @@ Use your available UC function tools to gather metadata intelligently.
                     # Join all SQL blocks with newlines to preserve multi-query structure
                     sql_query = '\n\n'.join(block.strip() for block in sql_blocks if block.strip())
                     has_sql = True
-                    # Remove all SQL blocks from content to get explanation
-                    final_content = re.sub(r'```sql\s*.*?\s*```', '', final_content, flags=re.IGNORECASE | re.DOTALL)
             elif "```" in final_content:
                 # Find all generic code blocks
                 code_blocks = re.findall(r'```\s*(.*?)\s*```', final_content, re.DOTALL)
@@ -330,11 +379,14 @@ Use your available UC function tools to gather metadata intelligently.
                     # Join all SQL blocks
                     sql_query = '\n\n'.join(sql_blocks)
                     has_sql = True
-                    # Remove all code blocks from content to get explanation
-                    final_content = re.sub(r'```\s*.*?\s*```', '', final_content, flags=re.DOTALL)
             
             # Clean up explanation
-            explanation = final_content.strip()
+            explanation = explanation_source
+            if "```sql" in explanation.lower():
+                explanation = re.sub(r'```sql\s*.*?\s*```', '', explanation, flags=re.IGNORECASE | re.DOTALL)
+            elif "```" in explanation:
+                explanation = re.sub(r'```\s*.*?\s*```', '', explanation, flags=re.DOTALL)
+            explanation = explanation.strip()
             if not explanation:
                 explanation = original_content if not has_sql else "SQL query generated successfully."
             
@@ -915,8 +967,10 @@ Then combine them into a final SQL query.
             # Extract SQL from agent result
             # The agent returns {"messages": [...]}
             # Last message contains the final response
+            assistant_texts = _get_recent_assistant_texts(result["messages"], limit=2)
             final_message = result["messages"][-1]
-            final_content = final_message.content.strip()
+            final_content = assistant_texts[-1] if assistant_texts else _message_content_to_text(final_message.content).strip()
+            explanation_source = "\n\n".join(assistant_texts) if assistant_texts else final_content
             
             print(f"\n{'='*80}")
             print("✅ SQL Synthesis Agent completed")
@@ -927,7 +981,7 @@ Then combine them into a final SQL query.
             # Extract SQL and explanation from the result
             sql_query = None
             has_sql = False
-            explanation = final_content
+            explanation = explanation_source
             
             # Clean markdown if present and extract SQL - use findall to capture ALL code blocks
             if "```sql" in final_content.lower():
@@ -937,8 +991,6 @@ Then combine them into a final SQL query.
                     # Join all SQL blocks with newlines to preserve multi-query structure
                     sql_query = '\n\n'.join(block.strip() for block in sql_blocks if block.strip())
                     has_sql = True
-                    # Remove all SQL blocks to get explanation
-                    explanation = re.sub(r'```sql\s*.*?\s*```', '', final_content, flags=re.IGNORECASE | re.DOTALL)
             elif "```" in final_content:
                 # Find all generic code blocks
                 code_blocks = re.findall(r'```\s*(.*?)\s*```', final_content, re.DOTALL)
@@ -951,8 +1003,6 @@ Then combine them into a final SQL query.
                     # Join all SQL blocks
                     sql_query = '\n\n'.join(sql_blocks)
                     has_sql = True
-                    # Remove all code blocks to get explanation
-                    explanation = re.sub(r'```\s*.*?\s*```', '', final_content, flags=re.DOTALL)
             else:
                 # No markdown, check if the entire content is SQL
                 if any(keyword in final_content.upper() for keyword in ['SELECT', 'FROM', 'WHERE', 'JOIN']):
@@ -960,6 +1010,10 @@ Then combine them into a final SQL query.
                     has_sql = True
                     explanation = "SQL query generated successfully by Genie agent tools."
             
+            if "```sql" in explanation.lower():
+                explanation = re.sub(r'```sql\s*.*?\s*```', '', explanation, flags=re.IGNORECASE | re.DOTALL)
+            elif "```" in explanation:
+                explanation = re.sub(r'```\s*.*?\s*```', '', explanation, flags=re.DOTALL)
             explanation = explanation.strip()
             if not explanation:
                 explanation = final_content if not has_sql else "SQL query generated successfully by Genie agent tools."
