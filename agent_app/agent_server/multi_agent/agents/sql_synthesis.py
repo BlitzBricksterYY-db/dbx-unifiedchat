@@ -82,6 +82,8 @@ _agent_cache = {}
 # LLM connection pool (module-level)
 _llm_connection_pool = {}
 
+SQL_SYNTHESIS_MAX_TOKENS = 8192 * 2
+
 
 # ==============================================================================
 # Helper Functions
@@ -234,7 +236,7 @@ def get_cached_sql_table_agent(llm_endpoint=None, catalog=None, schema=None):
     if "sql_table" not in _agent_cache:
         record_cache_miss("agent_cache")
         print("⚡ Creating SQLSynthesisTableAgent (first use)...")
-        llm = get_pooled_llm(llm_endpoint)
+        llm = get_pooled_llm(llm_endpoint, max_tokens=SQL_SYNTHESIS_MAX_TOKENS)
         _agent_cache["sql_table"] = SQLSynthesisTableAgent(llm, catalog, schema)
         print("✓ SQLSynthesisTableAgent cached")
     else:
@@ -533,7 +535,11 @@ def sql_synthesis_genie_node(state: AgentState) -> dict:
     
     # Use dedicated SQL_SYNTHESIS_GENIE endpoint for orchestrating multiple Genie agents
     # This agent requires stronger reasoning for complex coordination
-    llm = get_pooled_llm(llm_endpoint, temperature=0.1)
+    llm = get_pooled_llm(
+        llm_endpoint,
+        temperature=0.1,
+        max_tokens=SQL_SYNTHESIS_MAX_TOKENS,
+    )
     
     if not relevant_spaces:
         print("❌ No relevant_spaces found in state")
