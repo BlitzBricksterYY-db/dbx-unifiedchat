@@ -14,6 +14,14 @@ repos:
   
   - repo: local
     hooks:
+      - id: forbid-databricks-npm-proxy
+        name: Forbid Databricks npm proxy in package lock
+        entry: python agent_app/scripts/check_no_databricks_npm_proxy.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        files: ^agent_app/e2e-chatbot-app-next/package-lock\.json$
+
       - id: pytest-unit
         name: Run app tests
         entry: bash -lc 'cd agent_app && uv run pytest tests/ -v'
