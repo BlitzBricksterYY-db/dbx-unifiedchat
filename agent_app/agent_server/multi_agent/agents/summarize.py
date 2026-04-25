@@ -679,7 +679,7 @@ def summarize_node(state: AgentState) -> dict:
     chart_gen = _get_cached_chart_generator()
     original_query = state.get("original_query", "")
 
-    MAX_PREVIEW_ROWS = 200
+    MAX_PREVIEW_ROWS = 500
 
     # --- 0b. Kick off chart generation in background (parallel with summary) ---
     chart_futures = {}
