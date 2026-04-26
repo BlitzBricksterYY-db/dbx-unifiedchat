@@ -39,8 +39,10 @@ Example usage:
 """
 
 import contextvars
+import hashlib
 import json
 import re
+import unicodedata
 from typing import Dict, List, Any, Optional
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -99,6 +101,83 @@ from databricks_langchain import (
 
 # Global pool for caching Genie agents across requests
 _genie_agent_pool: Dict[str, Any] = {}
+_tool_label_translation_cache: Dict[str, str] = {}
+
+
+def _response_content_to_text(response: Any) -> str:
+    """Extract text from a LangChain model response."""
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return " ".join(parts)
+    return str(content or "")
+
+
+def _translate_tool_label_to_english(label: Any, llm: Optional[Runnable] = None) -> str:
+    """Best-effort English label for readable API-safe tool names."""
+    raw_label = str(label or "").strip()
+    if not raw_label:
+        return ""
+
+    if raw_label.isascii():
+        return raw_label
+
+    if raw_label in _tool_label_translation_cache:
+        return _tool_label_translation_cache[raw_label]
+
+    if llm is None:
+        return raw_label
+
+    prompt = (
+        "Translate this analytics/BI Genie space title into a concise English tool label.\n"
+        "Return ONLY 2-6 English words. Use ASCII letters, numbers, spaces, hyphens, or underscores only.\n"
+        "Do not include quotes, explanations, punctuation, or non-English characters.\n\n"
+        f"Title: {raw_label}"
+    )
+
+    try:
+        translated = _response_content_to_text(llm.invoke(prompt)).strip()
+        translated = translated.strip("\"'` \n\t")
+        translated = re.sub(r"[^a-zA-Z0-9 _-]+", " ", translated)
+        translated = re.sub(r"\s+", " ", translated).strip()
+        if re.search(r"[a-zA-Z]", translated):
+            _tool_label_translation_cache[raw_label] = translated
+            return translated
+    except Exception as e:
+        print(f"⚠ Tool label translation failed for '{raw_label}': {e}")
+
+    return raw_label
+
+
+def _safe_tool_name(prefix: str, label: Any, fallback_id: Any = "", max_length: int = 128) -> str:
+    """Return an API-safe tool name matching ^[a-zA-Z0-9_-]{1,128}$."""
+    raw_label = str(label or fallback_id or "tool")
+    ascii_label = (
+        unicodedata.normalize("NFKD", raw_label)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", ascii_label)
+    slug = re.sub(r"_+", "_", slug).strip("_-")
+
+    digest_source = f"{raw_label}:{fallback_id}"
+    digest = hashlib.sha1(digest_source.encode("utf-8")).hexdigest()[:10]
+    base = re.sub(r"[^a-zA-Z0-9_-]+", "_", prefix).strip("_-") or "tool"
+
+    if slug:
+        reserved = len(base) + len(digest) + 2
+        slug = slug[: max(0, max_length - reserved)].strip("_-")
+        if slug:
+            return f"{base}_{slug}_{digest}"
+
+    return f"{base}_{digest}"[:max_length]
 
 
 def _message_content_to_text(content: Any) -> str:
@@ -150,7 +229,12 @@ def _get_recent_assistant_texts(messages: List[Any], limit: int = 2) -> List[str
     return list(reversed(assistant_texts))
 
 
-def get_or_create_genie_agent(space_id: str, space_title: str, description: str):
+def get_or_create_genie_agent(
+    space_id: str,
+    space_title: str,
+    description: str,
+    genie_agent_name: Optional[str] = None,
+):
     """
     Get existing Genie agent from pool or create new one if not cached.
     
@@ -169,6 +253,7 @@ def get_or_create_genie_agent(space_id: str, space_title: str, description: str)
     
     if space_id not in _genie_agent_pool:
         print(f"⚡ Creating Genie agent for space: {space_title} (first use)")
+        safe_genie_agent_name = genie_agent_name or _safe_tool_name("Genie", space_title, space_id)
         
         def enforce_limit(messages, n=5):
             """Enforce result limit in Genie queries."""
@@ -178,7 +263,7 @@ def get_or_create_genie_agent(space_id: str, space_title: str, description: str)
         
         genie_agent = GenieAgent(
             genie_space_id=space_id,
-            genie_agent_name=f"Genie_{space_title}",
+            genie_agent_name=safe_genie_agent_name,
             description=description,
             include_context=True,
             message_processor=lambda msgs: enforce_limit(msgs, n=5)
@@ -449,6 +534,7 @@ class SQLSynthesisGenieAgent:
         # Create Genie agents and their tool representations
         self.genie_agents = []
         self.genie_agent_tools = []
+        self.space_id_to_tool = {}
         self._create_genie_agent_tools()
         
         # Create SQL synthesis agent with Genie agent tools
@@ -478,11 +564,17 @@ class SQLSynthesisGenieAgent:
                 print(f"  ⚠ Warning: Space missing space_id, skipping: {space}")
                 continue
             
-            genie_agent_name = f"Genie_{space_title}"
+            english_tool_label = _translate_tool_label_to_english(space_title, self.llm)
+            genie_agent_name = _safe_tool_name("Genie", english_tool_label, space_id)
             description = searchable_content
             
             # OPTIMIZATION: Get Genie agent from pool (cached or newly created)
-            genie_agent = get_or_create_genie_agent(space_id, space_title, description)
+            genie_agent = get_or_create_genie_agent(
+                space_id,
+                space_title,
+                description,
+                genie_agent_name=genie_agent_name,
+            )
             self.genie_agents.append(genie_agent)
             
             # Define tool input schema using Pydantic
@@ -528,6 +620,7 @@ class SQLSynthesisGenieAgent:
                 func=make_genie_tool_call(genie_agent),
             )
             self.genie_agent_tools.append(genie_tool)
+            self.space_id_to_tool[space_id] = genie_tool
             
             print(f"  ✓ Created Genie agent tool: {genie_agent_name} ({space_id})")
     
@@ -610,18 +703,9 @@ class SQLSynthesisGenieAgent:
             
             return merged_results
         
-        # Build a mapping from space_id to tool for easy lookup
-        space_id_to_tool = {}
-        for space in self.relevant_spaces:
-            space_id = space.get("space_id")
-            if space_id:
-                # Find the corresponding tool by matching space_id
-                for tool in self.genie_agent_tools:
-                    # Match tool to space by checking if space_title is in tool name
-                    space_title = space.get("space_title", space_id)
-                    if f"Genie_{space_title}" == tool.name:
-                        space_id_to_tool[space_id] = tool
-                        break
+        # Build a mapping from space_id to tool for easy lookup. Tool names are
+        # sanitized for model APIs, so never infer identity from display titles.
+        space_id_to_tool = dict(self.space_id_to_tool)
         
         # Tool function that builds and invokes dynamic parallel execution
         def invoke_parallel_genie_agents(genie_route_plan: Dict[str, str]) -> Dict[str, Any]:
@@ -849,17 +933,13 @@ OUTPUT REQUIREMENTS:
         if not genie_route_plan:
             return {}
         
-        # Build space_id to tool mapping
-        space_id_to_tool = {}
-        for space in self.relevant_spaces:
-            space_id = space.get("space_id")
-            if space_id and space_id in genie_route_plan:
-                # Find the corresponding tool by matching space_id
-                for tool in self.genie_agent_tools:
-                    space_title = space.get("space_title", space_id)
-                    if f"Genie_{space_title}" == tool.name:
-                        space_id_to_tool[space_id] = tool
-                        break
+        # Build space_id to tool mapping. Tool names are sanitized and not a
+        # reliable place to recover display titles.
+        space_id_to_tool = {
+            space_id: tool
+            for space_id, tool in self.space_id_to_tool.items()
+            if space_id in genie_route_plan
+        }
         
         parallel_tasks = {}
         for space_id, question in genie_route_plan.items():
