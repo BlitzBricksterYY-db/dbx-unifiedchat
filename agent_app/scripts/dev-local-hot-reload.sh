@@ -163,6 +163,17 @@ context = {
     "BUNDLE_GENIE_SPACE_IDS": resolve_bundle_var("genie_space_ids"),
     "BUNDLE_APP_LOGO_URL": resolve_bundle_var("app_logo_url"),
     "BUNDLE_EXPERIMENT_ID": resolve_bundle_var("experiment_id"),
+    "BUNDLE_MLFLOW_TRACKING_URI": resolve_bundle_var("mlflow_tracking_uri"),
+    "BUNDLE_MLFLOW_REGISTRY_URI": resolve_bundle_var("mlflow_registry_uri"),
+    "BUNDLE_LLM_ENDPOINT": resolve_bundle_var("llm_endpoint"),
+    "BUNDLE_LLM_ENDPOINT_CLARIFICATION": resolve_bundle_var("llm_endpoint_clarification"),
+    "BUNDLE_LLM_ENDPOINT_PLANNING": resolve_bundle_var("llm_endpoint_planning"),
+    "BUNDLE_LLM_ENDPOINT_SQL_SYNTHESIS_TABLE": resolve_bundle_var("llm_endpoint_sql_synthesis_table"),
+    "BUNDLE_LLM_ENDPOINT_SQL_SYNTHESIS_GENIE": resolve_bundle_var("llm_endpoint_sql_synthesis_genie"),
+    "BUNDLE_LLM_ENDPOINT_EXECUTION": resolve_bundle_var("llm_endpoint_execution"),
+    "BUNDLE_LLM_ENDPOINT_SUMMARIZE": resolve_bundle_var("llm_endpoint_summarize"),
+    "BUNDLE_LLM_ENDPOINT_CHART": resolve_bundle_var("llm_endpoint_chart"),
+    "BUNDLE_LLM_ENDPOINT_DETECT_CODE_LOOKUP": resolve_bundle_var("llm_endpoint_detect_code_lookup"),
 }
 
 for key, value in context.items():
@@ -281,6 +292,17 @@ set_env_value "DATABRICKS_CONFIG_PROFILE" "$PROFILE"
 [[ -n "$BUNDLE_SQL_WAREHOUSE_ID" ]] && set_env_value "SQL_WAREHOUSE_ID" "$BUNDLE_SQL_WAREHOUSE_ID"
 [[ -n "$BUNDLE_GENIE_SPACE_IDS" ]] && set_env_value "GENIE_SPACE_IDS" "$BUNDLE_GENIE_SPACE_IDS"
 [[ -n "$BUNDLE_APP_LOGO_URL" ]] && set_env_value "APP_LOGO_URL" "$BUNDLE_APP_LOGO_URL"
+[[ -n "$BUNDLE_MLFLOW_TRACKING_URI" ]] && set_env_value "MLFLOW_TRACKING_URI" "$BUNDLE_MLFLOW_TRACKING_URI"
+[[ -n "$BUNDLE_MLFLOW_REGISTRY_URI" ]] && set_env_value "MLFLOW_REGISTRY_URI" "$BUNDLE_MLFLOW_REGISTRY_URI"
+[[ -n "$BUNDLE_LLM_ENDPOINT" ]] && set_env_value "LLM_ENDPOINT" "$BUNDLE_LLM_ENDPOINT"
+[[ -n "$BUNDLE_LLM_ENDPOINT_CLARIFICATION" ]] && set_env_value "LLM_ENDPOINT_CLARIFICATION" "$BUNDLE_LLM_ENDPOINT_CLARIFICATION"
+[[ -n "$BUNDLE_LLM_ENDPOINT_PLANNING" ]] && set_env_value "LLM_ENDPOINT_PLANNING" "$BUNDLE_LLM_ENDPOINT_PLANNING"
+[[ -n "$BUNDLE_LLM_ENDPOINT_SQL_SYNTHESIS_TABLE" ]] && set_env_value "LLM_ENDPOINT_SQL_SYNTHESIS_TABLE" "$BUNDLE_LLM_ENDPOINT_SQL_SYNTHESIS_TABLE"
+[[ -n "$BUNDLE_LLM_ENDPOINT_SQL_SYNTHESIS_GENIE" ]] && set_env_value "LLM_ENDPOINT_SQL_SYNTHESIS_GENIE" "$BUNDLE_LLM_ENDPOINT_SQL_SYNTHESIS_GENIE"
+[[ -n "$BUNDLE_LLM_ENDPOINT_EXECUTION" ]] && set_env_value "LLM_ENDPOINT_EXECUTION" "$BUNDLE_LLM_ENDPOINT_EXECUTION"
+[[ -n "$BUNDLE_LLM_ENDPOINT_SUMMARIZE" ]] && set_env_value "LLM_ENDPOINT_SUMMARIZE" "$BUNDLE_LLM_ENDPOINT_SUMMARIZE"
+[[ -n "$BUNDLE_LLM_ENDPOINT_CHART" ]] && set_env_value "LLM_ENDPOINT_CHART" "$BUNDLE_LLM_ENDPOINT_CHART"
+[[ -n "$BUNDLE_LLM_ENDPOINT_DETECT_CODE_LOOKUP" ]] && set_env_value "LLM_ENDPOINT_DETECT_CODE_LOOKUP" "$BUNDLE_LLM_ENDPOINT_DETECT_CODE_LOOKUP"
 if [[ -n "$BUNDLE_LAKEBASE_PROJECT" && -n "$BUNDLE_LAKEBASE_BRANCH" ]]; then
   set_env_value "LAKEBASE_AUTOSCALING_PROJECT" "$BUNDLE_LAKEBASE_PROJECT"
   set_env_value "LAKEBASE_AUTOSCALING_BRANCH" "$BUNDLE_LAKEBASE_BRANCH"
