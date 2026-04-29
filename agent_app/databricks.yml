@@ -1,6 +1,19 @@
 bundle:
   name: multi_agent_genie_app
 
+##: NOTE: This is a shared configuration file for the multi-agent genie app. It is used to define the shared settings for the app.
+# per target, you can override the shared settings by adding the overrides in the target section.
+
+
+presets:
+  # default/recommend to 'false' to always copy the bundle files to the target workspace path (i.e., workspace.root_path). 
+  # This only matters if the bundle is deployed from a databricks workspace (UI 'deploy' button or notebook terminal command). 
+  # If 'true', the bundle files from the repo/folder on your workspace will be directly deployed without copying.
+  # from local terminal, the bundle files will always be copied to the target workspace path regardless of this setting.
+  # reference: 
+  # "When you deploy a bundle from your local terminal with databricks bundle deploy, the source_linked_deployment preset is ignored; it only has effect for workspace (UI) deployments where the CLI runs on DBR in /Workspace/.... "
+  source_linked_deployment: false
+
 workspace:
   root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
 
@@ -49,9 +62,9 @@ variables:
 
   # LLM endpoints
   llm_endpoint:
-    default: "databricks-gpt-5-4-mini"
+    default: "databricks-claude-sonnet-4-5"
   llm_endpoint_clarification:
-    default: "databricks-gpt-5-4-mini"
+    default: "databricks-claude-haiku-4-5"
   llm_endpoint_planning:
     default: "databricks-claude-sonnet-4-5"
   llm_endpoint_sql_synthesis_table:
@@ -61,9 +74,9 @@ variables:
   llm_endpoint_execution:
     default: "databricks-claude-haiku-4-5"
   llm_endpoint_summarize:
-    default: "databricks-gpt-5-4"
+    default: "databricks-claude-sonnet-4-5"
   llm_endpoint_detect_code_lookup:
-    default: "databricks-gpt-5-4-mini"
+    default: "databricks-claude-haiku-4-5"
 
   # Embedding & vector search
   embedding_model:
@@ -115,14 +128,18 @@ targets:
     default: true
     mode: development
     workspace:
+      # profile is the databricks workspace profile name. It is used to identify the workspace where the bundle will be deployed.
+      # it is the [profile_name] in the databricks.cfg file.
       profile: "<dev-profile>"
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
     variables:
+      # Common development overrides - replace only what differs from the shared defaults.
+      # app_name: "your-app-name-prod"
+      # app_logo_url: "https://example.com/path/to/your-logo.png"
       catalog_name: "<dev-catalog-name>"
       schema_name: "<dev-schema-name>"
       data_catalog_name: "<dev-data-catalog-name>"
       data_schema_name: "<dev-data-schema-name>"
-      uc_function_names: "<dev-comma-separated-uc-function-names>"
       experiment_id: "<dev-mlflow-experiment-id>"
       agent_keep_warm_interval_seconds: "600"
       sql_warehouse_id: "<dev-sql-warehouse-id>"
@@ -134,6 +151,8 @@ targets:
     default: false
     mode: production
     workspace:
+      # profile is the databricks workspace profile name. It is used to identify the workspace where the bundle will be deployed.
+      # it is the [profile_name] in the databricks.cfg file.
       profile: "<prod-profile>"
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
     variables:
