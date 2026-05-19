@@ -1,0 +1,46 @@
+flowchart TB
+    subgraph UserLayer["User experience"]
+        UI[Databricks App UI]
+    end
+
+    subgraph AgentRuntime["Agent runtime"]
+        LG[LangGraph multi-agent orchestration]
+        Plan[Planning & clarification]
+        TableRoute[SQL synthesis — table route]
+        GenieRoute[SQL synthesis — Genie route]
+        Exec[SQL execution & summarization]
+    end
+
+    subgraph DatabricksPlatform["Databricks platform"]
+        Genie[Genie spaces]
+        VS[Vector Search]
+        UC[Unity Catalog & UC Functions]
+        WH[SQL Warehouse]
+        LB[Lakebase memory & checkpoints]
+        MS[Model Serving LLMs]
+        ML[MLflow tracing & feedback]
+    end
+
+    UI --> LG
+    LG --> Plan
+    Plan --> TableRoute
+    Plan --> GenieRoute
+    TableRoute --> Exec
+    GenieRoute --> Exec
+    Exec --> UI
+
+    TableRoute --> VS
+    TableRoute --> UC
+    GenieRoute --> Genie
+    Exec --> WH
+    LG --> LB
+    LG --> MS
+    LG --> ML
+
+    classDef user fill:#E8F4FD,stroke:#1B6EC2,stroke-width:2px
+    classDef agent fill:#4A90E2,stroke:#2E5C8A,stroke-width:2px,color:#fff
+    classDef platform fill:#50C878,stroke:#2E7D4E,stroke-width:2px,color:#fff
+
+    class UI user
+    class LG,Plan,TableRoute,GenieRoute,Exec agent
+    class Genie,VS,UC,WH,LB,MS,ML platform

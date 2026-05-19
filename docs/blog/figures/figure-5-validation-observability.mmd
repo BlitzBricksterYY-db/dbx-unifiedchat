@@ -1,0 +1,27 @@
+flowchart LR
+    Q[Natural language question]
+    Plan[Planning & route selection]
+    SQL[Generated SQL + explanation]
+    Run[SQL Warehouse execution]
+    Answer[Streaming summary & table/chart]
+    Validate[Validation accordion<br/>SQL review & curation]
+    Feedback[Thumbs up / down feedback]
+    Trace[MLflow trace link]
+
+    Q --> Plan --> SQL --> Run --> Answer
+    SQL --> Validate
+    Answer --> Feedback
+    Plan --> Trace
+    SQL --> Trace
+    Run --> Trace
+    Feedback --> Trace
+
+    classDef input fill:#E8F4FD,stroke:#1B6EC2,stroke-width:2px
+    classDef process fill:#4A90E2,stroke:#2E5C8A,stroke-width:2px,color:#fff
+    classDef output fill:#50C878,stroke:#2E7D4E,stroke-width:2px,color:#fff
+    classDef observe fill:#F5A623,stroke:#C17D11,stroke-width:2px
+
+    class Q input
+    class Plan,SQL,Run process
+    class Answer output
+    class Validate,Feedback,Trace observe

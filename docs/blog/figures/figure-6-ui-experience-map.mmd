@@ -1,0 +1,36 @@
+flowchart TB
+    subgraph ChatSurface["Chat surface"]
+        Input[Message input & send]
+        Think[Thinking / action collapsibles]
+        Stream[Streaming summary response]
+        Nav[Turn navigation & shareable threads]
+    end
+
+    subgraph DataViz["Results workspace"]
+        Grid[AG Grid paginated table]
+        Chart[Visualization workspace & charts]
+    end
+
+    subgraph TrustLayer["Trust & tuning"]
+        Val[Validation accordion — SQL & explanation]
+        FB[Feedback controls]
+        Trace[MLflow trace link]
+        Settings[Agent settings panel]
+    end
+
+    Input --> Think --> Stream
+    Stream --> Grid
+    Stream --> Chart
+    Stream --> Val
+    Val --> FB
+    Stream --> Trace
+    Settings --> Input
+    Nav --> Input
+
+    classDef chat fill:#4A90E2,stroke:#2E5C8A,stroke-width:2px,color:#fff
+    classDef viz fill:#50C878,stroke:#2E7D4E,stroke-width:2px,color:#fff
+    classDef trust fill:#F5A623,stroke:#C17D11,stroke-width:2px
+
+    class Input,Think,Stream,Nav chat
+    class Grid,Chart viz
+    class Val,FB,Trace,Settings trust
