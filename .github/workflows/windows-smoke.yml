@@ -19,6 +19,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # actions/checkout@v4 can leave CRLF in the working tree on the hosted
+      # Windows image even though .gitattributes pins these paths to `eol=lf`
+      # (a plain `git clone` honors the attribute and yields LF — verified).
+      # Renormalize so the rest of the job runs against LF files exactly as a
+      # real contributor's clone would, then the assertion below confirms it.
+      - name: Enforce LF working tree (match a real git clone)
+        run: |
+          git config core.autocrlf false
+          git config core.eol lf
+          git rm --cached -rq .
+          git reset --hard -q
+
       - name: Install GNU make
         shell: pwsh
         run: choco install make -y --no-progress
@@ -33,10 +45,10 @@ jobs:
           make --version | head -1
           curl --version | head -1
 
-      # Git for Windows defaults to core.autocrlf=true. If .gitattributes ever
-      # stops pinning these to LF, the checkout corrupts them with CRLF and the
-      # bash scripts the Makefile calls fail with "bad interpreter". The no-arg
-      # targets below don't invoke those scripts, so guard the regression here.
+      # Backstop: confirm the normalized working tree (and the committed blobs
+      # it came from) are LF. Catches a shell script ever committed with CRLF
+      # blobs, which .gitattributes cannot fix on checkout and which would break
+      # `#!/usr/bin/env bash` + make recipes for every Windows contributor.
       - name: Assert LF line endings on shell-executed files
         run: |
           bad=$(git ls-files -- 'Makefile' '*.sh' '*.bash' | xargs -r grep -lU $'\r' || true)
