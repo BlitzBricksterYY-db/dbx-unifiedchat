@@ -472,13 +472,17 @@ test.describe('Interactive Charts', () => {
     const { content } = await chatPage.getRecentAssistantMessage();
     await expect(content.getByRole('button', { name: 'Hide table' })).toBeVisible();
     await expect(content.getByRole('button', { name: 'Show SQL' })).toBeVisible();
-    await expect(content.getByText('Showing 1-10 of 12')).toBeVisible();
+    // AG Grid pagination summary — "1 to 10 of 12".
+    const pagingSummary = content.locator('.ag-paging-row-summary-panel');
+    await expect(pagingSummary).toContainText('1 to 10 of 12');
     await expect(content.getByText('patient-01')).toBeVisible();
     await expect(content.getByText('patient-11')).toHaveCount(0);
 
-    await content.getByRole('button', { name: 'Next' }).click();
+    // AG Grid v35 renders 4 pagination buttons sharing the same class in
+    // order [First, Previous, Next, Last]; nth(2) is the Next button.
+    await content.locator('.ag-paging-button').nth(2).click();
 
-    await expect(content.getByText('Showing 11-12 of 12')).toBeVisible();
+    await expect(pagingSummary).toContainText('11 to 12 of 12');
     await expect(content.getByText('patient-11')).toBeVisible();
     await expect(content.getByText('patient-12')).toBeVisible();
   });

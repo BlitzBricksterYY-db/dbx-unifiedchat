@@ -401,6 +401,16 @@ const providerCache = new Map<
 >();
 const PROVIDER_CACHE_DURATION = 5 * 60 * 1000; // Cache provider for 5 minutes
 
+function getAuxiliaryModelEndpoint(id: string): string {
+  const endpoint = process.env.LLM_ENDPOINT_SUMMARIZE ?? process.env.LLM_ENDPOINT;
+  if (!endpoint) {
+    throw new Error(
+      `Please set LLM_ENDPOINT_SUMMARIZE or LLM_ENDPOINT for ${id}`,
+    );
+  }
+  return endpoint;
+}
+
 // Helper function to get or create the Databricks provider with OAuth
 async function getOrCreateDatabricksProvider(
   mode: ProviderMode,
@@ -499,7 +509,7 @@ export class OAuthAwareProvider implements SmartProvider {
     const model = await (async () => {
       if (id === 'title-model' || id === 'artifact-model') {
         const provider = await getOrCreateDatabricksProvider('direct');
-        return provider.chatCompletions('databricks-gpt-5-4-nano');
+        return provider.chatCompletions(getAuxiliaryModelEndpoint(id));
       }
       if (API_PROXY) {
         const provider = await getOrCreateDatabricksProvider('proxy');

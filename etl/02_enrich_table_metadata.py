@@ -36,6 +36,7 @@ dbutils.widgets.text("enriched_docs_table", os.getenv("ENRICHED_DOCS_TABLE", "en
 dbutils.widgets.text("llm_endpoint", os.getenv("LLM_ENDPOINT", "databricks-claude-sonnet-4-5"))
 dbutils.widgets.text("sample_size", os.getenv("SAMPLE_SIZE", "20"))
 dbutils.widgets.text("max_unique_values", os.getenv("MAX_UNIQUE_VALUES", "50"))
+dbutils.widgets.text("max_parallel_genies", os.getenv("MAX_PARALLEL_GENIES", "4"))
 
 catalog_name = dbutils.widgets.get("catalog_name")
 schema_name = dbutils.widgets.get("schema_name")
@@ -44,6 +45,8 @@ enriched_docs_table_short = dbutils.widgets.get("enriched_docs_table")
 llm_endpoint = dbutils.widgets.get("llm_endpoint")
 sample_size = int(dbutils.widgets.get("sample_size"))
 max_unique_values = int(dbutils.widgets.get("max_unique_values"))
+# Bound driver-side concurrency for Genie space enrichment. Set to 1 for sequential behavior.
+max_parallel_genies = max(1, int(dbutils.widgets.get("max_parallel_genies")))
 
 enriched_docs_table = f"{catalog_name}.{schema_name}.{enriched_docs_table_short}"
 
@@ -54,6 +57,7 @@ print(f"Enriched Docs Table: {enriched_docs_table}")
 print(f"LLM Endpoint: {llm_endpoint}")
 print(f"Sample Size: {sample_size}")
 print(f"Max Unique Values: {max_unique_values}")
+print(f"Max Parallel Genies: {max_parallel_genies}")
 
 # COMMAND ----------
 
@@ -109,6 +113,45 @@ def get_table_metadata(table_identifier: str) -> pd.DataFrame:
         return pd.DataFrame(columns=['col_name', 'data_type', 'comment'])
 
 
+def is_metric_view_measure_error(error: Exception) -> bool:
+    """
+    Detect Databricks metric view errors caused by querying a measure like a
+    regular column. Metric view measures must be wrapped in MEASURE().
+    """
+    error_message = str(error)
+    return (
+        "METRIC_VIEW_MISSING_MEASURE_FUNCTION" in error_message
+        or "requires a MEASURE() function" in error_message
+    )
+
+
+def collect_json_serializable_values(rows) -> List[Any]:
+    """Convert first-column Spark result values to JSON-serializable types."""
+    sampled_values = []
+    for row in rows:
+        val = row[0]
+        if hasattr(val, 'isoformat'):
+            sampled_values.append(val.isoformat())
+        else:
+            sampled_values.append(val)
+    return sampled_values
+
+
+def sample_metric_view_measure_values(table_identifier: str, column_name: str, sample_size: int) -> List[Any]:
+    """Sample a metric view measure by projecting it with MEASURE()."""
+    query = f"""
+    SELECT DISTINCT `__metric_value`
+    FROM (
+        SELECT MEASURE(`{column_name}`) AS `__metric_value`
+        FROM {table_identifier}
+    ) sampled
+    WHERE `__metric_value` IS NOT NULL
+    LIMIT {sample_size}
+    """
+    result = spark.sql(query).collect()
+    return collect_json_serializable_values(result)
+
+
 def sample_column_values(table_identifier: str, column_name: str, sample_size: int = 100) -> List[Any]:
     """
     Sample distinct values from a column.
@@ -129,19 +172,34 @@ def sample_column_values(table_identifier: str, column_name: str, sample_size: i
         LIMIT {sample_size}
         """
         result = spark.sql(query).collect()
-        # Convert values to JSON-serializable types
-        sampled_values = []
-        for row in result:
-            val = row[0]
-            # Convert date/datetime objects to strings
-            if hasattr(val, 'isoformat'):
-                sampled_values.append(val.isoformat())
-            else:
-                sampled_values.append(val)
-        return sampled_values
+        return collect_json_serializable_values(result)
     except Exception as e:
+        if is_metric_view_measure_error(e):
+            try:
+                print(f"  → Retrying {column_name} as metric view measure with MEASURE()")
+                return sample_metric_view_measure_values(table_identifier, column_name, sample_size)
+            except Exception as metric_e:
+                print(f"Error sampling metric measure {column_name} from {table_identifier}: {str(metric_e)}")
+                return []
         print(f"Error sampling {column_name} from {table_identifier}: {str(e)}")
         return []
+
+
+def build_metric_view_measure_dictionary(table_identifier: str, column_name: str, max_values: int) -> Dict[str, int]:
+    """Build a value dictionary for a metric view measure using MEASURE()."""
+    query = f"""
+    SELECT `__metric_value`, COUNT(*) as frequency
+    FROM (
+        SELECT MEASURE(`{column_name}`) AS `__metric_value`
+        FROM {table_identifier}
+    ) sampled
+    WHERE `__metric_value` IS NOT NULL
+    GROUP BY `__metric_value`
+    ORDER BY frequency DESC
+    LIMIT {max_values}
+    """
+    result = spark.sql(query).collect()
+    return {str(row[0]): int(row[1]) for row in result}
 
 
 def build_value_dictionary(table_identifier: str, column_name: str, max_values: int = 50) -> Dict[str, int]:
@@ -168,6 +226,13 @@ def build_value_dictionary(table_identifier: str, column_name: str, max_values: 
         result = spark.sql(query).collect()
         return {str(row[0]): int(row[1]) for row in result}
     except Exception as e:
+        if is_metric_view_measure_error(e):
+            try:
+                print(f"  → Retrying {column_name} value dictionary as metric view measure with MEASURE()")
+                return build_metric_view_measure_dictionary(table_identifier, column_name, max_values)
+            except Exception as metric_e:
+                print(f"Error building metric measure dictionary for {column_name} from {table_identifier}: {str(metric_e)}")
+                return {}
         print(f"Error building value dictionary for {column_name} from {table_identifier}: {str(e)}")
         return {}
 
@@ -559,20 +624,46 @@ genie_exports_path = f"/Volumes/{catalog_name}/{schema_name}/{volume_name}/genie
 print(f"Looking for Genie exports in: {genie_exports_path}")
 
 import glob
+import concurrent.futures
+import traceback
+
 space_files = glob.glob(f"{genie_exports_path}/*.space.json")
 print(f"Found {len(space_files)} Genie space files")
 
-# Process each space
-all_enriched_docs = []
+# Process each space with bounded driver-side concurrency. Each Genie space is
+# independent, and the slow work is Spark SQL sampling + ai_query calls which
+# release the GIL, so threads are sufficient. Results are reassembled in the
+# original `space_files` order so downstream chunk_ids stay deterministic.
+results_by_index: Dict[int, Dict[str, Any]] = {}
 
-for space_file in space_files:
-    try:
-        enriched_doc = process_genie_space(space_file, enriched_docs_table)
-        all_enriched_docs.append(enriched_doc)
-    except Exception as e:
-        print(f"Error processing {space_file}: {str(e)}")
-        import traceback
-        traceback.print_exc()
+effective_workers = min(max_parallel_genies, len(space_files)) if space_files else 0
+print(f"Processing {len(space_files)} Genie spaces with {effective_workers} parallel worker(s)")
+
+if effective_workers <= 1:
+    for idx, space_file in enumerate(space_files):
+        try:
+            results_by_index[idx] = process_genie_space(space_file, enriched_docs_table)
+        except Exception as e:
+            print(f"Error processing {space_file}: {str(e)}")
+            traceback.print_exc()
+else:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        future_to_idx = {
+            executor.submit(process_genie_space, space_file, enriched_docs_table): idx
+            for idx, space_file in enumerate(space_files)
+        }
+
+        for future in concurrent.futures.as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            space_file = space_files[idx]
+            try:
+                results_by_index[idx] = future.result()
+            except Exception as e:
+                print(f"Error processing {space_file}: {str(e)}")
+                traceback.print_exc()
+
+# Preserve original file order for deterministic downstream chunk_ids
+all_enriched_docs = [results_by_index[i] for i in range(len(space_files)) if i in results_by_index]
 
 print(f"\n{'='*80}")
 print(f"Successfully enriched {len(all_enriched_docs)} Genie spaces")

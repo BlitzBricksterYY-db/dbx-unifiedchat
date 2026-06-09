@@ -91,6 +91,13 @@ def run_database_migrations():
     """Run chatbot DB migrations if the frontend directory exists."""
     if not CHATBOT_DIR.exists():
         return
+    _run(["npm", "config", "get", "registry"], cwd=CHATBOT_DIR, label="npm registry", check=False)
+    _run(
+        ["npm", "config", "get", "replace-registry-host"],
+        cwd=CHATBOT_DIR,
+        label="npm replace-registry-host",
+        check=False,
+    )
     _run(["npm", "install"], cwd=CHATBOT_DIR, label="npm install")
     rc = _run(["npm", "run", "db:migrate"], cwd=CHATBOT_DIR, label="db:migrate", check=False)
     if rc != 0:

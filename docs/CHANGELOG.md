@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-04-27
+
+### Added
+- Added bounded parallel Genie space processing in the metadata enrichment notebook, including a `max_parallel_genies` control for safer concurrent processing
+- Added AG Grid-based table rendering with higher preview row capacity and focused utility/test coverage
+- Added metric view measure handling and JSON serialization support in metadata enrichment
+- Added npm registry/proxy checks to catch Databricks npm proxy issues during app migration/startup workflows
+
+### Changed
+- Improved SQL synthesis for Genie tool label translation, API-safe naming, and larger SQL generation token handling
+- Refactored vector search index creation to sync with existing indexes instead of removing and recreating them
+- Updated response explanation context to include recent SQL synthesis assistant messages
+- Replaced hard-coded auxiliary chat completion model usage with the configured summarize model endpoint
+- Refined local bundle configuration and top-level README guidance
+
+### Fixed
+- Fixed within-thread space context reset behavior for agent state and graph input handling
+- Improved visualization workspace fallback handling and chart specification resilience
+- Added Lakebase fault-tolerance improvements for app state handling
+
+### Removed
+- Removed the stale root-level `VERSION` file so release versioning is driven by git tags and `docs/CHANGELOG.md`
+
 ## [1.2.0] - 2026-04-21
 
 ### Changed

@@ -28,7 +28,8 @@
     "db:up": "drizzle-kit up",
     "test": "npm run test:with-db && npm run test:ephemeral",
     "test:with-db": "PLAYWRIGHT=True TEST_MODE=with-db npx playwright test",
-    "test:ephemeral": "PLAYWRIGHT=True TEST_MODE=ephemeral npx playwright test"
+    "test:ephemeral": "PLAYWRIGHT=True TEST_MODE=ephemeral npx playwright test",
+    "test:unit": "node --import tsx --test 'client/src/**/__tests__/*.test.ts'"
   },
   "dependencies": {
     "dotenv": "^17.2.3",
