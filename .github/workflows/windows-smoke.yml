@@ -21,15 +21,16 @@ jobs:
 
       # actions/checkout@v4 can leave CRLF in the working tree on the hosted
       # Windows image even though .gitattributes pins these paths to `eol=lf`
-      # (a plain `git clone` honors the attribute and yields LF — verified).
-      # Renormalize so the rest of the job runs against LF files exactly as a
-      # real contributor's clone would, then the assertion below confirms it.
-      - name: Enforce LF working tree (match a real git clone)
+      # (a plain `git clone` honors the attribute and yields LF — verified
+      # locally). git-based renormalize (`reset --hard`) does NOT fix it: git
+      # treats the CRLF files as unchanged after the clean filter and skips the
+      # rewrite. Strip the CR directly so the `make` steps below run on LF
+      # exactly as a real contributor's clone would.
+      - name: Strip CR from working tree (checkout@v4 leaves CRLF on Windows)
         run: |
-          git config core.autocrlf false
-          git config core.eol lf
-          git rm --cached -rq .
-          git reset --hard -q
+          git ls-files -- 'Makefile' '*.sh' '*.bash' '*.yml' '*.yaml' | while IFS= read -r f; do
+            sed -i 's/\r$//' "$f"
+          done
 
       - name: Install GNU make
         shell: pwsh
@@ -45,19 +46,27 @@ jobs:
           make --version | head -1
           curl --version | head -1
 
-      # Backstop: confirm the normalized working tree (and the committed blobs
-      # it came from) are LF. Catches a shell script ever committed with CRLF
-      # blobs, which .gitattributes cannot fix on checkout and which would break
-      # `#!/usr/bin/env bash` + make recipes for every Windows contributor.
-      - name: Assert LF line endings on shell-executed files
+      # The real regression guard: check the COMMITTED BLOBS, not the working
+      # tree. .gitattributes (eol=lf) + LF blobs is what guarantees every clone
+      # gets LF — so the invariant to protect is "no shell blob has CRLF". This
+      # is deterministic and immune to the checkout@v4 working-tree quirk above.
+      # Catches a script ever committed with CRLF, which .gitattributes cannot
+      # repair on checkout and which would break bash/make for Windows clones.
+      - name: Assert committed blobs are LF
         run: |
-          bad=$(git ls-files -- 'Makefile' '*.sh' '*.bash' | xargs -r grep -lU $'\r' || true)
+          bad=""
+          while IFS= read -r f; do
+            cr=$(git cat-file blob ":$f" | grep -cU $'\r' || true)
+            if [ "${cr:-0}" -gt 0 ]; then
+              bad="$bad$f"$'\n'
+            fi
+          done < <(git ls-files -- 'Makefile' '*.sh' '*.bash')
           if [ -n "$bad" ]; then
-            echo "::error::CRLF found in shell-executed files — Windows checkout corrupted them:"
-            echo "$bad"
+            echo "::error::CRLF found in committed blobs (breaks bash/make on every Windows clone):"
+            printf '%s' "$bad"
             exit 1
           fi
-          echo "All Makefiles and shell scripts are LF."
+          echo "All shell-executed blobs are LF."
 
       - name: make doctor
         run: make doctor
