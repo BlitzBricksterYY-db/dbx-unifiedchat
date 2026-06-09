@@ -37,7 +37,41 @@ Run `make doctor` to verify everything on your machine. It prints OS-specific in
 - Databricks CLI v0.294+
 - `git`, `make`, `jq`, `npm`
 - Databricks auth profile matching the profile in `agent_app/databricks.yml`
-- VPN access to `pypi-proxy.dev.databricks.com` (corp machines only)
+- Outbound HTTPS to `pypi.org`, `registry.npmjs.org`, `github.com`
+  (or a configured proxy / mirror — see [Behind a Corporate Proxy?](#behind-a-corporate-proxy) below)
+
+---
+
+## Behind a Corporate Proxy?
+
+If your company network blocks direct outbound HTTPS, `pip` / `uv` / `npm` / `git` will fail with timeouts or DNS errors. **The Makefile does not own this config** — it relies on the standard environment variables that every tool already reads. Put them in your shell once and every project benefits.
+
+Run `make doctor`. The outbound-connectivity probe tells you which case applies and prints the exact `export …` lines to paste into `~/.zshrc` (or `~/.bashrc`).
+
+| Case | What to add to `~/.zshrc` |
+|---|---|
+| Corporate HTTP(S) proxy | `export HTTPS_PROXY=http://proxy.example.com:8080`<br/>`export HTTP_PROXY=http://proxy.example.com:8080`<br/>`export NO_PROXY=localhost,127.0.0.1,.cloud.databricks.com` |
+| Internal PyPI mirror (e.g. Databricks corp machines) | `export UV_INDEX_URL=https://pypi-proxy.dev.databricks.com/simple/`<br/>`export PIP_INDEX_URL=https://pypi-proxy.dev.databricks.com/simple/` |
+| Internal npm registry | Add `registry=<url>` to `~/.npmrc` |
+
+After editing, open a new shell (or `source ~/.zshrc`) and re-run `make doctor` to confirm. There is no project-level proxy file to create or maintain.
+
+### Shortcut: `make set-mirror`
+
+Rather than hand-editing your rc, `make set-mirror` validates a value, re-probes it, and prints (or appends) the right `export` lines. It is **non-interactive and explicit** — you say which kind each value is, so it works in CI and never guesses:
+
+```bash
+# Internal PyPI index (sets UV_INDEX_URL + PIP_INDEX_URL):
+make set-mirror INDEX=https://pypi-proxy.dev.databricks.com/simple/
+
+# Corporate CONNECT proxy (sets HTTPS_PROXY + HTTP_PROXY):
+make set-mirror PROXY=http://proxy.corp.com:8080
+
+# Both at once, and append to your shell rc (with a timestamped backup):
+make set-mirror INDEX=https://.../simple/ PROXY=http://proxy:8080 APPLY=1
+```
+
+Default is print-only; pass `APPLY=1` to append to `~/.zshrc`/`~/.bashrc` (a `.bak-<timestamp>` is written first). `INDEX` is the most common corporate case (incl. Databricks-managed laptops); use `PROXY` only when you reach the public `pypi.org` through a proxy.
 
 ---
 

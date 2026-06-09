@@ -58,16 +58,19 @@ PYTHON ?= $(PYTHON_DEFAULT)
 NPM    ?= npm
 
 # ------------------------------------------------------------------------------
-# Internal package mirror
+# Proxy / package mirror — intentionally NOT set here.
 #
-# Databricks corp machines (Jamf-managed) blackhole pypi.org/npmjs.org/etc.
-# in /etc/hosts and require package traffic to go through the internal proxy.
-# Default both uv and pip to the proxy; overridable if you're on a non-corp
-# machine or pointing at a different mirror.
+# We deliberately do not default UV_INDEX_URL / PIP_INDEX_URL or any proxy
+# variables. pip, uv, npm, git, curl, and the Databricks CLI all already
+# read their own native config from the user's shell and home directory:
+#   - HTTPS_PROXY / HTTP_PROXY / NO_PROXY      (env, set in ~/.zshrc or ~/.bashrc)
+#   - ~/.pip/pip.conf  /  ~/.config/uv/uv.toml  (pip / uv mirror config)
+#   - ~/.npmrc                                  (npm registry config)
+#
+# `make doctor` runs a connectivity probe and prints the exact `export …`
+# command to add to your shell rc if outbound HTTPS to pypi.org / npm /
+# github is blocked. Set anything in your shell once; every project benefits.
 # ------------------------------------------------------------------------------
-UV_INDEX_URL  ?= https://pypi-proxy.dev.databricks.com/simple/
-PIP_INDEX_URL ?= https://pypi-proxy.dev.databricks.com/simple/
-export UV_INDEX_URL PIP_INDEX_URL
 
 # ------------------------------------------------------------------------------
 # Python installer detection: prefer uv > pip
@@ -189,6 +192,10 @@ doctor: ## Check every prerequisite and print OS-specific install hints
 		MAC="brew install git" \
 		WIN="winget install Git.Git" \
 		LIN="sudo apt install git"
+	@$(MAKE) -s _doctor-tool TOOL=jq LABEL="jq (JSON parser; used by local-dev scripts)" \
+		MAC="brew install jq" \
+		WIN="winget install jqlang.jq  (or: pacman -S jq from Git Bash/MSYS2)" \
+		LIN="sudo apt install jq"
 	@printf '\n'
 	@printf '%b\n' "$(CYAN)$(BOLD)Recommended tools$(RESET)"
 	@if command -v uv >/dev/null 2>&1; then \
@@ -224,6 +231,15 @@ doctor: ## Check every prerequisite and print OS-specific install hints
 		printf '  %bpyproject:%b     MISSING at $(APP_DIR)/pyproject.toml\n' "$(RED)" "$(RESET)"; \
 	fi
 	@printf '\n'
+	@printf '%b\n' "$(CYAN)$(BOLD)Proxy / mirror (from your shell)$(RESET)"
+	@printf '  HTTPS_PROXY:  %s\n' "$${HTTPS_PROXY:-<unset>}"
+	@printf '  HTTP_PROXY:   %s\n' "$${HTTP_PROXY:-<unset>}"
+	@printf '  NO_PROXY:     %s\n' "$${NO_PROXY:-<unset>}"
+	@printf '  UV_INDEX_URL: %s\n' "$${UV_INDEX_URL:-<unset — uv uses ~/.config/uv/uv.toml or PyPI>}"
+	@printf '  PIP_INDEX_URL:%s\n' "$${PIP_INDEX_URL:-<unset — pip uses ~/.pip/pip.conf or PyPI>}"
+	@printf '\n'
+	@$(MAKE) -s _doctor-connectivity
+	@printf '\n'
 	@printf '%b\n' "$(CYAN)$(BOLD)Databricks authentication$(RESET)"
 	@if command -v databricks >/dev/null 2>&1; then \
 		if databricks auth describe --output text >/dev/null 2>&1; then \
@@ -236,6 +252,77 @@ doctor: ## Check every prerequisite and print OS-specific install hints
 	fi
 	@printf '\n'
 	@printf '%b\n' "$(GREEN)Doctor check complete.$(RESET)"
+
+# Internal helper: probe outbound HTTPS to the three things every install needs.
+# When something fails, print the exact `export …` line the user should add
+# to their shell rc (~/.zshrc or ~/.bashrc). No project-level config files.
+.PHONY: _doctor-connectivity
+_doctor-connectivity:
+	@printf '%b\n' "$(CYAN)$(BOLD)Outbound connectivity$(RESET)"
+	@if ! command -v curl >/dev/null 2>&1; then \
+		printf '  %bcurl:%b not installed — skipping connectivity probe\n' "$(YELLOW)" "$(RESET)"; \
+		exit 0; \
+	fi; \
+	pypi_url="$${UV_INDEX_URL:-https://pypi.org/simple/}"; \
+	rc_file="$$([ -n "$$ZSH_VERSION" ] || [ "$$(basename $${SHELL:-})" = zsh ] && echo ~/.zshrc || echo ~/.bashrc)"; \
+	pypi_ok=0; npm_ok=0; gh_ok=0; \
+	curl -fsS --max-time 5 -o /dev/null "$$pypi_url" 2>/dev/null && pypi_ok=1 || true; \
+	curl -fsS --max-time 5 -o /dev/null "https://registry.npmjs.org/" 2>/dev/null && npm_ok=1 || true; \
+	curl -fsS --max-time 5 -o /dev/null "https://github.com" 2>/dev/null && gh_ok=1 || true; \
+	if [ "$$pypi_ok" = "1" ]; then \
+		printf '  %bPyPI:%b    reachable (%s)\n' "$(GREEN)" "$(RESET)" "$$pypi_url"; \
+	else \
+		printf '  %bPyPI:%b    UNREACHABLE (%s)\n' "$(RED)" "$(RESET)" "$$pypi_url"; \
+	fi; \
+	if [ "$$npm_ok" = "1" ]; then \
+		printf '  %bnpm:%b     reachable (registry.npmjs.org)\n' "$(GREEN)" "$(RESET)"; \
+	else \
+		printf '  %bnpm:%b     UNREACHABLE (registry.npmjs.org)\n' "$(RED)" "$(RESET)"; \
+	fi; \
+	if [ "$$gh_ok" = "1" ]; then \
+		printf '  %bGitHub:%b  reachable (github.com)\n' "$(GREEN)" "$(RESET)"; \
+	else \
+		printf '  %bGitHub:%b  UNREACHABLE (github.com)\n' "$(RED)" "$(RESET)"; \
+	fi; \
+	if [ "$$pypi_ok" = "0" ] && [ "$$npm_ok" = "0" ] && [ "$$gh_ok" = "0" ]; then \
+		printf '\n  %bAll three failed — you are almost certainly behind a corporate proxy.$(RESET)\n' "$(YELLOW)"; \
+		printf '  Add this to %s (ask your IT team for the proxy URL):\n' "$$rc_file"; \
+		printf '    %bexport HTTPS_PROXY=http://proxy.yourcompany.com:8080%b\n' "$(CYAN)" "$(RESET)"; \
+		printf '    %bexport HTTP_PROXY=http://proxy.yourcompany.com:8080%b\n' "$(CYAN)" "$(RESET)"; \
+		printf '    %bexport NO_PROXY=localhost,127.0.0.1,.cloud.databricks.com%b\n' "$(CYAN)" "$(RESET)"; \
+		printf '  Then: %bsource %s && make doctor%b\n' "$(CYAN)" "$$rc_file" "$(RESET)"; \
+	elif [ "$$pypi_ok" = "0" ] && [ "$$npm_ok" = "0" ]; then \
+		printf '\n  %bPyPI and npm blocked but GitHub works — corp machine forcing internal mirrors$(RESET)\n' "$(YELLOW)"; \
+		printf '  %b(e.g. Jamf-managed Databricks corp laptop).$(RESET)\n' "$(YELLOW)"; \
+		printf '  Add this to %s — Databricks-internal mirror URLs:\n' "$$rc_file"; \
+		printf '    %bexport UV_INDEX_URL=https://pypi-proxy.dev.databricks.com/simple/%b\n' "$(CYAN)" "$(RESET)"; \
+		printf '    %bexport PIP_INDEX_URL=https://pypi-proxy.dev.databricks.com/simple/%b\n' "$(CYAN)" "$(RESET)"; \
+		printf '  For npm, add to ~/.npmrc:\n'; \
+		printf '    %bregistry=<ask IT for the internal npm mirror URL>%b\n' "$(CYAN)" "$(RESET)"; \
+		printf '  Then: %bsource %s && make doctor%b\n' "$(CYAN)" "$$rc_file" "$(RESET)"; \
+	elif [ "$$pypi_ok" = "0" ]; then \
+		printf '\n  %bPyPI is unreachable but other endpoints work.$(RESET)\n' "$(YELLOW)"; \
+		printf '  Add to %s:\n' "$$rc_file"; \
+		printf '    %bexport UV_INDEX_URL=<your internal PyPI mirror>%b\n' "$(CYAN)" "$(RESET)"; \
+		printf '    %bexport PIP_INDEX_URL=<your internal PyPI mirror>%b\n' "$(CYAN)" "$(RESET)"; \
+		printf '  Databricks-internal: use https://pypi-proxy.dev.databricks.com/simple/\n'; \
+	elif [ "$$npm_ok" = "0" ]; then \
+		printf '\n  %bnpm is unreachable but other endpoints work.$(RESET)\n' "$(YELLOW)"; \
+		printf '  Add to ~/.npmrc:  %bregistry=<your internal npm mirror>%b\n' "$(CYAN)" "$(RESET)"; \
+	fi; \
+	if [ "$$pypi_ok" = "0" ]; then \
+		printf '\n  %bShortcut:%b make set-mirror INDEX=<url>  (or PROXY=<url>)  — validates, prints,\n' "$(CYAN)" "$(RESET)"; \
+		printf '            and with APPLY=1 appends the export lines to your shell rc for you.\n'; \
+	fi; \
+	if [ -n "$$MSYSTEM" ] && { [ "$$pypi_ok" = "0" ] || [ "$$npm_ok" = "0" ] || [ "$$gh_ok" = "0" ]; }; then \
+		printf '\n  %bWindows + PowerShell users:%b the `export …` lines above only persist inside Git Bash.\n' "$(YELLOW)" "$(RESET)"; \
+		printf '  To make the same values available in PowerShell + cmd.exe too, open PowerShell once and run:\n'; \
+		printf '    %bsetx HTTPS_PROXY  "<your proxy URL>"%b\n' "$(CYAN)" "$(RESET)"; \
+		printf '    %bsetx HTTP_PROXY   "<your proxy URL>"%b\n' "$(CYAN)" "$(RESET)"; \
+		printf '    %bsetx UV_INDEX_URL "<your PyPI mirror>"%b   (only if a mirror is needed)\n' "$(CYAN)" "$(RESET)"; \
+		printf '    %bsetx PIP_INDEX_URL "<your PyPI mirror>"%b\n' "$(CYAN)" "$(RESET)"; \
+		printf '  Then close and reopen all PowerShell + Git Bash windows.\n'; \
+	fi
 
 # Internal helper: print status of one tool with OS-specific install commands.
 .PHONY: _doctor-tool
@@ -333,38 +420,108 @@ python-install: ensure-installer ## Install agent_app Python package (editable, 
 	fi
 	$(call say,$(GREEN)Python dependencies installed.$(RESET))
 
-# Quick reachability check for the configured index — warn fast but don't block.
+# Quick reachability check for the effective pip/uv index — warn fast but don't block.
 .PHONY: _check-pypi
 _check-pypi:
 	@if ! command -v curl >/dev/null 2>&1; then exit 0; fi; \
-	if ! curl -fsS --max-time 5 -o /dev/null "$(UV_INDEX_URL)" 2>/dev/null; then \
-		printf '%b\n' "$(YELLOW)Warning: index $(UV_INDEX_URL) unreachable in 5s. Attempting anyway (uv/pip may have a cache)...$(RESET)"; \
+	url="$${UV_INDEX_URL:-https://pypi.org/simple/}"; \
+	if ! curl -fsS --max-time 5 -o /dev/null "$$url" 2>/dev/null; then \
+		printf '%b\n' "$(YELLOW)Warning: index $$url unreachable in 5s. Attempting anyway (uv/pip may have a cache)...$(RESET)"; \
 	fi
 
 # Actionable hints shown when the install fails or the index is unreachable.
+# pip/uv read config from env vars and ~/.pip/pip.conf — we do not own any
+# of that here. Point users at their shell rc rather than introducing a
+# project-level config file.
 .PHONY: _install-failure-hints
 _install-failure-hints:
-	@printf '\n%bCurrent index:%b %s\n' "$(CYAN)" "$(RESET)" "$(UV_INDEX_URL)"
-	@printf '\n%bLikely causes:%b\n' "$(CYAN)" "$(RESET)"
-	@printf '  1. Off corp network/VPN — the Databricks pypi proxy requires VPN.\n'
-	@printf '  2. Corporate proxy/firewall blocking outbound HTTPS.\n'
-	@printf '  3. Jamf /etc/hosts block and no internal mirror configured.\n'
-	@printf '  4. Offline or flaky wifi / DNS resolution failure.\n'
-	@printf '\n%bTry one of:%b\n' "$(CYAN)" "$(RESET)"
-	@printf '  # Check connectivity to the configured index\n'
-	@printf '    %bcurl -v %s%b\n' "$(CYAN)" "$(UV_INDEX_URL)" "$(RESET)"
-	@printf '\n'
-	@printf '  # Reconnect VPN (the Databricks pypi proxy is VPN-only), then retry:\n'
-	@printf '    %bmake python-install%b\n' "$(CYAN)" "$(RESET)"
-	@printf '\n'
-	@printf '  # Override the index (e.g. off-corp with access to public PyPI):\n'
-	@printf '    %bUV_INDEX_URL=https://pypi.org/simple/ make python-install%b\n' "$(CYAN)" "$(RESET)"
-	@printf '\n'
-	@printf '  # If behind a separate HTTP(S) proxy, export before retrying:\n'
-	@printf '    %bexport HTTPS_PROXY=http://your-proxy:8080%b\n' "$(CYAN)" "$(RESET)"
-	@printf '    %bexport HTTP_PROXY=http://your-proxy:8080%b\n' "$(CYAN)" "$(RESET)"
-	@printf '    %bmake python-install%b\n' "$(CYAN)" "$(RESET)"
-	@printf '\n'
+	@url="$${UV_INDEX_URL:-https://pypi.org/simple/ (default)}"; \
+	rc_file="$$([ -n "$$ZSH_VERSION" ] || [ "$$(basename $${SHELL:-})" = zsh ] && echo ~/.zshrc || echo ~/.bashrc)"; \
+	printf '\n%bCurrent settings (from your shell):%b\n' "$(CYAN)" "$(RESET)"; \
+	printf '  UV_INDEX_URL: %s\n' "$$url"; \
+	printf '  HTTPS_PROXY:  %s\n' "$${HTTPS_PROXY:-<unset>}"; \
+	printf '\n%bLikely causes:%b\n' "$(CYAN)" "$(RESET)"; \
+	printf '  1. Corporate proxy/firewall blocking outbound HTTPS to pypi.org.\n'; \
+	printf '  2. Databricks-internal user on corp machine — public PyPI is blocked.\n'; \
+	printf '  3. Off VPN (only relevant if you point at a VPN-only mirror).\n'; \
+	printf '  4. Offline / flaky wifi / DNS resolution failure.\n'; \
+	printf '\n%bFix in your shell rc (%s), then open a new shell:%b\n' "$(CYAN)" "$$rc_file" "$(RESET)"; \
+	printf '  Behind a proxy (ask IT for the URL):\n'; \
+	printf '    %bexport HTTPS_PROXY=http://proxy.yourcompany.com:8080%b\n' "$(CYAN)" "$(RESET)"; \
+	printf '    %bexport HTTP_PROXY=http://proxy.yourcompany.com:8080%b\n' "$(CYAN)" "$(RESET)"; \
+	printf '  Databricks-internal user on corp machine:\n'; \
+	printf '    %bexport UV_INDEX_URL=https://pypi-proxy.dev.databricks.com/simple/%b\n' "$(CYAN)" "$(RESET)"; \
+	printf '    %bexport PIP_INDEX_URL=https://pypi-proxy.dev.databricks.com/simple/%b\n' "$(CYAN)" "$(RESET)"; \
+	if [ -n "$$MSYSTEM" ]; then \
+		printf '\n%bWindows + PowerShell users:%b the bash `export` lines above only persist inside\n' "$(YELLOW)" "$(RESET)"; \
+		printf 'Git Bash. To persist in PowerShell too, run once from a PowerShell window:\n'; \
+		printf '  %bsetx HTTPS_PROXY  "<your proxy URL>"%b\n' "$(CYAN)" "$(RESET)"; \
+		printf '  %bsetx UV_INDEX_URL "<your PyPI mirror>"%b\n' "$(CYAN)" "$(RESET)"; \
+		printf '  %bsetx PIP_INDEX_URL "<your PyPI mirror>"%b\n' "$(CYAN)" "$(RESET)"; \
+		printf 'Then close and reopen all PowerShell + Git Bash windows.\n'; \
+	fi; \
+	printf '\n%bDebug:%b\n' "$(CYAN)" "$(RESET)"; \
+	printf '  %bmake doctor%b   # re-runs the connectivity probe\n' "$(CYAN)" "$(RESET)"; \
+	printf '  %bcurl -v %s%b\n' "$(CYAN)" "$$url" "$(RESET)"; \
+	printf '\n  %bShortcut:%b make set-mirror INDEX=<url>   # validate + print (APPLY=1 writes them for you)\n' "$(CYAN)" "$(RESET)"; \
+	printf '\n'
+
+# Non-interactive helper to record a PyPI index mirror and/or proxy.
+# Explicit by design: you say which kind each value is (INDEX vs PROXY) — the
+# helper never guesses and never prompts, so it is safe in CI and scripts.
+# Default is print-only; APPLY=1 appends to your shell rc (with a backup first).
+.PHONY: set-mirror
+set-mirror: ## Configure PyPI mirror/proxy: INDEX=<url> and/or PROXY=<url> [APPLY=1]
+	@idx='$(INDEX)'; prx='$(PROXY)'; \
+	if [ -z "$$idx" ] && [ -z "$$prx" ]; then \
+		printf '%b\n' "$(YELLOW)Usage:$(RESET) make set-mirror INDEX=<pypi-index-url> [PROXY=<http-proxy-url>] [APPLY=1]"; \
+		printf '\n'; \
+		printf '  %bINDEX%b   internal PyPI simple-API URL  -> sets UV_INDEX_URL + PIP_INDEX_URL\n' "$(CYAN)" "$(RESET)"; \
+		printf '          e.g. https://pypi-proxy.dev.databricks.com/simple/\n'; \
+		printf '  %bPROXY%b   HTTP(S) CONNECT proxy          -> sets HTTPS_PROXY + HTTP_PROXY\n' "$(CYAN)" "$(RESET)"; \
+		printf '          e.g. http://proxy.corp.com:8080\n'; \
+		printf '  %bAPPLY=1%b append the export lines to your shell rc (default: print only)\n' "$(CYAN)" "$(RESET)"; \
+		printf '\n  Use INDEX when pypi.org is blocked and your company hosts its own index.\n'; \
+		printf '  Use PROXY when you reach the public pypi.org through a corporate proxy.\n'; \
+		exit 1; \
+	fi; \
+	case "$$idx" in ""|http://*|https://*) : ;; *) printf '%b\n' "$(RED)INDEX must start with http:// or https:// (got: $$idx)$(RESET)"; exit 1 ;; esac; \
+	case "$$prx" in ""|http://*|https://*) : ;; *) printf '%b\n' "$(RED)PROXY must start with http:// or https:// (got: $$prx)$(RESET)"; exit 1 ;; esac; \
+	lines=""; \
+	if [ -n "$$idx" ]; then \
+		printf '%b\n' "$(CYAN)Re-probing index: $$idx$(RESET)"; \
+		if command -v curl >/dev/null 2>&1 && curl -fsS --max-time 8 -o /dev/null "$$idx" 2>/dev/null; then \
+			printf '  %breachable%b\n' "$(GREEN)" "$(RESET)"; \
+		else \
+			printf '  %bnot OK in 8s (may be auth-gated or wrong — recording anyway)%b\n' "$(YELLOW)" "$(RESET)"; \
+		fi; \
+		lines="$$lines""export UV_INDEX_URL=$$idx\nexport PIP_INDEX_URL=$$idx\n"; \
+	fi; \
+	if [ -n "$$prx" ]; then \
+		printf '%b\n' "$(CYAN)Re-probing pypi.org through proxy: $$prx$(RESET)"; \
+		if command -v curl >/dev/null 2>&1 && HTTPS_PROXY="$$prx" HTTP_PROXY="$$prx" curl -fsS --max-time 8 -o /dev/null "https://pypi.org/simple/" 2>/dev/null; then \
+			printf '  %breachable via proxy%b\n' "$(GREEN)" "$(RESET)"; \
+		else \
+			printf '  %bpypi.org not reachable through proxy in 8s (recording anyway)%b\n' "$(YELLOW)" "$(RESET)"; \
+		fi; \
+		lines="$$lines""export HTTPS_PROXY=$$prx\nexport HTTP_PROXY=$$prx\n"; \
+	fi; \
+	rc_file="$$([ -n "$$ZSH_VERSION" ] || [ "$$(basename $${SHELL:-})" = zsh ] && echo ~/.zshrc || echo ~/.bashrc)"; \
+	printf '\n%bExport lines:%b\n' "$(CYAN)" "$(RESET)"; \
+	printf '%b' "$$lines"; \
+	if [ "$(APPLY)" = "1" ]; then \
+		ts=$$(date +%Y%m%d-%H%M%S 2>/dev/null || echo backup); \
+		[ -f "$$rc_file" ] && cp "$$rc_file" "$$rc_file.bak-$$ts"; \
+		{ printf '\n# added by make set-mirror %s\n' "$$ts"; printf '%b' "$$lines"; } >> "$$rc_file"; \
+		printf '\n%bAppended to %s%b (backup: %s.bak-%s). Then run: %bsource %s%b\n' "$(GREEN)" "$$rc_file" "$(RESET)" "$$rc_file" "$$ts" "$(CYAN)" "$$rc_file" "$(RESET)"; \
+	else \
+		printf '\n%bPrinted only.%b Paste into %s, or re-run with %bAPPLY=1%b to append automatically.\n' "$(YELLOW)" "$(RESET)" "$$rc_file" "$(CYAN)" "$(RESET)"; \
+		if [ -n "$$MSYSTEM" ]; then \
+			printf '  %bWindows:%b also persist for PowerShell/cmd:\n' "$(YELLOW)" "$(RESET)"; \
+			[ -n "$$idx" ] && printf '    setx UV_INDEX_URL "%s" && setx PIP_INDEX_URL "%s"\n' "$$idx" "$$idx"; \
+			[ -n "$$prx" ] && printf '    setx HTTPS_PROXY "%s" && setx HTTP_PROXY "%s"\n' "$$prx" "$$prx"; \
+		fi; \
+	fi
 
 .PHONY: fe-install
 fe-install: ## Install frontend (Next.js) dependencies
@@ -659,7 +816,8 @@ info: ## Show environment snapshot
 	@printf '  Shell:        %s\n' "$$SHELL"
 	@printf '  Python:       %s\n' "$$($(PYTHON) --version 2>&1 || echo 'not found')"
 	@printf '  Installer:    %s\n' "$(INSTALLER_NAME)"
-	@printf '  Index URL:    %s\n' "$(UV_INDEX_URL)"
+	@printf '  Index URL:    %s\n' "$${UV_INDEX_URL:-<unset — uv default (PyPI or ~/.config/uv/uv.toml)>}"
+	@printf '  HTTPS_PROXY:  %s\n' "$${HTTPS_PROXY:-<unset>}"
 	@printf '  uv:           %s\n' "$$(uv --version 2>&1 || echo 'not installed')"
 	@printf '  pip:          %s\n' "$$($(PYTHON) -m pip --version 2>&1 | head -1 || echo 'not installed')"
 	@printf '  Node:         %s\n' "$$(node --version 2>&1 || echo 'not installed')"
@@ -682,7 +840,8 @@ help: ## Show this help message
 	@printf '\n%b\n' "$(CYAN)$(BOLD)DBX-UnifiedChat$(RESET) — Developer Makefile"
 	@printf '\n'
 	@printf '%bQuick start (read this first):%b\n' "$(YELLOW)" "$(RESET)"
-	@printf '  1. %bmake doctor%b           — check prerequisites\n' "$(CYAN)" "$(RESET)"
+	@printf '  1. %bmake doctor%b           — check prerequisites + outbound connectivity\n' "$(CYAN)" "$(RESET)"
+	@printf '     (if behind a corporate proxy, doctor prints the exact %bexport …%b lines for your ~/.zshrc)\n' "$(CYAN)" "$(RESET)"
 	@printf '  2. %bmake setup%b            — install Python + frontend deps, seed databricks.local.yml\n' "$(CYAN)" "$(RESET)"
 	@printf '  3. %bdatabricks auth login --profile <profile>%b — auth against the workspace in $(APP_DIR)/databricks.yml\n' "$(CYAN)" "$(RESET)"
 	@printf '  4. %bmake dev-local%b        — local bootstrap (creates $(APP_DIR)/.env)\n' "$(CYAN)" "$(RESET)"

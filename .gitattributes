@@ -1,0 +1,15 @@
+# Line-ending policy.
+#
+# Keep shell-executed files LF on every platform. Git for Windows defaults to
+# core.autocrlf=true, which would otherwise rewrite these to CRLF on checkout
+# and break them under Git Bash / WSL:
+#   - `#!/usr/bin/env bash\r`  -> "bad interpreter: No such file or directory"
+#   - GNU make recipes with a trailing \r  -> "command not found" on the CR
+#
+# Without this file the Makefile and agent_app/scripts/*.sh silently break for
+# Windows users even though `make doctor` reports a healthy environment.
+Makefile     text eol=lf
+*.sh         text eol=lf
+*.bash       text eol=lf
+*.yml        text eol=lf
+*.yaml       text eol=lf
